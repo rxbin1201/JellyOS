@@ -22,7 +22,7 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     EFI_LOADED_IMAGE_PROTOCOL *LoadedImage;
     EFI_DEVICE_PATH *DevicePath;
 
-    CHAR16 *FilePath = L"\\EFI\\JellyBoot\\JellyBoot.EFI";
+    CHAR16 *FilePath = L"\\EFI\\JellyBoot\\JellyBoot.efi";
 
     // Get the loaded image protocol for the current image
     Status = uefi_call_wrapper(
