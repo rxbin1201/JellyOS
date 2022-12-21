@@ -4,10 +4,8 @@ OBJECT_FILES := $(patsubst Sources/%.c, Build/%.o, $(SOURCE_FILES))
 CC = gcc
 LD = ld
 
-LIB_DIR = Libraries
-
-EFI_CFLAGS =-fno-stack-protector -fpic -fshort-wchar -mno-red-zone -I $(LIB_DIR)/gnu-efi/inc/ -I Sources/ -DEFI_FUNCTION_WRAPPER
-EFI_LDFLAGS =$(LIB_DIR)/gnu-efi/x86_64/crt0-efi-x86_64.o -nostdlib -znocombreloc -T $(LIB_DIR)/gnu-efi/x86_64/elf_x86_64_efi.lds -shared -Bsymbolic -L $(LIB_DIR)/gnu-efi/x86_64/ -l:libgnuefi.a -l:libefi.a -z noexecstack
+EFI_CFLAGS =-fno-stack-protector -fpic -fshort-wchar -mno-red-zone -I gnu-efi/inc/ -I Sources/ -DEFI_FUNCTION_WRAPPER
+EFI_LDFLAGS =gnu-efi/x86_64/crt0-efi-x86_64.o -nostdlib -znocombreloc -T gnu-efi/x86_64/elf_x86_64_efi.lds -shared -Bsymbolic -L gnu-efi/x86_64/ -l:libgnuefi.a -l:libefi.a -z noexecstack
 
 $(OBJECT_FILES): Build/%.o : Sources/%.c
 	mkdir -p $(dir $@) && \
