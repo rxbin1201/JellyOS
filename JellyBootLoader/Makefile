@@ -1,5 +1,5 @@
 SOURCE_FILES := $(shell find Sources -name *.c)
-OBJECT_FILES := $(patsubst Sources/%.c, Build/JellyBootLoader/%.o, $(SOURCE_FILES))
+OBJECT_FILES := $(patsubst Sources/%.c, Build/%.o, $(SOURCE_FILES))
 
 CC = gcc
 LD = ld
