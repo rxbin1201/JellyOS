@@ -20,6 +20,6 @@ If you have any ideas I should add let me know
 
 ## JellyBoot Loader
 
-The JellyBoot Loader is located at '\\EFI\\BOOT\\BOOTX64.EFI'
+The JellyBoot Loader is located at '\\EFI\\BOOT\\BOOTX64.EFI'\n
 It loads `\\EFI\\JellyBoot\\JellyBoot.EFI` located on the boot device such as a usb drive
 
