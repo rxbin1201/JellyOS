@@ -1,0 +1,25 @@
+## @file
+#  TODO: Brief Description of Package JellyBoot
+#  
+#  TODO: Detailed Description of Package JellyBoot
+#
+#  TODO: Copyright for Pacvkage JellyBoot
+#  
+#  TODO: License for Package JellyBoot
+#  
+##
+
+[Defines]
+  DEC_SPECIFICATION = 0x00010005
+  PACKAGE_NAME      = JellyBoot
+  PACKAGE_GUID      = b51057d1-8174-11ed-8a24-010101010000
+  PACKAGE_VERSION   = 0.1
+
+[Includes]
+  Sources
+
+[LibraryClasses]
+
+[Protocols]
+
+[Guids]
