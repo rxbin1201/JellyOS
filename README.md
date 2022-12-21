@@ -28,4 +28,4 @@ It loads `\\EFI\\JellyBoot\\JellyBoot.EFI` located on the boot device such as a 
 
 It is the main uefi bootloader that loads the system and has some other function.
 
-It is located at '\\EFI\\JellyBoot'.
+It is located at '\\EFI\\JellyBoot' and to compile it I use edk2.
