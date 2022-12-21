@@ -17,3 +17,8 @@ The operating system is written mainly with C
 
 If you have any ideas I should add let me know
 
+
+## JellyBoot Loader
+
+It loads `\\EFI\\JellyBoot\\JellyBoot.EFI` located on the boot device such as a usb drive
+
