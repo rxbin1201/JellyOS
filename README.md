@@ -11,6 +11,7 @@ The operating system is written mainly with C.
 - UEFI Bootloader
 - Only supports x64 processors
 - More coming soon
+- UEFI Bootloader supports PSF1 Font File
 
 
 ## Feedback
