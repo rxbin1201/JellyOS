@@ -14,6 +14,9 @@
 
 [Sources]
     main.c
+    file.c
+    print.c
+    psf1.c
 
 [BuildOptions]
 

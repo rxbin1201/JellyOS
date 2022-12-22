@@ -1,19 +1,28 @@
 /*
 
     JellyBoot - main.c
-    JellyBoot.EFI
+    JellyBoot.efi
 
 */
 
 // Include libraries
-#include <Uefi.h>
-#include <Library/UefiLib.h>
+#include <JellyBoot/main.h>
 
 EFI_STATUS
 EFIAPI
 UefiMain(IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable) {
-    
-    Print(L"Hello from JellyBoot!\n");
+
+    // Define variables
+    FRAME_BUFFER *NewFrameBuffer = InitGraphicsOutputProtocol(SystemTable);
+
+    // Load font file
+    PSF1_FONT *DefaultFont = LoadFont(NULL, L"\\EFI\\JellyBoot\\Fonts\\DefaultFont.psf", ImageHandle, SystemTable);
+    if(DefaultFont == NULL) {
+        Print(L"Font is not valid or not found!\n");
+    }
+
+    // Print with new font
+    PrintLine(NewFrameBuffer, DefaultFont, 0xffffffff, "Hello");
 
     while(1){};
 
