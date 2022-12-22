@@ -31,4 +31,4 @@ It is the main uefi bootloader that loads the system and has some other function
 
 It is located at `\\EFI\\JellyBoot` and to compile it I use edk2.
 
-In order for the font from the .psf file to be recognized, it must be located under `EFI\\JellyBoot\\Fonts\\DefaultFont.psf`
+In order for the font from the .psf file to be recognized, it must be located under `\\EFI\\JellyBoot\\Fonts\\DefaultFont.psf`
