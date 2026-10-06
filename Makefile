@@ -1,7 +1,7 @@
 # JellyOS top-level build
 #
 #   make        build boot manager and kernel into build/esp
-#   make run    boot in QEMU + OVMF (serial on stdio)
+#   make run    boot in QEMU + OVMF (serial on stdio), KVM=1 for hardware virtualization
 #   make debug  like run, but wait for GDB on :1234
 #   make clean  remove build output
 
@@ -50,8 +50,15 @@ KERNEL_LDS     := kernel/arch/x86_64/linker.ld
 KERNEL_ELF     := $(BUILD)/kernel.elf
 KERNEL_ESP     := $(ESP)/boot/kernels/kernel-current.elf
 
+SDK_INC        := sdk/include
+
+# Kernel symbols for stack traces: link once with an empty table, generate the
+# table from that image, link again and verify that no function moved.
+KSYMS_DIR      := $(BUILD)/ksyms
+KSYMS_TOOL     := tools/debugger/ksyms.py
+
 KERNEL_CFLAGS := -std=gnu11 -O2 -g -Wall -Wextra -Werror \
-                 -Ikernel -I$(PROTOCOL_INC) \
+                 -Ikernel -I$(PROTOCOL_INC) -I$(SDK_INC) \
                  -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
                  -mcmodel=kernel -mno-red-zone -mgeneral-regs-only \
                  -fno-omit-frame-pointer \
@@ -72,6 +79,11 @@ QEMU_FLAGS := -machine q35 -m 512M -no-reboot \
               -drive if=pflash,format=raw,file=$(VARS_COPY) \
               -drive format=raw,file=fat:rw:$(ESP) \
               -serial stdio -net none
+
+# make run KVM=1: hardware virtualization with the host CPU (needs /dev/kvm)
+ifeq ($(KVM),1)
+QEMU_FLAGS += -enable-kvm -cpu host
+endif
 
 # --- Targets -----------------------------------------------------------------
 
@@ -100,8 +112,23 @@ $(BUILD)/kernel/%.o: kernel/%
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
-$(KERNEL_ELF): $(KERNEL_OBJS) $(KERNEL_LDS)
-	$(LD) $(KERNEL_LDFLAGS) $(KERNEL_OBJS) -o $@
+$(KSYMS_DIR)/empty.c: $(KSYMS_TOOL)
+	@mkdir -p $(@D)
+	python3 $(KSYMS_TOOL) --empty > $@
+
+$(KSYMS_DIR)/%.o: $(KSYMS_DIR)/%.c
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(KSYMS_DIR)/pass1.elf: $(KERNEL_OBJS) $(KSYMS_DIR)/empty.o $(KERNEL_LDS)
+	$(LD) $(KERNEL_LDFLAGS) $(KERNEL_OBJS) $(KSYMS_DIR)/empty.o -o $@
+
+$(KSYMS_DIR)/table.c: $(KSYMS_DIR)/pass1.elf $(KSYMS_TOOL)
+	nm -n --defined-only $< | python3 $(KSYMS_TOOL) > $@
+
+$(KERNEL_ELF): $(KERNEL_OBJS) $(KSYMS_DIR)/table.o $(KERNEL_LDS)
+	$(LD) $(KERNEL_LDFLAGS) $(KERNEL_OBJS) $(KSYMS_DIR)/table.o -o $@
+	@nm -n --defined-only $@ | python3 $(KSYMS_TOOL) | cmp -s - $(KSYMS_DIR)/table.c || \
+	    { echo "error: kernel symbol table does not match the final link"; rm -f $@; exit 1; }
 
 $(KERNEL_ESP): $(KERNEL_ELF)
 	@mkdir -p $(@D)

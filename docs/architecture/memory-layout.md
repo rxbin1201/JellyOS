@@ -47,7 +47,10 @@ APIC, HPET) is covered, and it is rounded up to whole GiB.
   there, and the kernel must drop them.
 - Everything in the direct map is cached write-back. MMIO and the framebuffer
   must get proper cache attributes (UC or WC via PAT) once the kernel builds its
-  own tables in Phase 3.
+  own tables in Phase 3. Until then, `early_map_mmio()` marks individual
+  direct-map pages as uncached (see x86_64.md).
+- The kernel switches to its own 64 KiB stack in `.bss` at entry. The boot
+  stack is no longer used after that.
 - The boot page tables live in `BOOTLOADER_RECLAIMABLE` memory. The kernel
   replaces them with its own before it reclaims that memory.
 - The boot stack has no guard page. The kernel switches to its own stacks early.

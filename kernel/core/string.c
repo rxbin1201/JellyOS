@@ -2,7 +2,8 @@
  * Freestanding memory routines. The compiler may emit calls to these.
  */
 
-#include <stddef.h>
+#include "core/string.h"
+
 #include <stdint.h>
 
 void *memset(void *dest, int value, size_t count)
@@ -43,6 +44,32 @@ int memcmp(const void *a, const void *b, size_t count)
     for (; count; count--, x++, y++) {
         if (*x != *y)
             return *x - *y;
+    }
+    return 0;
+}
+
+size_t strlen(const char *s)
+{
+    size_t n = 0;
+    while (s[n])
+        n++;
+    return n;
+}
+
+int strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+int strncmp(const char *a, const char *b, size_t count)
+{
+    for (; count; count--, a++, b++) {
+        if (*a != *b || !*a)
+            return (unsigned char)*a - (unsigned char)*b;
     }
     return 0;
 }

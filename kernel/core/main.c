@@ -1,174 +1,114 @@
 /*
- * JellyOS kernel entry (Phase 1 handoff stub).
+ * JellyOS kernel entry (Phase 2: minimal kernel).
  *
- * Verifies the boot_info_t contract and reports what the boot manager passed.
- * Real initialization (GDT, IDT, exceptions, ...) starts in Phase 2.
+ * Brings up the boot CPU (descriptor tables, exceptions, interrupt
+ * controller, timer) and idles with interrupts enabled. Memory management
+ * follows in Phase 3.
  */
 
 #include "core/arch.h"
+#include "core/boot.h"
+#include "core/cmdline.h"
+#include "core/log.h"
+#include "core/panic.h"
+#include "core/string.h"
+#include "time/clock.h"
 
-#include <jelly/boot_info.h>
-#include <stddef.h>
-#include <stdint.h>
+#define KERNEL_VERSION   "0.2.0"
+#define TIMER_CHECK_MS   100
 
-#define KERNEL_REQUIRED_BOOT_VERSION 1
+static const char *const boot_modes[] = { "normal", "previous kernel", "recovery", "manual" };
 
-static void print(const char *s)
+static void apply_log_level(void)
 {
-    arch_early_console_write(s);
+    static const struct { const char *name; klog_level_t level; } levels[] = {
+        { "debug", KLOG_DEBUG }, { "info", KLOG_INFO }, { "warn", KLOG_WARN }, { "error", KLOG_ERROR },
+    };
+    char value[16];
+
+    if (!cmdline_value("loglevel", value, sizeof(value)))
+        return;
+    for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+        if (strcmp(value, levels[i].name) == 0) {
+            klog_set_console_level(levels[i].level);
+            return;
+        }
+    }
+    klog_warn("unknown loglevel '%s'", value);
 }
 
-static void print_hex(uint64_t value)
+static void log_boot_info(const boot_info_t *info)
 {
-    char buf[19] = "0x";
-    for (int i = 0; i < 16; i++)
-        buf[2 + i] = "0123456789abcdef"[(value >> (60 - 4 * i)) & 0xF];
-    buf[18] = '\0';
-    print(buf);
-}
-
-static void print_dec(uint64_t value)
-{
-    char buf[21];
-    int i = 20;
-
-    buf[i] = '\0';
-    do {
-        buf[--i] = (char)('0' + value % 10);
-        value /= 10;
-    } while (value);
-    print(&buf[i]);
-}
-
-static const void *phys_to_virt(const boot_info_t *info, uint64_t phys)
-{
-    return (const void *)(uintptr_t)(info->hhdm_base + phys);
-}
-
-static int boot_info_valid(const boot_info_t *info)
-{
-    return info && info->magic == BOOT_INFO_MAGIC &&
-           info->version >= KERNEL_REQUIRED_BOOT_VERSION &&
-           info->size >= sizeof(boot_info_t) &&
-           info->memory.entry_size >= sizeof(boot_memory_entry_t);
-}
-
-static void report_memory(const boot_info_t *info)
-{
-    const uint8_t *entries = phys_to_virt(info, info->memory.entries_phys);
-    uint64_t usable = 0, reclaimable = 0;
+    uint64_t usable = 0;
+    const uint8_t *entries = boot_phys_to_virt(info->memory.entries_phys);
 
     for (uint64_t i = 0; i < info->memory.entry_count; i++) {
         const boot_memory_entry_t *e = (const void *)(entries + i * info->memory.entry_size);
         if (e->type == BOOT_MEMORY_USABLE)
             usable += e->length;
-        else if (e->type == BOOT_MEMORY_BOOTLOADER_RECLAIMABLE)
-            reclaimable += e->length;
     }
 
-    print("memory map:   ");
-    print_dec(info->memory.entry_count);
-    print(" entries, ");
-    print_dec(usable / (1024 * 1024));
-    print(" MiB usable, ");
-    print_dec(reclaimable / (1024 * 1024));
-    print(" MiB reclaimable\n");
+    klog_info("boot: protocol %u, cmdline \"%s\"", info->version, cmdline_get());
+    if (boot_has_field(entry_name))
+        klog_info("boot: entry '%s' (%s)", info->entry_name,
+                  info->boot_mode < 4 ? boot_modes[info->boot_mode] : "unknown");
+    klog_info("boot: kernel at phys %p, %lu MiB usable memory in %lu regions",
+              (void *)info->kernel.phys_base, usable >> 20, info->memory.entry_count);
+    if (boot_has_field(log_length))
+        klog_debug("boot: %lu bytes of boot manager log available", info->log_length);
 }
 
-/* Fields appended in boot_info_t version 2. */
-static void report_v2(const boot_info_t *info)
+/* Wait until the timer has advanced, proving interrupts and EOI work. */
+static void check_timer(void)
 {
-    static const char *const modes[] = { "normal", "previous kernel", "recovery", "manual" };
+    uint64_t start = clock_monotonic_ns();
 
-    if (info->version < 2 || info->size < offsetof(boot_info_t, log_length) + sizeof(info->log_length))
+    while (clock_monotonic_ns() - start < TIMER_CHECK_MS * 1000000ull)
+        arch_wait_for_interrupt();
+    klog_info("time: timer running, %lu ticks after %u ms", clock_ticks(), TIMER_CHECK_MS);
+}
+
+static void run_crash_test(void)
+{
+    char kind[32];
+
+    if (!cmdline_value("crashtest", kind, sizeof(kind)))
         return;
 
-    print("entry:        ");
-    print(info->entry_name);
-    print(" (");
-    print(info->boot_mode < 4 ? modes[info->boot_mode] : "unknown");
-    print(")\n");
-
-    print("cpu:          ");
-    print(info->cpu.brand[0] ? info->cpu.brand : info->cpu.vendor);
-    print(", ");
-    print_dec(info->cpu.logical_cpus);
-    print(" logical CPUs\n");
-
-    print("modules:      ");
-    print_dec(info->modules.module_count);
-    print("\n");
-
-    print("boot log:     ");
-    print_dec(info->log_length);
-    print(" bytes from the boot manager\n");
+    klog_warn("crashtest: triggering '%s'", kind);
+    if (strcmp(kind, "panic") == 0)
+        panic("crashtest requested a panic");
+    if (strcmp(kind, "assert") == 0)
+        ASSERT(strcmp(kind, "assert") != 0);
+    if (!arch_crash_test(kind))
+        klog_warn("crashtest: unknown kind '%s'", kind);
+    else
+        klog_info("crashtest: '%s' returned, execution continues", kind);
 }
 
-static void fill_framebuffer(const boot_info_t *info)
-{
-    const boot_framebuffer_t *fb = &info->framebuffer;
-
-    if (!fb->phys_base || fb->bpp != 32)
-        return;
-
-    /* JellyOS purple, encoded with the pixel layout reported by the boot manager. */
-    uint32_t color = (0x6Au << fb->red_shift) | (0x4Cu << fb->green_shift) | (0x93u << fb->blue_shift);
-    uint8_t *base = (uint8_t *)(uintptr_t)(info->hhdm_base + fb->phys_base);
-
-    for (uint32_t y = 0; y < fb->height; y++) {
-        uint32_t *row = (uint32_t *)(base + (uint64_t)y * fb->pitch);
-        for (uint32_t x = 0; x < fb->width; x++)
-            row[x] = color;
-    }
-}
-
-void kernel_main(const boot_info_t *info)
+void kernel_main(const boot_info_t *loader_info)
 {
     arch_early_console_init();
-    print("\nJellyOS kernel started\n");
 
-    if (!boot_info_valid(info)) {
-        print("panic: invalid or incompatible boot_info\n");
-        arch_halt();
-    }
+    if (!boot_accept(loader_info))
+        panic("invalid or incompatible boot_info (magic, version or size)");
 
-    print("boot_info:    version ");
-    print_dec(info->version);
-    print(", ");
-    print_dec(info->size);
-    print(" bytes\n");
+    const boot_info_t *info = boot_info();
+    cmdline_init(boot_phys_to_virt(info->cmdline_phys));
+    apply_log_level();
 
-    print("cmdline:      ");
-    print(phys_to_virt(info, info->cmdline_phys));
-    print("\n");
+    klog_info("JellyOS kernel " KERNEL_VERSION " starting");
+    log_boot_info(info);
 
-    print("kernel:       phys ");
-    print_hex(info->kernel.phys_base);
-    print(" -> virt ");
-    print_hex(info->kernel.virt_base);
-    print("\n");
+    status_t status = arch_init(info);
+    if (STATUS_IS_ERROR(status))
+        panic("architecture initialization failed: %s", status_name(status));
 
-    print("direct map:   ");
-    print_hex(info->hhdm_base);
-    print(", ");
-    print_dec(info->hhdm_size >> 30);
-    print(" GiB\n");
+    arch_interrupts_enable();
+    check_timer();
+    run_crash_test();
 
-    report_memory(info);
-
-    print("framebuffer:  ");
-    print_dec(info->framebuffer.width);
-    print("x");
-    print_dec(info->framebuffer.height);
-    print("\n");
-
-    print("ACPI RSDP:    ");
-    print_hex(info->acpi.rsdp_phys);
-    print("\n");
-
-    report_v2(info);
-    fill_framebuffer(info);
-
-    print("Phase 1 handoff complete, halting.\n");
-    arch_halt();
+    klog_info("kernel: Phase 2 initialization complete, idling");
+    for (;;)
+        arch_wait_for_interrupt();
 }

@@ -24,10 +24,12 @@ SECTIONS
     . = KERNEL_VMA;
     __kernel_start = .;
 
+    __text_start = .;
     .text : {
         *(.text.entry)
         *(.text .text.*)
     } :text
+    __text_end = .;
 
     . = ALIGN(4096);
     .rodata : {
