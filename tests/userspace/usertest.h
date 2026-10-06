@@ -23,7 +23,12 @@ enum {
     SCENARIO_MEMORY             = 14,
     SCENARIO_RIGHTS             = 15,
     SCENARIO_EXIT_WITH_THREADS  = 16,
+    SCENARIO_FILES              = 17, /* file system calls on the test disk */
+    SCENARIO_UNPRIVILEGED       = 18, /* run with uid 1000: permission checks */
 };
+
+#define TEST_VOLUME            "/volumes/virtio0p1"
+#define ROOT_ONLY_FILE         "/tmp/root-only"
 
 #define SHM_TEST_SIZE          8192
 #define FPU_DURATION_NS        100000000ULL /* 100 ms = 10 timeslices */

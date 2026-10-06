@@ -25,6 +25,7 @@ typedef enum {
     OBJECT_EVENT         = 3,
     OBJECT_CHANNEL       = 4,
     OBJECT_SHARED_MEMORY = 5,
+    OBJECT_FILE          = 6,
 } object_type_t;
 
 struct object;

@@ -8,6 +8,7 @@
  */
 
 #include <jelly/os.h>
+#include <stdbool.h>
 
 #include "usertest.h"
 
@@ -275,6 +276,103 @@ static int rights(void)
     return 0;
 }
 
+/* --- Files (syscall ABI version 2) -------------------------------------------- */
+
+static size_t text_length(const char *s)
+{
+    size_t n = 0;
+    while (s[n])
+        n++;
+    return n;
+}
+
+static bool text_is(const char *buffer, size_t size, const char *expected)
+{
+    return size == text_length(expected) && bytes_equal(buffer, expected, size);
+}
+
+static int files(void)
+{
+    char buffer[128];
+    size_t size;
+    uint64_t position;
+    jelly_handle_t file, dir;
+    jelly_stat_t stat;
+    jelly_dirent_t entry;
+
+    /* Working directory and relative paths */
+    CHECK(jelly_chdir(TEST_VOLUME) == STATUS_SUCCESS);
+    CHECK(jelly_getcwd(buffer, sizeof(buffer), &size) == STATUS_SUCCESS && text_is(buffer, size, TEST_VOLUME));
+    CHECK(jelly_getcwd(buffer, 4, &size) == STATUS_BUFFER_TOO_SMALL && size == text_length(TEST_VOLUME));
+    CHECK(jelly_open("hello.txt", JELLY_OPEN_READ, 0, &file) == STATUS_SUCCESS);
+    CHECK(jelly_read(file, buffer, sizeof(buffer), &size) == STATUS_SUCCESS);
+    CHECK(text_is(buffer, size, "Hello from the JellyOS test disk!\n"));
+    CHECK(jelly_read(file, buffer, sizeof(buffer), &size) == STATUS_SUCCESS && size == 0); /* end of file */
+    CHECK(jelly_write(file, "x", 1, &size) == STATUS_ACCESS_DENIED);                     /* read-only handle */
+    CHECK(jelly_handle_close(file) == STATUS_SUCCESS);
+
+    /* Create, write, seek, read back */
+    CHECK(jelly_mkdir("user", 0755) == STATUS_SUCCESS);
+    CHECK(jelly_open("user/data.txt", JELLY_OPEN_READ | JELLY_OPEN_WRITE | JELLY_OPEN_CREATE, 0644, &file) ==
+          STATUS_SUCCESS);
+    CHECK(jelly_write(file, "user mode file", 14, &size) == STATUS_SUCCESS && size == 14);
+    CHECK(jelly_seek(file, 5, JELLY_SEEK_SET, &position) == STATUS_SUCCESS && position == 5);
+    CHECK(jelly_read(file, buffer, 4, &size) == STATUS_SUCCESS && text_is(buffer, size, "mode"));
+    CHECK(jelly_fstat(file, &stat) == STATUS_SUCCESS && stat.size == 14 && stat.type == JELLY_FILE_TYPE_FILE);
+    CHECK(jelly_truncate(file, 4) == STATUS_SUCCESS);
+    CHECK(jelly_handle_close(file) == STATUS_SUCCESS);
+
+    /* Listing, renaming, removing */
+    CHECK(jelly_open("user", JELLY_OPEN_READ | JELLY_OPEN_DIRECTORY, 0, &dir) == STATUS_SUCCESS);
+    CHECK(jelly_readdir(dir, &entry) == STATUS_SUCCESS && text_is(entry.name, entry.name_length, "data.txt"));
+    CHECK(jelly_readdir(dir, &entry) == STATUS_NOT_FOUND);
+    CHECK(jelly_handle_close(dir) == STATUS_SUCCESS);
+    CHECK(jelly_rename("user/data.txt", "user/renamed.txt") == STATUS_SUCCESS);
+    CHECK(jelly_stat(TEST_VOLUME "/user/../user/renamed.txt", 0, &stat) == STATUS_SUCCESS && stat.size == 4);
+    CHECK(jelly_unlink("user") == STATUS_NOT_EMPTY);
+    CHECK(jelly_unlink("user/renamed.txt") == STATUS_SUCCESS);
+    CHECK(jelly_unlink("user") == STATUS_SUCCESS);
+
+    /* Errors */
+    CHECK(jelly_open("missing", JELLY_OPEN_READ, 0, &file) == STATUS_NOT_FOUND);
+    CHECK(jelly_open("/volumes", JELLY_OPEN_WRITE, 0, &file) == STATUS_IS_DIRECTORY);
+    CHECK(jelly_syscall(SYS_FILE_OPEN, 0xFFFF800000000000ULL, 5, JELLY_OPEN_READ, 0, (uint64_t)&file, 0) ==
+          STATUS_INVALID_ARGUMENT);
+    CHECK(jelly_syscall(SYS_FILE_OPEN, (uint64_t)"/tmp", 0, JELLY_OPEN_READ, 0, (uint64_t)&file, 0) ==
+          STATUS_INVALID_ARGUMENT);
+
+    /* Symbolic links (ramfs) */
+    const char *target = TEST_VOLUME "/hello.txt";
+    CHECK(jelly_symlink(target, "/tmp/hello-link") == STATUS_SUCCESS);
+    CHECK(jelly_readlink("/tmp/hello-link", buffer, sizeof(buffer), &size) == STATUS_SUCCESS &&
+          text_is(buffer, size, target));
+    CHECK(jelly_open("/tmp/hello-link", JELLY_OPEN_READ, 0, &file) == STATUS_SUCCESS);
+    CHECK(jelly_handle_close(file) == STATUS_SUCCESS);
+    CHECK(jelly_unlink("/tmp/hello-link") == STATUS_SUCCESS);
+
+    CHECK(jelly_sync() == STATUS_SUCCESS);
+    return 0;
+}
+
+/* Started with uid/gid 1000: the kernel test prepared ROOT_ONLY_FILE (0600, root). */
+static int unprivileged(void)
+{
+    jelly_handle_t file;
+    jelly_stat_t stat;
+
+    CHECK(jelly_open(ROOT_ONLY_FILE, JELLY_OPEN_READ, 0, &file) == STATUS_ACCESS_DENIED);
+    CHECK(jelly_stat(ROOT_ONLY_FILE, 0, &stat) == STATUS_SUCCESS && stat.uid == 0 && stat.mode == 0600);
+    CHECK(jelly_mkdir("/volumes/mine", 0755) == STATUS_ACCESS_DENIED); /* /volumes is root's, 0755 */
+    CHECK(jelly_unmount(TEST_VOLUME) == STATUS_ACCESS_DENIED);
+    CHECK(jelly_mount("/tmp", "virtio0p1", "fat32") == STATUS_ACCESS_DENIED);
+
+    CHECK(jelly_open("/tmp/user-file", JELLY_OPEN_WRITE | JELLY_OPEN_CREATE, 0600, &file) == STATUS_SUCCESS);
+    CHECK(jelly_fstat(file, &stat) == STATUS_SUCCESS && stat.uid == 1000);
+    CHECK(jelly_handle_close(file) == STATUS_SUCCESS);
+    CHECK(jelly_unlink("/tmp/user-file") == STATUS_SUCCESS);
+    return 0;
+}
+
 static void block_forever(void *event)
 {
     jelly_wait((jelly_handle_t)(uintptr_t)event, JELLY_WAIT_FOREVER);
@@ -313,6 +411,8 @@ int main(uint64_t scenario, uint64_t arg1, uint64_t arg2)
     case SCENARIO_MEMORY:             return memory();
     case SCENARIO_RIGHTS:             return rights();
     case SCENARIO_EXIT_WITH_THREADS:  return exit_with_threads();
+    case SCENARIO_FILES:              return files();
+    case SCENARIO_UNPRIVILEGED:       return unprivileged();
     }
     return NOT_REACHED;
 }

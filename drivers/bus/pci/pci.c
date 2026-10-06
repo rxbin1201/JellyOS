@@ -152,6 +152,20 @@ void pci_write32(pci_device_t *pci, uint16_t offset, uint32_t value)
     config_write(&loc, offset, 4, value);
 }
 
+uint8_t pci_find_capability(pci_device_t *pci, uint8_t id, uint8_t after)
+{
+    if (!(pci_read16(pci, PCI_STATUS) & (1u << 4)))
+        return 0;
+
+    uint8_t offset = after ? pci_read8(pci, after + 1) & ~3u : pci_read8(pci, PCI_CAPABILITIES) & ~3u;
+    for (int guard = 0; offset && guard < 48; guard++) {
+        if (pci_read8(pci, offset) == id)
+            return offset;
+        offset = pci_read8(pci, offset + 1) & ~3u;
+    }
+    return 0;
+}
+
 /* --- Device setup --------------------------------------------------------------------- */
 
 status_t pci_enable_device(pci_device_t *pci, bool bus_master)
@@ -510,6 +524,7 @@ EXPORT_SYMBOL(pci_read32);
 EXPORT_SYMBOL(pci_write8);
 EXPORT_SYMBOL(pci_write16);
 EXPORT_SYMBOL(pci_write32);
+EXPORT_SYMBOL(pci_find_capability);
 EXPORT_SYMBOL(pci_enable_device);
 EXPORT_SYMBOL(pci_map_bar);
 EXPORT_SYMBOL(pci_enable_msi);

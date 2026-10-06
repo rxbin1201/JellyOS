@@ -1,6 +1,6 @@
 # JellyOS System Call ABI
 
-**ABI version:** 1 (`JELLY_SYSCALL_ABI_VERSION`)
+**ABI version:** 2 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20.
 **Headers:** [`sdk/include/jelly/syscall.h`](../../sdk/include/jelly/syscall.h) (numbers, rights, flags), [`sdk/include/jelly/status.h`](../../sdk/include/jelly/status.h) (errors), [`sdk/include/jelly/os.h`](../../sdk/include/jelly/os.h) (libos wrappers)
 
 ## Calling convention (x86_64)
@@ -70,6 +70,51 @@ Threads created with `SYS_THREAD_CREATE` start the same way at `entry` with
 | 21 | `SYS_FUTEX_WAIT` | `const uint32_t *word, expected, timeout_ns` | | Blocks if `*word == expected`, otherwise `WOULD_BLOCK`. Word must be 4-byte aligned |
 | 22 | `SYS_FUTEX_WAKE` | `const uint32_t *word, count` | | Wakes up to `count` waiters. Works across processes through shared memory |
 
+### Files (version 2)
+
+Paths are passed as (pointer, length) without a terminating NUL, at most 1023
+bytes, and must not contain NUL. Relative paths are resolved against the
+process's working directory. See [storage.md](../architecture/storage.md) for
+the semantics.
+
+| # | Name | Arguments | Output | Rights / notes |
+|---|---|---|---|---|
+| 23 | `SYS_FILE_OPEN` | `path, length, flags, mode, jelly_handle_t *file` | handle (`READ`/`WRITE` per flags, `DUPLICATE`) | Flags `JELLY_OPEN_READ`, `WRITE`, `CREATE`, `EXCLUSIVE`, `TRUNCATE`, `APPEND`, `DIRECTORY`, `NOFOLLOW`; `mode` for new files |
+| 24 | `SYS_FILE_READ` | `handle, buffer, size, size_t *done` | bytes read (0 at end of file) | Needs `READ` |
+| 25 | `SYS_FILE_WRITE` | `handle, buffer, size, size_t *done` | bytes written (also reported on errors such as `NO_SPACE`) | Needs `WRITE` |
+| 26 | `SYS_FILE_SEEK` | `handle, int64_t offset, whence, uint64_t *position` | new position | `JELLY_SEEK_SET`, `CURRENT`, `END`; may go past the end |
+| 27 | `SYS_FILE_TRUNCATE` | `handle, uint64_t size` | | Needs `WRITE`; growing fills with zeros |
+| 28 | `SYS_FILE_STAT` | `handle, jelly_stat_t *stat` | | |
+| 29 | `SYS_DIRECTORY_READ` | `handle, jelly_dirent_t *entry` | next entry | Needs `READ`; `NOT_FOUND` after the last entry; never `.` or `..` |
+| 30 | `SYS_PATH_STAT` | `path, length, flags, jelly_stat_t *stat` | | `JELLY_STAT_NOFOLLOW` |
+| 31 | `SYS_PATH_MKDIR` | `path, length, mode` | | |
+| 32 | `SYS_PATH_UNLINK` | `path, length` | | Files, symbolic links, empty directories |
+| 33 | `SYS_PATH_RENAME` | `from, from_length, to, to_length` | | Replaces an existing target of the same kind; not across file systems |
+| 34 | `SYS_PATH_SYMLINK` | `target, target_length, path, length` | | The target is stored as given |
+| 35 | `SYS_PATH_READLINK` | `path, length, buffer, size, size_t *length` | target (not NUL-terminated) | `BUFFER_TOO_SMALL` reports the length |
+| 36 | `SYS_CHDIR` | `path, length` | | Must be a directory |
+| 37 | `SYS_GETCWD` | `buffer, size, size_t *length` | NUL-terminated path | `BUFFER_TOO_SMALL` reports the length |
+| 38 | `SYS_FS_SYNC` | | | Flushes all mounted file systems and their devices |
+| 39 | `SYS_MOUNT` | `path, length, device, device_length, type, type_length` | | Root only. `type_length` 0 probes all file system types |
+| 40 | `SYS_UNMOUNT` | `path, length` | | Root only. `BUSY` while files are open |
+
+```c
+typedef struct {
+    uint32_t type;   /* JELLY_FILE_TYPE_FILE, _DIRECTORY, _SYMLINK */
+    uint32_t mode;   /* permission bits 0777 */
+    uint32_t uid, gid;
+    uint64_t size;
+    uint64_t inode;
+} jelly_stat_t;
+
+typedef struct {
+    uint32_t type;
+    uint32_t name_length;
+    uint64_t inode;
+    char     name[256]; /* NUL terminated */
+} jelly_dirent_t;
+```
+
 ## Handles
 
 Handles are 32-bit values local to a process: bits 0–15 hold the slot and
@@ -93,6 +138,7 @@ Waitable objects and their signaled state:
 | Thread | It has exited |
 | Event | Signaled (until reset; auto-reset events clear on a satisfied wait) |
 | Channel endpoint | A message is queued or the peer is closed |
+| File | Not waitable |
 
 Resource limits per process (initial values): 256 handles, 64 threads, 64 MiB
 of memory.

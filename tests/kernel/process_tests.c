@@ -11,6 +11,7 @@
 
 #include "core/handle.h"
 #include "core/string.h"
+#include "fs/vfs/vfs.h"
 #include "ipc/ipc.h"
 #include "memory/heap.h"
 #include "memory/layout.h"
@@ -30,6 +31,9 @@ typedef struct {
     uint32_t  rights;
 } startup_handle_t;
 
+/* Credentials for the next spawn (reset to root afterwards). */
+static credentials_t next_credentials = { UID_ROOT, GID_ROOT };
+
 static process_t *spawn(uint64_t scenario, startup_handle_t h1, startup_handle_t h2, uint64_t raw_arg)
 {
     process_t *p;
@@ -38,6 +42,8 @@ static process_t *spawn(uint64_t scenario, startup_handle_t h1, startup_handle_t
 
     if (STATUS_IS_ERROR(process_create("usertest", &p)))
         return NULL;
+    p->credentials = next_credentials;
+    next_credentials = (credentials_t){ UID_ROOT, GID_ROOT };
     if (STATUS_IS_ERROR(process_load_elf(p, usertest_image_start,
                                          (size_t)(usertest_image_end - usertest_image_start), &entry)) ||
         (h1.object && STATUS_IS_ERROR(handle_install(&p->handles, h1.object, h1.rights, &a))) ||
@@ -237,4 +243,23 @@ KTEST(channel_reports_closed_peer)
     KEXPECT(channel_peek(end1, &size) == STATUS_PEER_CLOSED);
     KEXPECT(object_wait(end1, 0) == STATUS_SUCCESS); /* closed peer counts as readable */
     object_release(end1);
+}
+
+/* --- Files from user mode (milestone M5) ------------------------------------------ */
+
+KTEST(user_mode_file_access)
+{
+    KEXPECT(run(SCENARIO_FILES) == 0);
+}
+
+KTEST(user_mode_permissions)
+{
+    file_t *file;
+
+    KASSERT(vfs_open(ROOT_ONLY_FILE, JELLY_OPEN_WRITE | JELLY_OPEN_CREATE, 0600, NULL, &file) == STATUS_SUCCESS);
+    object_release(&file->object);
+
+    next_credentials = (credentials_t){ 1000, 1000 };
+    KEXPECT(run(SCENARIO_UNPRIVILEGED) == 0);
+    KEXPECT(vfs_unlink(ROOT_ONLY_FILE, NULL) == STATUS_SUCCESS);
 }

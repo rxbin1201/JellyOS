@@ -14,7 +14,13 @@
 | Credentials | `uid` / `gid` (root for now; permission checks arrive with the VFS) |
 | Resource limits | Handles, threads, memory pages |
 | Exit | Exit code and reason; the process object becomes signaled |
-| Environment, working directory | With the program loader and VFS (Phases 6 and 7) |
+| Working directory | Normalized path string (`SYS_CHDIR`, `SYS_GETCWD`), see storage.md |
+| Environment | With the program loader (Phase 7) |
+
+When the last thread is reaped, the process is handed to the **reaper**
+kernel thread, which closes its handles and frees its address space. This does
+not happen in the scheduler context, because closing a file may sleep on the
+VFS lock or the disk. Waiters on the process wake up after finalization.
 
 ### User address layout
 

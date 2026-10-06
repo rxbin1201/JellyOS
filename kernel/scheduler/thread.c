@@ -155,7 +155,7 @@ void thread_kill(thread_t *t)
 {
     uint64_t flags = arch_interrupts_save();
     t->kill_pending = true;
-    if (t->state == THREAD_BLOCKED)
+    if (t->state == THREAD_BLOCKED && t->wait_interruptible)
         scheduler_wake_thread(t, STATUS_INTERRUPTED);
     arch_interrupts_restore(flags);
 }

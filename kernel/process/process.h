@@ -22,6 +22,7 @@
 
 #define PROCESS_NAME_MAX   32
 #define PROCESS_REASON_MAX 128
+#define PROCESS_CWD_MAX    1024
 
 /* User address layout (see docs/architecture/memory-layout.md). */
 #define USER_IMAGE_END     0x0000010000000000ULL /* program images below 1 TiB */
@@ -53,11 +54,17 @@ typedef struct process {
     uint64_t         next_map;      /* next free address in the mapping region */
     list_t           mappings;      /* shared memory mappings */
 
+    char             cwd[PROCESS_CWD_MAX]; /* normalized absolute path */
+
     bool             exiting;
     bool             exited;
     int32_t          exit_code;
     char             exit_reason[PROCESS_REASON_MAX];
+    list_node_t      finalize_node;
 } process_t;
+
+/* Start the reaper thread that finalizes exited processes. */
+status_t   process_init(void);
 
 /* Empty process (address space, handle table). The caller holds one reference. */
 status_t   process_create(const char *name, process_t **process);

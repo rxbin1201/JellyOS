@@ -51,6 +51,7 @@ typedef struct thread {
     uint64_t            wake_time;
     uint64_t            wait_key;         /* futex key */
     status_t            wait_status;
+    bool                wait_interruptible;
     bool                kill_pending;
 } thread_t;
 

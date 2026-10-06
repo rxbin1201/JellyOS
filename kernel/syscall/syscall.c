@@ -7,6 +7,7 @@
  */
 
 #include "syscall/syscall.h"
+#include "syscall/internal.h"
 
 #include "core/handle.h"
 #include "core/log.h"
@@ -24,23 +25,22 @@
 
 typedef status_t (*syscall_fn)(const uint64_t *a);
 
-static handle_table_t *handles(void)
+handle_table_t *syscall_handles(void)
 {
     return &process_current()->handles;
 }
 
-/* Install object into the caller's table and report the handle; drops the caller's reference. */
-static status_t give_handle(object_t *object, uint32_t rights, uint64_t user_out)
+status_t syscall_give_handle(object_t *object, uint32_t rights, uint64_t user_out)
 {
     handle_t handle;
-    status_t status = handle_install(handles(), object, rights, &handle);
+    status_t status = handle_install(syscall_handles(), object, rights, &handle);
 
     object_release(object);
     if (STATUS_IS_ERROR(status))
         return status;
     status = put_user_u32(user_out, handle);
     if (STATUS_IS_ERROR(status))
-        handle_close(handles(), handle);
+        handle_close(syscall_handles(), handle);
     return status;
 }
 
@@ -110,7 +110,7 @@ static status_t sys_thread_create(const uint64_t *a)
 
     /* Only start the thread once the caller holds its handle. */
     object_retain(&t->object);
-    status = give_handle(&t->object, JELLY_RIGHT_WAIT | JELLY_RIGHT_DUPLICATE, a[4]);
+    status = syscall_give_handle(&t->object, JELLY_RIGHT_WAIT | JELLY_RIGHT_DUPLICATE, a[4]);
     if (!STATUS_IS_ERROR(status))
         thread_start(t);
     object_release(&t->object); /* a thread that never started is destroyed here */
@@ -164,14 +164,14 @@ static status_t sys_memory_unmap(const uint64_t *a)
 
 static status_t sys_handle_close(const uint64_t *a)
 {
-    return handle_close(handles(), (handle_t)a[0]);
+    return handle_close(syscall_handles(), (handle_t)a[0]);
 }
 
 static status_t sys_handle_duplicate(const uint64_t *a)
 {
     object_t *object;
     uint32_t held;
-    status_t status = handle_get(handles(), (handle_t)a[0], 0, JELLY_RIGHT_DUPLICATE, &object, &held);
+    status_t status = handle_get(syscall_handles(), (handle_t)a[0], 0, JELLY_RIGHT_DUPLICATE, &object, &held);
 
     if (STATUS_IS_ERROR(status))
         return status;
@@ -180,13 +180,13 @@ static status_t sys_handle_duplicate(const uint64_t *a)
         object_release(object);
         return STATUS_ACCESS_DENIED; /* rights can only be reduced */
     }
-    return give_handle(object, rights, a[2]);
+    return syscall_give_handle(object, rights, a[2]);
 }
 
 static status_t sys_object_wait(const uint64_t *a)
 {
     object_t *object;
-    status_t status = handle_get(handles(), (handle_t)a[0], 0, JELLY_RIGHT_WAIT, &object, NULL);
+    status_t status = handle_get(syscall_handles(), (handle_t)a[0], 0, JELLY_RIGHT_WAIT, &object, NULL);
 
     if (STATUS_IS_ERROR(status))
         return status;
@@ -204,13 +204,13 @@ static status_t sys_event_create(const uint64_t *a)
 
     if (STATUS_IS_ERROR(status))
         return status;
-    return give_handle(event, JELLY_RIGHT_WAIT | JELLY_RIGHT_SIGNAL | JELLY_RIGHT_DUPLICATE, a[1]);
+    return syscall_give_handle(event, JELLY_RIGHT_WAIT | JELLY_RIGHT_SIGNAL | JELLY_RIGHT_DUPLICATE, a[1]);
 }
 
 static status_t with_event(handle_t handle, void (*action)(object_t *))
 {
     object_t *event;
-    status_t status = handle_get(handles(), handle, OBJECT_EVENT, JELLY_RIGHT_SIGNAL, &event, NULL);
+    status_t status = handle_get(syscall_handles(), handle, OBJECT_EVENT, JELLY_RIGHT_SIGNAL, &event, NULL);
 
     if (STATUS_IS_ERROR(status))
         return status;
@@ -244,18 +244,18 @@ static status_t sys_channel_create(const uint64_t *a)
     if (STATUS_IS_ERROR(status))
         return status;
 
-    status = give_handle(end0, CHANNEL_RIGHTS, a[0]);
+    status = syscall_give_handle(end0, CHANNEL_RIGHTS, a[0]);
     if (STATUS_IS_ERROR(status)) {
         object_release(end1);
         return status;
     }
-    return give_handle(end1, CHANNEL_RIGHTS, a[1]);
+    return syscall_give_handle(end1, CHANNEL_RIGHTS, a[1]);
 }
 
 static status_t sys_channel_send(const uint64_t *a)
 {
     object_t *ep;
-    status_t status = handle_get(handles(), (handle_t)a[0], OBJECT_CHANNEL, JELLY_RIGHT_WRITE, &ep, NULL);
+    status_t status = handle_get(syscall_handles(), (handle_t)a[0], OBJECT_CHANNEL, JELLY_RIGHT_WRITE, &ep, NULL);
 
     if (STATUS_IS_ERROR(status))
         return status;
@@ -281,7 +281,7 @@ static status_t sys_channel_receive(const uint64_t *a)
 {
     object_t *ep;
     size_t size;
-    status_t status = handle_get(handles(), (handle_t)a[0], OBJECT_CHANNEL, JELLY_RIGHT_READ, &ep, NULL);
+    status_t status = handle_get(syscall_handles(), (handle_t)a[0], OBJECT_CHANNEL, JELLY_RIGHT_READ, &ep, NULL);
 
     if (STATUS_IS_ERROR(status))
         return status;
@@ -316,7 +316,7 @@ static status_t sys_shm_create(const uint64_t *a)
 
     if (STATUS_IS_ERROR(status))
         return status;
-    return give_handle(shm, JELLY_RIGHT_MAP | JELLY_RIGHT_WRITE | JELLY_RIGHT_DUPLICATE, a[1]);
+    return syscall_give_handle(shm, JELLY_RIGHT_MAP | JELLY_RIGHT_WRITE | JELLY_RIGHT_DUPLICATE, a[1]);
 }
 
 static status_t sys_shm_map(const uint64_t *a)
@@ -334,7 +334,7 @@ static status_t sys_shm_map(const uint64_t *a)
     if (!user_range_ok(a[2], sizeof(uint64_t), true))
         return STATUS_INVALID_ARGUMENT;
 
-    status = handle_get(handles(), (handle_t)a[0], OBJECT_SHARED_MEMORY, needed, &shm, NULL);
+    status = handle_get(syscall_handles(), (handle_t)a[0], OBJECT_SHARED_MEMORY, needed, &shm, NULL);
     if (STATUS_IS_ERROR(status))
         return status;
     status = shm_map(process_current(), shm, flags, &address);
@@ -383,6 +383,24 @@ static const syscall_fn table[SYS_COUNT] = {
     [SYS_SHM_MAP]          = sys_shm_map,
     [SYS_FUTEX_WAIT]       = sys_futex_wait,
     [SYS_FUTEX_WAKE]       = sys_futex_wake,
+    [SYS_FILE_OPEN]        = sys_file_open,
+    [SYS_FILE_READ]        = sys_file_read,
+    [SYS_FILE_WRITE]       = sys_file_write,
+    [SYS_FILE_SEEK]        = sys_file_seek,
+    [SYS_FILE_TRUNCATE]    = sys_file_truncate,
+    [SYS_FILE_STAT]        = sys_file_stat,
+    [SYS_DIRECTORY_READ]   = sys_directory_read,
+    [SYS_PATH_STAT]        = sys_path_stat,
+    [SYS_PATH_MKDIR]       = sys_path_mkdir,
+    [SYS_PATH_UNLINK]      = sys_path_unlink,
+    [SYS_PATH_RENAME]      = sys_path_rename,
+    [SYS_PATH_SYMLINK]     = sys_path_symlink,
+    [SYS_PATH_READLINK]    = sys_path_readlink,
+    [SYS_CHDIR]            = sys_chdir,
+    [SYS_GETCWD]           = sys_getcwd,
+    [SYS_FS_SYNC]          = sys_fs_sync,
+    [SYS_MOUNT]            = sys_mount,
+    [SYS_UNMOUNT]          = sys_unmount,
 };
 
 uint64_t syscall_dispatch(uint64_t number, const uint64_t args[6])

@@ -56,6 +56,26 @@ status_t jelly_shm_map(jelly_handle_t shm, uint32_t flags, void **address);
 status_t jelly_futex_wait(const uint32_t *word, uint32_t expected, uint64_t timeout_ns);
 status_t jelly_futex_wake(const uint32_t *word, uint32_t count);
 
+/* Files (paths are NUL-terminated here; relative paths use the working directory) */
+status_t jelly_open(const char *path, uint32_t flags, uint32_t mode, jelly_handle_t *file);
+status_t jelly_read(jelly_handle_t file, void *buffer, size_t size, size_t *done);
+status_t jelly_write(jelly_handle_t file, const void *buffer, size_t size, size_t *done);
+status_t jelly_seek(jelly_handle_t file, int64_t offset, uint32_t whence, uint64_t *position);
+status_t jelly_truncate(jelly_handle_t file, uint64_t size);
+status_t jelly_fstat(jelly_handle_t file, jelly_stat_t *stat);
+status_t jelly_readdir(jelly_handle_t directory, jelly_dirent_t *entry);
+status_t jelly_stat(const char *path, uint32_t flags, jelly_stat_t *stat);
+status_t jelly_mkdir(const char *path, uint32_t mode);
+status_t jelly_unlink(const char *path);
+status_t jelly_rename(const char *from, const char *to);
+status_t jelly_symlink(const char *target, const char *path);
+status_t jelly_readlink(const char *path, char *buffer, size_t size, size_t *length);
+status_t jelly_chdir(const char *path);
+status_t jelly_getcwd(char *buffer, size_t size, size_t *length);
+status_t jelly_sync(void);
+status_t jelly_mount(const char *path, const char *device, const char *type);
+status_t jelly_unmount(const char *path);
+
 /* Raw system call */
 uint64_t jelly_syscall(uint64_t number, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                        uint64_t a5);

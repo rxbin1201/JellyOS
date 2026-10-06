@@ -37,6 +37,9 @@ void wait_queue_init(wait_queue_t *queue);
  */
 status_t wait_queue_block(wait_queue_t *queue, uint64_t deadline_ns);
 
+/* Like wait_queue_block, but a kill does not end the wait (locks the caller must get). */
+status_t wait_queue_block_uninterruptible(wait_queue_t *queue, uint64_t deadline_ns);
+
 void     wait_queue_wake_all(wait_queue_t *queue, status_t result);
 bool     wait_queue_wake_one(wait_queue_t *queue, status_t result);
 

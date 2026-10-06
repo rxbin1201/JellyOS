@@ -18,8 +18,10 @@
 #include "drivers/acpi/acpi.h"
 #include "drivers/core/device.h"
 #include "drivers/core/module.h"
+#include "fs/vfs/vfs.h"
 #include "memory/memory.h"
 #include "memory/vmm.h"
+#include "process/process.h"
 #include "scheduler/scheduler.h"
 #include "time/clock.h"
 
@@ -108,9 +110,11 @@ static void run_crash_test(void)
         klog_info("crashtest: '%s' returned, execution continues", kind);
 }
 
-/* Device manager, built-in modules (buses enumerate here), then driver modules from the boot manager. */
+/* Root file system, device manager, built-in modules (buses and disks appear here), then boot modules. */
 static void start_devices(void)
 {
+    if (STATUS_IS_ERROR(vfs_init()))
+        panic("cannot create the root file system");
     device_manager_init();
     module_init_builtin();
     unsigned loaded = module_load_boot_modules();
@@ -123,6 +127,8 @@ __attribute__((noreturn)) static void kernel_stage2(void)
 {
     memory_reclaim_boot();
     scheduler_init(main_stack_top);
+    if (STATUS_IS_ERROR(process_init()))
+        panic("cannot start the process reaper");
 
     arch_interrupts_enable();
     check_timer();

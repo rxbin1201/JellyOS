@@ -92,6 +92,7 @@ status_t process_create(const char *name, process_t **process)
     list_init(&p->threads);
     list_init(&p->mappings);
     p->next_map = USER_MAP_BASE;
+    p->cwd[0] = '/';
     handle_table_init(&p->handles, p->limits.max_handles);
 
     status_t status = vmm_space_create(&p->space);
@@ -168,12 +169,52 @@ void process_fault(const char *reason)
     process_exit_current(JELLY_EXIT_FAULT, reason);
 }
 
+/*
+ * Finalization closes handles (files may sleep on locks and disks) and frees
+ * the address space. It runs in the reaper thread, never in the scheduler
+ * context where the last thread is reaped.
+ */
+static list_t finalize_queue = { { &finalize_queue.head, &finalize_queue.head } };
+static wait_queue_t reaper_wakeup;
+
+static void reaper_main(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint64_t flags = arch_interrupts_save();
+        while (list_empty(&finalize_queue))
+            wait_queue_block(&reaper_wakeup, WAIT_FOREVER);
+        process_t *p = container_of(list_pop_front(&finalize_queue), process_t, finalize_node);
+        arch_interrupts_restore(flags);
+
+        finalize(p);
+        object_release(&p->object); /* the queue's reference */
+    }
+}
+
+status_t process_init(void)
+{
+    thread_t *reaper;
+
+    wait_queue_init(&reaper_wakeup);
+    status_t status = thread_create_kernel("reaper", reaper_main, NULL, THREAD_PRIORITY_KERNEL, &reaper);
+    if (STATUS_IS_ERROR(status))
+        return status;
+    thread_start(reaper);
+    object_release(&reaper->object);
+    return STATUS_SUCCESS;
+}
+
 void process_thread_exited(process_t *p)
 {
     ASSERT(p->live_threads > 0);
     if (--p->live_threads == 0) {
         p->exiting = true; /* last thread left: exit code stays 0 unless set */
-        finalize(p);
+        object_retain(&p->object);
+        uint64_t flags = arch_interrupts_save();
+        list_push_back(&finalize_queue, &p->finalize_node);
+        wait_queue_wake_one(&reaper_wakeup, STATUS_SUCCESS);
+        arch_interrupts_restore(flags);
     }
 }
 

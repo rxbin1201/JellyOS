@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define JELLY_SYSCALL_ABI_VERSION 1
+#define JELLY_SYSCALL_ABI_VERSION 2
 
 typedef uint32_t jelly_handle_t;
 #define JELLY_HANDLE_INVALID 0u
@@ -45,8 +45,67 @@ enum {
     SYS_SHM_MAP          = 20, /* (handle, uint32_t flags, uintptr_t *address) */
     SYS_FUTEX_WAIT       = 21, /* (const uint32_t *word, uint32_t expected, uint64_t timeout_ns) */
     SYS_FUTEX_WAKE       = 22, /* (const uint32_t *word, uint32_t count) */
+    /* ABI version 2: files (paths are byte strings with explicit length) */
+    SYS_FILE_OPEN        = 23, /* (path, length, uint32_t flags, uint32_t mode, jelly_handle_t *file) */
+    SYS_FILE_READ        = 24, /* (handle, void *buffer, size_t size, size_t *done) */
+    SYS_FILE_WRITE       = 25, /* (handle, const void *buffer, size_t size, size_t *done) */
+    SYS_FILE_SEEK        = 26, /* (handle, int64_t offset, uint32_t whence, uint64_t *position) */
+    SYS_FILE_TRUNCATE    = 27, /* (handle, uint64_t size) */
+    SYS_FILE_STAT        = 28, /* (handle, jelly_stat_t *stat) */
+    SYS_DIRECTORY_READ   = 29, /* (handle, jelly_dirent_t *entry)           NOT_FOUND at the end */
+    SYS_PATH_STAT        = 30, /* (path, length, uint32_t flags, jelly_stat_t *stat) */
+    SYS_PATH_MKDIR       = 31, /* (path, length, uint32_t mode) */
+    SYS_PATH_UNLINK      = 32, /* (path, length) */
+    SYS_PATH_RENAME      = 33, /* (from, from_length, to, to_length) */
+    SYS_PATH_SYMLINK     = 34, /* (target, target_length, path, length) */
+    SYS_PATH_READLINK    = 35, /* (path, length, char *buffer, size_t size, size_t *link_length) */
+    SYS_CHDIR            = 36, /* (path, length) */
+    SYS_GETCWD           = 37, /* (char *buffer, size_t size, size_t *length) */
+    SYS_FS_SYNC          = 38, /* () */
+    SYS_MOUNT            = 39, /* (path, length, device, device_length, type, type_length)   root only */
+    SYS_UNMOUNT          = 40, /* (path, length)                                             root only */
     SYS_COUNT
 };
+
+/* SYS_FILE_OPEN flags */
+#define JELLY_OPEN_READ       (1u << 0)
+#define JELLY_OPEN_WRITE      (1u << 1)
+#define JELLY_OPEN_CREATE     (1u << 2) /* create the file if it does not exist */
+#define JELLY_OPEN_EXCLUSIVE  (1u << 3) /* with CREATE: fail with ALREADY_EXISTS */
+#define JELLY_OPEN_TRUNCATE   (1u << 4)
+#define JELLY_OPEN_APPEND     (1u << 5) /* every write goes to the end */
+#define JELLY_OPEN_DIRECTORY  (1u << 6) /* must be a directory (for SYS_DIRECTORY_READ) */
+#define JELLY_OPEN_NOFOLLOW   (1u << 7) /* do not follow a symbolic link in the last component */
+
+/* SYS_FILE_SEEK whence */
+#define JELLY_SEEK_SET        0
+#define JELLY_SEEK_CURRENT    1
+#define JELLY_SEEK_END        2
+
+/* SYS_PATH_STAT flags */
+#define JELLY_STAT_NOFOLLOW   (1u << 0)
+
+#define JELLY_FILE_TYPE_FILE      1
+#define JELLY_FILE_TYPE_DIRECTORY 2
+#define JELLY_FILE_TYPE_SYMLINK   3
+
+#define JELLY_NAME_MAX        255
+
+typedef struct {
+    uint32_t type;   /* JELLY_FILE_TYPE_* */
+    uint32_t mode;   /* permission bits, 0777 */
+    uint32_t uid;
+    uint32_t gid;
+    uint64_t size;
+    uint64_t inode;
+} jelly_stat_t;
+
+typedef struct {
+    uint32_t type;
+    uint32_t name_length;
+    uint64_t inode;
+    char     name[JELLY_NAME_MAX + 1]; /* NUL terminated */
+} jelly_dirent_t;
 
 /* Handle rights */
 #define JELLY_RIGHT_READ      (1u << 0) /* receive from a channel */

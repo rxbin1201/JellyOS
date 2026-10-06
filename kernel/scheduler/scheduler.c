@@ -166,18 +166,19 @@ void scheduler_wake_thread(thread_t *t, status_t result)
     make_ready_locked(t);
 }
 
-status_t wait_queue_block(wait_queue_t *queue, uint64_t deadline_ns)
+static status_t block(wait_queue_t *queue, uint64_t deadline_ns, bool interruptible)
 {
     thread_t *t = current;
 
     ASSERT(t != idle_thread);
-    if (t->kill_pending)
+    if (interruptible && t->kill_pending)
         return STATUS_INTERRUPTED;
     if (deadline_ns != WAIT_FOREVER && deadline_ns <= clock_monotonic_ns())
         return STATUS_TIMEOUT;
 
     t->state = THREAD_BLOCKED;
     t->wait_status = STATUS_SUCCESS;
+    t->wait_interruptible = interruptible;
     t->waiting_on = queue;
     if (queue)
         list_push_back(&queue->threads, &t->wait_node);
@@ -188,6 +189,16 @@ status_t wait_queue_block(wait_queue_t *queue, uint64_t deadline_ns)
 
     schedule();
     return t->wait_status;
+}
+
+status_t wait_queue_block(wait_queue_t *queue, uint64_t deadline_ns)
+{
+    return block(queue, deadline_ns, true);
+}
+
+status_t wait_queue_block_uninterruptible(wait_queue_t *queue, uint64_t deadline_ns)
+{
+    return block(queue, deadline_ns, false);
 }
 
 void wait_queue_wake_all(wait_queue_t *queue, status_t result)

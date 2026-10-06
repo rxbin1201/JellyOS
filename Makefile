@@ -45,9 +45,9 @@ BOOT_LDFLAGS := -nostdlib -shared -Bsymbolic -znocombreloc -z noexecstack \
 # --- Kernel (ELF64, higher half) ---------------------------------------------
 
 KERNEL_OBJ_DIR := $(BUILD)/kernel
-# Built-in drivers live in drivers/. Kernel tests (tests/kernel) are linked
+# Built-in drivers live in drivers/, storage layers and file systems in fs/. Kernel tests (tests/kernel) are linked
 # into the kernel and run with selftest=1.
-KERNEL_SRCS    := $(shell find kernel drivers tests/kernel -name '*.c' -o -name '*.S')
+KERNEL_SRCS    := $(shell find kernel drivers fs tests/kernel -name '*.c' -o -name '*.S')
 KERNEL_OBJS    := $(patsubst %,$(BUILD)/%.o,$(KERNEL_SRCS))
 KERNEL_LDS     := kernel/arch/x86_64/linker.ld
 KERNEL_ELF     := $(BUILD)/kernel.elf
@@ -114,13 +114,28 @@ endif
 
 # $(call qemu_disks,<esp dir>,<vars file>)
 qemu_disks  = -drive if=pflash,format=raw,file=$(2) -drive format=raw,file=fat:rw:$(1)
+# $(call virtio_disk,<image>,<id>)
+virtio_disk = -drive file=$(1),if=none,id=$(2),format=raw -device virtio-blk-pci,drive=$(2)
+
 QEMU_FLAGS := $(QEMU_BASE) $(call qemu_disks,$(ESP),$(VARS_COPY))
+
+# make run DISK=<image>: attach a raw disk image as a VirtIO block device
+ifneq ($(DISK),)
+QEMU_FLAGS += $(call virtio_disk,$(DISK),disk0)
+endif
 
 # Self-test run: separate ESP and variable store, no menu, QEMU exits with the result.
 TEST_ESP     := $(BUILD)/test-esp
 TEST_VARS    := $(BUILD)/OVMF_VARS_test.fd
 TEST_TIMEOUT := 120
 TEST_CMDLINE := loglevel=info selftest=exit
+
+# Test disk: GPT + FAT32 built from tests/storage/disk (tools/image_builder/mkdisk.sh)
+TEST_DISK       := $(BUILD)/test-disk.img
+TEST_DISK_FILES := $(BUILD)/test-disk-files
+# Written by tests/kernel/storage_tests.c and checked from the host after the run
+HOST_CHECK_PATH := ::/jellyos/written.txt
+HOST_CHECK_TEXT := Written by the JellyOS FAT32 driver.
 
 # --- Targets -----------------------------------------------------------------
 
@@ -150,6 +165,10 @@ $(BUILD)/kernel/%.o: kernel/%
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/drivers/%.o: drivers/%
+	@mkdir -p $(@D)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(BUILD)/fs/%.o: fs/%
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
@@ -230,11 +249,20 @@ test: all $(TEST_MODULES)
 	   for m in $(notdir $(TEST_MODULES)); do printf 'module=/boot/modules/%s\n' $$m; done; \
 	 } > $(TEST_ESP)/boot/boot.cfg
 	@cp $(OVMF_VARS) $(TEST_VARS)
+	@rm -rf $(TEST_DISK_FILES) && mkdir -p $(TEST_DISK_FILES) && cp -r tests/storage/disk/. $(TEST_DISK_FILES)/
+	@python3 -c "import sys; sys.stdout.buffer.write(bytes((i * 7 + i // 251) % 256 for i in range(200000)))" \
+	    > $(TEST_DISK_FILES)/pattern.bin
+	@sh tools/image_builder/mkdisk.sh $(TEST_DISK) 64 $(TEST_DISK_FILES) JELLYTEST
 	@timeout $(TEST_TIMEOUT) $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(TEST_ESP),$(TEST_VARS)) -display none \
-	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -device edu -device e1000e; \
+	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -device edu -device e1000e \
+	    $(call virtio_disk,$(TEST_DISK),testdisk); \
 	status=$$?; \
-	if [ $$status -eq 1 ]; then echo "make test: PASSED"; \
-	else echo "make test: FAILED (QEMU exit status $$status)"; exit 1; fi
+	if [ $$status -ne 1 ]; then echo "make test: FAILED (QEMU exit status $$status)"; exit 1; fi
+	@# The host (mtools) must read what the kernel's FAT32 driver wrote.
+	@if [ "$$(mtype -i $(TEST_DISK)@@1M $(HOST_CHECK_PATH))" = "$(HOST_CHECK_TEXT)" ]; then \
+	    echo "make test: host reads the file written by JellyOS"; \
+	else echo "make test: FAILED (host cannot read $(HOST_CHECK_PATH) correctly)"; exit 1; fi
+	@echo "make test: PASSED"
 
 # Forget the persistent boot state (fresh UEFI variable store).
 reset-vars:

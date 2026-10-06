@@ -112,7 +112,7 @@ Device IDs and capabilities are declared per driver (`driver_t`).
 
 ### Built-in modules
 
-Built-in modules (currently `pci`) are linked into the kernel. Their
+Built-in modules (currently `pci` and `virtio_blk`, see storage.md) are linked into the kernel. Their
 `module_info_t` structures sit in `.jelly_modules`, and they start in
 dependency order at boot.
 

@@ -92,6 +92,9 @@ void     pci_write8(pci_device_t *pci, uint16_t offset, uint8_t value);
 void     pci_write16(pci_device_t *pci, uint16_t offset, uint16_t value);
 void     pci_write32(pci_device_t *pci, uint16_t offset, uint32_t value);
 
+/* Offset of the next capability with this ID after `after` (0: from the start); 0 if none. */
+uint8_t  pci_find_capability(pci_device_t *pci, uint8_t id, uint8_t after);
+
 /* Enable memory/I/O decoding and optionally bus mastering (DMA). */
 status_t pci_enable_device(pci_device_t *pci, bool bus_master);
 

@@ -30,6 +30,12 @@ typedef enum {
     STATUS_BAD_HANDLE       = 13,
     STATUS_LIMIT_EXCEEDED   = 14,
     STATUS_INTERRUPTED      = 15,
+    /* appended in syscall ABI version 2 (file systems) */
+    STATUS_ALREADY_EXISTS   = 16,
+    STATUS_NOT_DIRECTORY    = 17,
+    STATUS_IS_DIRECTORY     = 18,
+    STATUS_NOT_EMPTY        = 19,
+    STATUS_NO_SPACE         = 20,
 } status_t;
 
 #define STATUS_IS_ERROR(s) ((s) != STATUS_SUCCESS)
@@ -53,6 +59,11 @@ static inline const char *status_name(status_t status)
     case STATUS_BAD_HANDLE:       return "BAD_HANDLE";
     case STATUS_LIMIT_EXCEEDED:   return "LIMIT_EXCEEDED";
     case STATUS_INTERRUPTED:      return "INTERRUPTED";
+    case STATUS_ALREADY_EXISTS:   return "ALREADY_EXISTS";
+    case STATUS_NOT_DIRECTORY:    return "NOT_DIRECTORY";
+    case STATUS_IS_DIRECTORY:     return "IS_DIRECTORY";
+    case STATUS_NOT_EMPTY:        return "NOT_EMPTY";
+    case STATUS_NO_SPACE:         return "NO_SPACE";
     }
     return "UNKNOWN";
 }

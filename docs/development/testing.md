@@ -63,6 +63,28 @@ ACPI, IOAPIC routing (PIT channel 0 through ISA IRQ 0), PCI enumeration and
 BARs, resource conflicts, module loading/rejection/unloading/reloading,
 dependency tracking, and suspend/resume including PCI D3hot.
 
+### Storage tests
+
+Before every run, `make test` builds a fresh 64 MiB disk image with
+`tools/image_builder/mkdisk.sh`: GPT, one FAT32 partition formatted by
+`mformat`, with the files from [`tests/storage/disk/`](../../tests/storage/disk/)
+plus a generated 200000-byte `pattern.bin`. The image is attached as a VirtIO
+disk and appears as `/volumes/virtio0p1`.
+
+[`tests/kernel/storage_tests.c`](../../tests/kernel/storage_tests.c) covers
+GPT parsing, path normalization, ramfs (files, directories, renames, symbolic
+links, permissions) and FAT32: reading files mtools wrote (long names,
+case-insensitive lookup, multi-cluster), writing with holes and truncation,
+directory growth, renames with `..` updates, open-file protection and
+persistence across unmount/remount. User-mode file access, with and without
+root rights, is tested through `usertest` (scenarios `FILES` and
+`UNPRIVILEGED`).
+
+After QEMU exits, the host reads `/jellyos/written.txt` from the image with
+`mtype`. The file must contain exactly what the kernel's FAT32 driver wrote.
+
+Requirements on the host: `sgdisk` (gdisk) and `mtools`.
+
 To confirm that a test can actually fail, break the code it covers once. For
 example, disabling `FXSAVE`/`FXRSTOR` in `kernel/arch/x86_64/thread.c` makes
 `preemption_preserves_fpu_state` fail.

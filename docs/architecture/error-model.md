@@ -25,8 +25,14 @@ uses exactly the same definitions.
 | `STATUS_LIMIT_EXCEEDED` | 14 | A resource limit (handles, threads, memory) was reached |
 | `STATUS_INTERRUPTED` | 15 | A wait ended because the thread is being terminated |
 
+| `STATUS_ALREADY_EXISTS` | 16 | The name is already taken |
+| `STATUS_NOT_DIRECTORY` | 17 | A path component or the target is not a directory |
+| `STATUS_IS_DIRECTORY` | 18 | Operation not valid on a directory (writing, reading data) |
+| `STATUS_NOT_EMPTY` | 19 | Directory still has entries |
+| `STATUS_NO_SPACE` | 20 | Device or file system is full, or a file size limit was reached |
+
 Codes 0–9 are the initial set from the README. Codes 10–15 were appended with
-syscall ABI version 1.
+syscall ABI version 1, codes 16–20 with version 2.
 
 ## Rules
 

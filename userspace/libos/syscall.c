@@ -27,6 +27,8 @@ uint64_t jelly_syscall(uint64_t number, uint64_t a0, uint64_t a1, uint64_t a2, u
 #define SYSCALL3(n, a, b, c)          jelly_syscall((n), (uint64_t)(a), (uint64_t)(b), (uint64_t)(c), 0, 0, 0)
 #define SYSCALL4(n, a, b, c, d)       jelly_syscall((n), (uint64_t)(a), (uint64_t)(b), (uint64_t)(c), (uint64_t)(d), 0, 0)
 #define SYSCALL5(n, a, b, c, d, e)    jelly_syscall((n), (uint64_t)(a), (uint64_t)(b), (uint64_t)(c), (uint64_t)(d), (uint64_t)(e), 0)
+#define SYSCALL6(n, a, b, c, d, e, f) \
+    jelly_syscall((n), (uint64_t)(a), (uint64_t)(b), (uint64_t)(c), (uint64_t)(d), (uint64_t)(e), (uint64_t)(f))
 
 uint32_t jelly_abi_version(void)
 {
@@ -162,4 +164,104 @@ status_t jelly_futex_wait(const uint32_t *word, uint32_t expected, uint64_t time
 status_t jelly_futex_wake(const uint32_t *word, uint32_t count)
 {
     return (status_t)SYSCALL2(SYS_FUTEX_WAKE, word, count);
+}
+
+/* --- Files ---------------------------------------------------------------------- */
+
+static size_t length_of(const char *s)
+{
+    size_t n = 0;
+    while (s && s[n])
+        n++;
+    return n;
+}
+
+status_t jelly_open(const char *path, uint32_t flags, uint32_t mode, jelly_handle_t *file)
+{
+    return (status_t)SYSCALL5(SYS_FILE_OPEN, path, length_of(path), flags, mode, file);
+}
+
+status_t jelly_read(jelly_handle_t file, void *buffer, size_t size, size_t *done)
+{
+    return (status_t)SYSCALL4(SYS_FILE_READ, file, buffer, size, done);
+}
+
+status_t jelly_write(jelly_handle_t file, const void *buffer, size_t size, size_t *done)
+{
+    return (status_t)SYSCALL4(SYS_FILE_WRITE, file, buffer, size, done);
+}
+
+status_t jelly_seek(jelly_handle_t file, int64_t offset, uint32_t whence, uint64_t *position)
+{
+    return (status_t)SYSCALL4(SYS_FILE_SEEK, file, offset, whence, position);
+}
+
+status_t jelly_truncate(jelly_handle_t file, uint64_t size)
+{
+    return (status_t)SYSCALL2(SYS_FILE_TRUNCATE, file, size);
+}
+
+status_t jelly_fstat(jelly_handle_t file, jelly_stat_t *stat)
+{
+    return (status_t)SYSCALL2(SYS_FILE_STAT, file, stat);
+}
+
+status_t jelly_readdir(jelly_handle_t directory, jelly_dirent_t *entry)
+{
+    return (status_t)SYSCALL2(SYS_DIRECTORY_READ, directory, entry);
+}
+
+status_t jelly_stat(const char *path, uint32_t flags, jelly_stat_t *stat)
+{
+    return (status_t)SYSCALL4(SYS_PATH_STAT, path, length_of(path), flags, stat);
+}
+
+status_t jelly_mkdir(const char *path, uint32_t mode)
+{
+    return (status_t)SYSCALL3(SYS_PATH_MKDIR, path, length_of(path), mode);
+}
+
+status_t jelly_unlink(const char *path)
+{
+    return (status_t)SYSCALL2(SYS_PATH_UNLINK, path, length_of(path));
+}
+
+status_t jelly_rename(const char *from, const char *to)
+{
+    return (status_t)SYSCALL4(SYS_PATH_RENAME, from, length_of(from), to, length_of(to));
+}
+
+status_t jelly_symlink(const char *target, const char *path)
+{
+    return (status_t)SYSCALL4(SYS_PATH_SYMLINK, target, length_of(target), path, length_of(path));
+}
+
+status_t jelly_readlink(const char *path, char *buffer, size_t size, size_t *length)
+{
+    return (status_t)SYSCALL5(SYS_PATH_READLINK, path, length_of(path), buffer, size, length);
+}
+
+status_t jelly_chdir(const char *path)
+{
+    return (status_t)SYSCALL2(SYS_CHDIR, path, length_of(path));
+}
+
+status_t jelly_getcwd(char *buffer, size_t size, size_t *length)
+{
+    return (status_t)SYSCALL3(SYS_GETCWD, buffer, size, length);
+}
+
+status_t jelly_sync(void)
+{
+    return (status_t)SYSCALL0(SYS_FS_SYNC);
+}
+
+status_t jelly_mount(const char *path, const char *device, const char *type)
+{
+    return (status_t)SYSCALL6(SYS_MOUNT, path, length_of(path), device, length_of(device), type, length_of(type));
+}
+
+status_t jelly_unmount(const char *path)
+{
+    return (status_t)SYSCALL2(SYS_UNMOUNT, path, length_of(path));
 }
