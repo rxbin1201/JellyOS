@@ -67,8 +67,9 @@ status_t handle_install(handle_table_t *table, object_t *object, uint32_t rights
         object_retain(object);
         e->object = object;
         e->rights = rights;
+        /* 15-bit generations keep every handle a positive int (BSD-style socket descriptors in libc). */
         e->generation++;
-        if (e->generation == 0)
+        if (e->generation == 0 || e->generation > 0x7FFF)
             e->generation = 1;
         table->used++;
         *handle = make_handle(i, e->generation);

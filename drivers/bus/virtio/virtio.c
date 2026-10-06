@@ -181,6 +181,17 @@ void virtio_queue_pop_used(virtqueue_t *q)
     q->last_used++;
 }
 
+bool virtio_queue_next_used(virtqueue_t *q, uint32_t *id, uint32_t *length)
+{
+    if (!virtio_queue_has_used(q))
+        return false;
+    volatile virtq_used_elem_t *e = &q->used->ring[q->last_used % q->size];
+    *id = e->id;
+    *length = e->len;
+    q->last_used++;
+    return true;
+}
+
 void virtio_queue_free(virtqueue_t *q)
 {
     dma_free(&q->memory);
@@ -192,5 +203,6 @@ EXPORT_SYMBOL(virtio_driver_ok);
 EXPORT_SYMBOL(virtio_queue_submit);
 EXPORT_SYMBOL(virtio_queue_has_used);
 EXPORT_SYMBOL(virtio_queue_pop_used);
+EXPORT_SYMBOL(virtio_queue_next_used);
 EXPORT_SYMBOL(virtio_reset);
 EXPORT_SYMBOL(virtio_queue_free);

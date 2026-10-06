@@ -20,6 +20,7 @@
 #include "drivers/core/device.h"
 #include "drivers/core/module.h"
 #include "fs/initramfs/initramfs.h"
+#include "net/net.h"
 #include "fs/vfs/vfs.h"
 #include "memory/layout.h"
 #include "memory/memory.h"
@@ -119,6 +120,9 @@ static void start_devices(void)
 {
     if (STATUS_IS_ERROR(vfs_init()))
         panic("cannot create the root file system");
+    /* Before the drivers: network drivers register their interfaces with the stack. */
+    if (STATUS_IS_ERROR(net_init()))
+        panic("cannot start the network stack");
     device_manager_init();
     module_init_builtin();
     unsigned loaded = module_load_boot_modules();

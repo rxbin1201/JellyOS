@@ -45,9 +45,9 @@ BOOT_LDFLAGS := -nostdlib -shared -Bsymbolic -znocombreloc -z noexecstack \
 # --- Kernel (ELF64, higher half) ---------------------------------------------
 
 KERNEL_OBJ_DIR := $(BUILD)/kernel
-# Built-in drivers live in drivers/, storage layers and file systems in fs/. Kernel tests (tests/kernel) are linked
+# Built-in drivers live in drivers/, storage layers and file systems in fs/, the network stack in net/. Kernel tests (tests/kernel) are linked
 # into the kernel and run with selftest=1.
-KERNEL_SRCS    := $(shell find kernel drivers fs tests/kernel -name '*.c' -o -name '*.S')
+KERNEL_SRCS    := $(shell find kernel drivers fs net tests/kernel -name '*.c' -o -name '*.S')
 KERNEL_OBJS    := $(patsubst %,$(BUILD)/%.o,$(KERNEL_SRCS))
 KERNEL_LDS     := kernel/arch/x86_64/linker.ld
 KERNEL_ELF     := $(BUILD)/kernel.elf
@@ -86,13 +86,20 @@ LIBC_CRT0    := $(BUILD)/userspace/libc/crt0.c.o
 LIBC_A       := $(BUILD)/userspace/libc.a
 
 # User code sees only the SDK headers and GCC's freestanding ones (stddef, stdint, stdarg, limits, ...).
-USER_CFLAGS  := -std=gnu11 -O2 -g -Wall -Wextra -Werror -nostdinc -isystem $(shell $(CC) -print-file-name=include)                 -I$(SDK_INC) -I.                 -ffreestanding -fno-stack-protector -fno-pic -fno-pie                 -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns                 -MMD -MP
+USER_CFLAGS  := -std=gnu11 -O2 -g -Wall -Wextra -Werror -nostdinc -isystem $(shell $(CC) -print-file-name=include) \
+                -I$(SDK_INC) -I. \
+                -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
+                -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns \
+                -MMD -MP
 USER_LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -z noexecstack -T $(USER_LDS)
+# Compiler support routines (__popcountdi2, 128-bit division, ...)
+LIBGCC       := $(shell $(CC) -print-libgcc-file-name)
 
 # Programs of the initramfs: <name>:<install path>:<sources>
 PROGRAM_DIR  := $(BUILD)/userspace/programs
 COREUTILS    := cat cp echo false ls mkdir mv rm sleep touch true
-PROGRAMS     := init:/init:userspace/init/init.c                 servicemanager:/sbin/servicemanager:userspace/services/servicemanager/servicemanager.c                 sh:/bin/sh:userspace/shell/shell.c                 $(foreach u,$(COREUTILS),$(u):/bin/$(u):userspace/applications/coreutils/$(u).c)
+NETTOOLS     := http ifconfig nc nslookup ping
+PROGRAMS     := init:/init:userspace/init/init.c                 servicemanager:/sbin/servicemanager:userspace/services/servicemanager/servicemanager.c                 networkd:/sbin/networkd:userspace/services/network/networkd.c                 sh:/bin/sh:userspace/shell/shell.c                 $(foreach u,$(NETTOOLS),$(u):/bin/$(u):userspace/applications/network/$(u).c)                 $(foreach u,$(COREUTILS),$(u):/bin/$(u):userspace/applications/coreutils/$(u).c)
 program_name   = $(word 1,$(subst :, ,$(1)))
 program_path   = $(word 2,$(subst :, ,$(1)))
 program_source = $(word 3,$(subst :, ,$(1)))
@@ -138,8 +145,15 @@ endif
 qemu_disks  = -drive if=pflash,format=raw,file=$(2) -drive format=raw,file=fat:rw:$(1)
 # $(call virtio_disk,<image>,<id>)
 virtio_disk = -drive file=$(1),if=none,id=$(2),format=raw -device virtio-blk-pci,drive=$(2)
+# $(call virtio_nic,<id>): VirtIO NIC on QEMU's user network (NAT; gateway and host 10.0.2.2, DNS 10.0.2.3)
+virtio_nic  = -netdev user,id=$(1) -device virtio-net-pci,netdev=$(1)
 
 QEMU_FLAGS := $(QEMU_BASE) $(call qemu_disks,$(ESP),$(VARS_COPY))
+
+# make run NET=0: without a network card
+ifneq ($(NET),0)
+QEMU_FLAGS += $(call virtio_nic,net0)
+endif
 
 # make run DISK=<image>: attach a raw disk image as a VirtIO block device
 ifneq ($(DISK),)
@@ -198,6 +212,10 @@ $(BUILD)/fs/%.o: fs/%
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
+$(BUILD)/net/%.o: net/%
+	@mkdir -p $(@D)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
 $(BUILD)/tests/%.o: tests/%
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
@@ -225,9 +243,11 @@ $(LIBC_A): $(LIBC_OBJS)
 define program_rule
 $(PROGRAM_DIR)/$(call program_name,$(1)).elf: $(BUILD)/$(call program_source,$(1)).o $(LIBC_CRT0) $(LIBC_A) $(LIBOS_A) $(USER_LDS)
 	@mkdir -p $$(@D)
-	$(LD) $(USER_LDFLAGS) $(LIBC_CRT0) $(BUILD)/$(call program_source,$(1)).o 	      --start-group $(LIBC_A) $(LIBOS_A) --end-group -o $$@
+	$(LD) $(USER_LDFLAGS) $(LIBC_CRT0) $(BUILD)/$(call program_source,$(1)).o \
+	      --start-group $(LIBC_A) $(LIBOS_A) --end-group $(LIBGCC) -o $$@
 endef
 $(foreach p,$(PROGRAMS),$(eval $(call program_rule,$(p))))
+
 # libc test program embedded into the kernel (tests/kernel/user_images.S); not part of the initramfs
 SPAWNTEST := spawntest:-:tests/userspace/spawntest.c
 $(eval $(call program_rule,$(SPAWNTEST)))
@@ -316,7 +336,7 @@ test: all $(TEST_MODULES) $(INITRAMFS)
 	@sh tools/image_builder/mkdisk.sh $(TEST_DISK) 64 $(TEST_DISK_FILES) JELLYTEST
 	@timeout $(TEST_TIMEOUT) $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(TEST_ESP),$(TEST_VARS)) -display none \
 	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -device edu -device e1000e \
-	    $(call virtio_disk,$(TEST_DISK),testdisk); \
+	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0); \
 	status=$$?; \
 	if [ $$status -ne 1 ]; then echo "make test: FAILED (QEMU exit status $$status)"; exit 1; fi
 	@# The host (mtools) must read what the kernel's FAT32 driver wrote.
@@ -335,7 +355,7 @@ test: all $(TEST_MODULES) $(INITRAMFS)
 	@cp $(OVMF_VARS) $(SHELL_TEST_VARS)
 	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) -- \
 	    $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(SHELL_TEST_ESP),$(SHELL_TEST_VARS)) -display none \
-	    $(call virtio_disk,$(TEST_DISK),testdisk) || { echo "make test: FAILED (shell test)"; exit 1; }
+	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) || { echo "make test: FAILED (shell test)"; exit 1; }
 	@if mtype -i $(TEST_DISK)@@1M ::/motd.txt | grep -q "Welcome to JellyOS"; then \
 	    echo "make test: host reads the file the shell copied"; \
 	else echo "make test: FAILED (host cannot read ::/motd.txt)"; exit 1; fi

@@ -1,6 +1,6 @@
 # JellyOS System Call ABI
 
-**ABI version:** 3 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`.
+**ABI version:** 4 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25.
 **Headers:** [`sdk/include/jelly/syscall.h`](../../sdk/include/jelly/syscall.h) (numbers, rights, flags), [`sdk/include/jelly/status.h`](../../sdk/include/jelly/status.h) (errors), [`sdk/include/jelly/os.h`](../../sdk/include/jelly/os.h) (libos wrappers)
 
 ## Calling convention (x86_64)
@@ -153,6 +153,35 @@ typedef struct {
 } jelly_process_info_t;
 ```
 
+### Networking (version 4)
+
+Addresses are `jelly_sockaddr_in_t`, which has the same layout as BSD
+`sockaddr_in`. Ports and addresses are in network byte order. See
+[networking.md](../architecture/networking.md) for the protocol behavior.
+
+| # | Name | Arguments | Output | Rights / notes |
+|---|---|---|---|---|
+| 46 | `SYS_SOCKET_CREATE` | `domain, type, protocol, jelly_handle_t *socket` | handle (`READ`, `WRITE`, `WAIT`, `DUPLICATE`) | `JELLY_AF_INET`; `JELLY_SOCK_STREAM` (TCP), `JELLY_SOCK_DGRAM` (UDP, or ICMP echo with `JELLY_IPPROTO_ICMP`) |
+| 47 | `SYS_SOCKET_BIND` | `handle, const jelly_sockaddr_in_t *address` | | Needs `WRITE`. Port 0 picks an ephemeral port (49152–65535). `ADDRESS_IN_USE` |
+| 48 | `SYS_SOCKET_CONNECT` | `handle, address` | | Needs `WRITE`. TCP blocks until established (send timeout applies; `WOULD_BLOCK` if non-blocking). `CONNECTION_REFUSED`, `TIMEOUT`, `UNREACHABLE`. Datagram: sets the default peer (address 0 removes it) |
+| 49 | `SYS_SOCKET_LISTEN` | `handle, backlog` | | Needs `WRITE`. TCP only, backlog 1–128 |
+| 50 | `SYS_SOCKET_ACCEPT` | `handle, jelly_handle_t *connection, jelly_sockaddr_in_t *peer` | new socket handle, peer (if not NULL) | Needs `READ`. Blocks (receive timeout) |
+| 51 | `SYS_SOCKET_SEND` | `handle, data, size, const jelly_sockaddr_in_t *to, flags, size_t *done` | bytes sent | Needs `WRITE`. Streams: at most 64 KiB per call, may block for buffer space; `PEER_CLOSED` after shutdown. Datagrams: `to` or the connected peer; broadcasts need `JELLY_SO_BROADCAST` |
+| 52 | `SYS_SOCKET_RECEIVE` | `handle, buffer, size, jelly_sockaddr_in_t *from, flags, size_t *done` | bytes, sender | Needs `READ`. 0 bytes = end of stream. `JELLY_MSG_PEEK`, `JELLY_MSG_DONTWAIT`. Pending errors (`CONNECTION_REFUSED`, `CONNECTION_RESET`) are reported here |
+| 53 | `SYS_SOCKET_SHUTDOWN` | `handle, how` | | `JELLY_SHUT_READ`, `WRITE` (TCP sends FIN), `BOTH` |
+| 54 | `SYS_SOCKET_SET_OPTION` | `handle, option, uint64_t value` | | Needs `WRITE`. `RECEIVE_TIMEOUT`/`SEND_TIMEOUT` (ns, 0 = forever), `NONBLOCKING`, `BROADCAST`, `REUSE_ADDRESS`, `INTERFACE` (index + 1) |
+| 55 | `SYS_SOCKET_INFO` | `handle, jelly_socket_info_t *info` | type, state, addresses, pending error, readable amount | |
+| 56 | `SYS_NET_INTERFACE_INFO` | `index, jelly_netif_info_t *info` | name, flags, MAC, MTU, IPv4 configuration, counters | `NOT_FOUND` after the last interface |
+| 57 | `SYS_NET_CONFIGURE` | `index, const jelly_netif_config_t *config` | | Root only. Address 0 removes the configuration. The netmask must be contiguous and the gateway on the subnet. Not for `lo` |
+| 58 | `SYS_NET_RESOLVE` | `name, length, uint32_t *address` | IPv4 address | Dotted quads, `localhost`, otherwise DNS. `NOT_FOUND` (no such name), `TIMEOUT`, `UNREACHABLE` (no name server) |
+
+Socket handles are waitable (readable, end of stream or error) and can be
+used with `SYS_FILE_READ`/`SYS_FILE_WRITE`. Handles always fit a positive
+`int` (bit 31 is clear), so libc uses them directly as socket descriptors.
+
+New status codes: `CONNECTION_REFUSED` (21), `CONNECTION_RESET` (22),
+`NOT_CONNECTED` (23), `ADDRESS_IN_USE` (24), `UNREACHABLE` (25).
+
 ```c
 typedef struct {
     uint32_t type;   /* JELLY_FILE_TYPE_FILE, _DIRECTORY, _SYMLINK, _DEVICE, _PIPE */
@@ -173,8 +202,8 @@ typedef struct {
 ## Handles
 
 Handles are 32-bit values local to a process: bits 0–15 hold the slot and
-bits 16–31 a generation, so a closed handle never becomes valid again by
-accident. `0` is never a valid handle. Every handle carries rights:
+bits 16–30 a generation (1–32767, bit 31 always clear), so a closed handle
+never becomes valid again by accident. `0` is never a valid handle. Every handle carries rights:
 
 | Right | Allows |
 |---|---|
@@ -185,6 +214,9 @@ accident. `0` is never a valid handle. Every handle carries rights:
 | `JELLY_RIGHT_MAP` | Mapping shared memory |
 | `JELLY_RIGHT_DUPLICATE` | Duplicating the handle (with equal or fewer rights) |
 | `JELLY_RIGHT_MANAGE` | Killing a process (`SYS_PROCESS_KILL`) |
+
+Sockets: `READ` to receive and accept, `WRITE` to send, connect, bind,
+listen and set options.
 
 Waitable objects and their signaled state:
 

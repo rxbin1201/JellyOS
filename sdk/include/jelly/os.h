@@ -83,6 +83,23 @@ status_t jelly_process_kill(jelly_handle_t process, int32_t code);
 status_t jelly_pipe_create(jelly_handle_t *read_end, jelly_handle_t *write_end);
 status_t jelly_system_power(uint32_t action);
 
+/* Networking (ABI version 4); addresses in network byte order */
+status_t jelly_socket(uint32_t domain, uint32_t type, uint32_t protocol, jelly_handle_t *socket);
+status_t jelly_bind(jelly_handle_t socket, const jelly_sockaddr_in_t *address);
+status_t jelly_connect(jelly_handle_t socket, const jelly_sockaddr_in_t *address);
+status_t jelly_listen(jelly_handle_t socket, uint32_t backlog);
+status_t jelly_accept(jelly_handle_t socket, jelly_handle_t *connection, jelly_sockaddr_in_t *peer);
+status_t jelly_send(jelly_handle_t socket, const void *data, size_t size, const jelly_sockaddr_in_t *to,
+                    uint32_t flags, size_t *done);
+status_t jelly_receive(jelly_handle_t socket, void *buffer, size_t size, jelly_sockaddr_in_t *from, uint32_t flags,
+                       size_t *done);
+status_t jelly_shutdown(jelly_handle_t socket, uint32_t how);
+status_t jelly_socket_option(jelly_handle_t socket, uint32_t option, uint64_t value);
+status_t jelly_socket_info(jelly_handle_t socket, jelly_socket_info_t *info);
+status_t jelly_net_interface_info(uint32_t index, jelly_netif_info_t *info);
+status_t jelly_net_configure(uint32_t index, const jelly_netif_config_t *config);
+status_t jelly_net_resolve(const char *name, uint32_t *address);
+
 /* Startup handle slot `index` of a libc program (JELLY_HANDLE_INVALID if absent).
    Provided by the libc entry code, not by libos. */
 jelly_handle_t jelly_startup_handle(unsigned index);

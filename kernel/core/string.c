@@ -75,6 +75,24 @@ int strncmp(const char *a, const char *b, size_t count)
     return 0;
 }
 
+char *strcpy(char *restrict dest, const char *restrict src)
+{
+    char *d = dest;
+    while ((*d++ = *src++))
+        ;
+    return dest;
+}
+
+char *strchr(const char *s, int c)
+{
+    for (;; s++) {
+        if (*s == (char)c)
+            return (char *)s;
+        if (!*s)
+            return NULL;
+    }
+}
+
 EXPORT_SYMBOL(memset);
 EXPORT_SYMBOL(memcpy);
 EXPORT_SYMBOL(memmove);
@@ -82,3 +100,5 @@ EXPORT_SYMBOL(memcmp);
 EXPORT_SYMBOL(strlen);
 EXPORT_SYMBOL(strcmp);
 EXPORT_SYMBOL(strncmp);
+EXPORT_SYMBOL(strcpy);
+EXPORT_SYMBOL(strchr);

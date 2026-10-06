@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Integration test for milestone M6: boot into the shell and use it.
+"""Integration test for milestones M6 and M7: boot into the shell, use it and the network.
 
 usage: shell_test.py [--timeout SECONDS] -- QEMU COMMAND LINE...
 
@@ -7,15 +7,26 @@ The machine boots normally (initramfs, init, service manager, shell). The
 script waits for each shell prompt on the serial console, types a command,
 and checks the output that appears before the next prompt. The last command
 is `poweroff`, after which QEMU must exit by itself.
+
+For the network steps the QEMU command line must attach a NIC on the user
+network. The script runs an HTTP server and TCP/UDP echo servers on the
+host's 127.0.0.1, which JellyOS reaches as 10.0.2.2.
 Exit status 0 means every check passed.
 """
 
+import http.server
 import os
 import re
 import select
+import socket
+import socketserver
 import subprocess
 import sys
+import tempfile
+import threading
 import time
+
+HOST_TEXT = "Hello from the host, served over TCP to JellyOS."
 
 PROMPT = re.compile(rb"jelly:[^\r\n#]*# $")
 ANSI = re.compile(rb"\x1b\[[0-9;?=]*[A-Za-z]")
@@ -41,8 +52,71 @@ STEPS = [
     ("cat /volumes/virtio0p1/hello.txt", ["Hello"]),
     ("cp /etc/motd /volumes/virtio0p1/motd.txt; sync", []),
     (["cat", "typed into cat", "\x04"], ["typed into cat\ntyped into cat"]),
-    ("poweroff", ["Powering off."]),
 ]
+
+FINAL_STEP = ("poweroff", ["Powering off."])
+
+
+def network_steps(http_port, tcp_port, udp_port):
+    """Milestone M7 over QEMU's user network (gateway 10.0.2.2 = the host's 127.0.0.1)."""
+    return [
+        # DHCP runs in the background (networkd); retry until the lease is there.
+        ("ifconfig eth0", ["inet 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3"], 30),
+        ("ping -c 2 -i 0.2 10.0.2.2", ["2 packets transmitted, 2 received"]),
+        ("nslookup localhost 10.0.2.2", ["Address: 127.0.0.1", "Address: 10.0.2.2"]),
+        (f"http http://10.0.2.2:{http_port}/hello.txt", [HOST_TEXT]),
+        (f"http -o /tmp/page.txt http://10.0.2.2:{http_port}/hello.txt; cat /tmp/page.txt", [HOST_TEXT]),
+        (f"http http://10.0.2.2:{http_port}/missing; echo code $?", ["server answered 404", "code 1"]),
+        (f"echo jelly over tcp | nc 10.0.2.2 {tcp_port}", ["JELLY OVER TCP"]),
+        (f"echo jelly over udp | nc -u -w 2 10.0.2.2 {udp_port}", ["JELLY OVER UDP"]),
+        ("http http://10.0.2.2:1/", ["Connection refused"]),
+        ("svc status network", ["network", "running"]),
+    ]
+
+
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+
+def start_host_servers():
+    """HTTP server for a temporary directory plus TCP and UDP echo servers that answer in upper case."""
+    directory = tempfile.mkdtemp(prefix="jellyos-http-")
+    with open(os.path.join(directory, "hello.txt"), "w") as f:
+        f.write(HOST_TEXT + "\n")
+
+    def handler(*args, **kwargs):
+        return QuietHandler(*args, directory=directory, **kwargs)
+
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp.bind(("127.0.0.1", 0))
+    tcp.listen(4)
+
+    def tcp_echo():
+        while True:
+            connection, _ = tcp.accept()
+            with connection:
+                data = b""
+                while chunk := connection.recv(4096):
+                    data += chunk
+                connection.sendall(data.upper())
+
+    threading.Thread(target=tcp_echo, daemon=True).start()
+
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+
+    def udp_echo():
+        while True:
+            data, sender = udp.recvfrom(65536)
+            udp.sendto(data.upper(), sender)
+
+    threading.Thread(target=udp_echo, daemon=True).start()
+    return httpd.server_address[1], tcp.getsockname()[1], udp.getsockname()[1]
 
 
 class Console:
@@ -92,27 +166,37 @@ def main():
         return 2
     os.makedirs("build", exist_ok=True)
     log = open("build/shell-test.log", "wb")
+    steps = STEPS[:]
+    if "virtio-net" in " ".join(args):
+        steps += network_steps(*start_host_servers())
+    steps.append(FINAL_STEP)
     console = Console(args[1:], log)
     failures = 0
 
     try:
         console.read_until(PROMPT, timeout)
         print("shell test: shell prompt reached")
-        for inputs, expected in STEPS:
+        for step in steps:
+            inputs, expected = step[0], step[1]
+            attempts = step[2] if len(step) > 2 else 1
             if isinstance(inputs, str):
                 inputs = [inputs]
-            for i, line in enumerate(inputs):
-                if i:
-                    time.sleep(1.0)
-                console.send(line)
-            command = inputs[0]
-            if command == "poweroff":
-                output = console.read_until(re.compile(rb"power: powering off"), timeout)
-            else:
-                output = console.read_until(PROMPT, timeout)
-            # The first line is the console's echo of the command itself.
-            output = output.split("\n", 1)[1] if "\n" in output else ""
-            missing = [e for e in expected if e not in output]
+            for attempt in range(attempts):
+                for i, line in enumerate(inputs):
+                    if i:
+                        time.sleep(1.0)
+                    console.send(line)
+                command = inputs[0]
+                if command == "poweroff":
+                    output = console.read_until(re.compile(rb"power: powering off"), timeout)
+                else:
+                    output = console.read_until(PROMPT, timeout)
+                # The first line is the console's echo of the command itself.
+                output = output.split("\n", 1)[1] if "\n" in output else ""
+                missing = [e for e in expected if e not in output]
+                if not missing:
+                    break
+                time.sleep(1.0)
             shown = " / ".join(inputs).replace("\x04", "^D")
             if missing:
                 failures += 1

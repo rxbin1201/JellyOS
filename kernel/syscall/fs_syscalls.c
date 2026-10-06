@@ -93,8 +93,12 @@ status_t sys_file_read(const uint64_t *a)
     if (!user_range_ok(a[3], sizeof(uint64_t), true) || (size && !user_range_ok(buffer, size, true)))
         return STATUS_INVALID_ARGUMENT;
     status_t status = get_file(a[0], JELLY_RIGHT_READ, &file);
-    if (STATUS_IS_ERROR(status))
-        return status;
+    if (STATUS_IS_ERROR(status)) {
+        /* Sockets can be read like files (stdin of a network program). */
+        if (STATUS_IS_ERROR(syscall_socket_file_io(a[0], false, buffer, size, &total)))
+            return status;
+        return put_user_u64(a[3], total);
+    }
 
     uint8_t *chunk = kmalloc(IO_CHUNK);
     if (!chunk)
@@ -121,8 +125,12 @@ status_t sys_file_write(const uint64_t *a)
     if (!user_range_ok(a[3], sizeof(uint64_t), true) || (size && !user_range_ok(buffer, size, false)))
         return STATUS_INVALID_ARGUMENT;
     status_t status = get_file(a[0], JELLY_RIGHT_WRITE, &file);
-    if (STATUS_IS_ERROR(status))
-        return status;
+    if (STATUS_IS_ERROR(status)) {
+        status_t socket_status = syscall_socket_file_io(a[0], true, buffer, size, &total);
+        if (socket_status == STATUS_BAD_HANDLE || socket_status == STATUS_ACCESS_DENIED)
+            return status;
+        return STATUS_IS_ERROR(socket_status) ? socket_status : put_user_u64(a[3], total);
+    }
 
     uint8_t *chunk = kmalloc(IO_CHUNK);
     if (!chunk)

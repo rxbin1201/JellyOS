@@ -1,7 +1,7 @@
 /*
  * VirtIO 1.x over PCI ("modern" transport) and split virtqueues.
  *
- * Shared by all VirtIO device drivers (block now, network and input later).
+ * Shared by all VirtIO device drivers (block, network; input later).
  * Configuration structures are found through vendor-specific PCI
  * capabilities; queue interrupts use MSI-X.
  */
@@ -77,6 +77,8 @@ void     virtio_queue_submit(virtqueue_t *queue, uint16_t head);
 /* True if the device returned a used buffer the driver has not consumed yet. */
 bool     virtio_queue_has_used(virtqueue_t *queue);
 void     virtio_queue_pop_used(virtqueue_t *queue);
+/* Take the next used buffer: its head descriptor and the bytes the device wrote. False if none. */
+bool     virtio_queue_next_used(virtqueue_t *queue, uint32_t *id, uint32_t *length);
 
 void     virtio_reset(virtio_device_t *virtio);
 void     virtio_queue_free(virtqueue_t *queue);

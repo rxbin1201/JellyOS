@@ -36,6 +36,12 @@ typedef enum {
     STATUS_IS_DIRECTORY     = 18,
     STATUS_NOT_EMPTY        = 19,
     STATUS_NO_SPACE         = 20,
+    /* appended in syscall ABI version 4 (networking) */
+    STATUS_CONNECTION_REFUSED = 21,
+    STATUS_CONNECTION_RESET   = 22,
+    STATUS_NOT_CONNECTED      = 23,
+    STATUS_ADDRESS_IN_USE     = 24,
+    STATUS_UNREACHABLE        = 25,
 } status_t;
 
 #define STATUS_IS_ERROR(s) ((s) != STATUS_SUCCESS)
@@ -64,6 +70,11 @@ static inline const char *status_name(status_t status)
     case STATUS_IS_DIRECTORY:     return "IS_DIRECTORY";
     case STATUS_NOT_EMPTY:        return "NOT_EMPTY";
     case STATUS_NO_SPACE:         return "NO_SPACE";
+    case STATUS_CONNECTION_REFUSED: return "CONNECTION_REFUSED";
+    case STATUS_CONNECTION_RESET:   return "CONNECTION_RESET";
+    case STATUS_NOT_CONNECTED:      return "NOT_CONNECTED";
+    case STATUS_ADDRESS_IN_USE:     return "ADDRESS_IN_USE";
+    case STATUS_UNREACHABLE:        return "UNREACHABLE";
     }
     return "UNKNOWN";
 }

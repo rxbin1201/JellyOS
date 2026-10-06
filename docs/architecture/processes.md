@@ -122,8 +122,10 @@ One mechanism per problem:
 
 | Pipe | Byte stream between programs (shell `a \| b`) | 16 KiB ring, file handles (stream vnodes), EOF without writers, `PEER_CLOSED` without readers |
 
-Not yet available: passing handles through channels, waiting on several
-objects at once, and sockets (with the network stack).
+| Socket | Network communication | TCP streams, UDP and ICMP datagrams; see [networking.md](networking.md) |
+
+Not yet available: passing handles through channels, and waiting on several
+objects at once.
 
 ## Isolation and security (README section 41)
 

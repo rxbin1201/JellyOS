@@ -247,6 +247,11 @@ char *strerror(int error)
     case EISDIR:    return "Is a directory";
     case ENOTEMPTY: return "Directory not empty";
     case ENOSPC:    return "No space left";
+    case ECONNREFUSED: return "Connection refused";
+    case ECONNRESET:   return "Connection reset by peer";
+    case ENOTCONN:     return "Not connected";
+    case EADDRINUSE:   return "Address in use";
+    case EHOSTUNREACH: return "No route to host";
     default:        return "Unknown error";
     }
 }

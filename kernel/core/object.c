@@ -65,6 +65,7 @@ const char *object_type_name(object_type_t type)
     case OBJECT_CHANNEL:       return "channel";
     case OBJECT_SHARED_MEMORY: return "shared memory";
     case OBJECT_FILE:          return "file";
+    case OBJECT_SOCKET:        return "socket";
     }
     return "unknown";
 }

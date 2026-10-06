@@ -6,8 +6,8 @@
  *   channel        - message queue between two endpoints, datagram semantics
  *   shared memory  - bulk data, mapped into several address spaces
  *   futex          - user-space synchronization (wait/wake on a 32-bit word)
- * Pipes (byte streams for file descriptors) and sockets arrive with the VFS
- * and the network stack.
+ *   pipe           - byte stream between programs (file handles, below)
+ * Sockets live in the network stack (net/sockets).
  */
 
 #ifndef IPC_IPC_H

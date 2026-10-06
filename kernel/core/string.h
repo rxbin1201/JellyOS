@@ -15,5 +15,7 @@ int    memcmp(const void *a, const void *b, size_t count);
 size_t strlen(const char *s);
 int    strcmp(const char *a, const char *b);
 int    strncmp(const char *a, const char *b, size_t count);
+char  *strcpy(char *restrict dest, const char *restrict src);
+char  *strchr(const char *s, int c);
 
 #endif

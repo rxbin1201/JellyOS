@@ -100,6 +100,23 @@ reports what it received and exercises the libc: heap, `printf` formats,
 number conversion, sorting, environment, C11 threads with a mutex, and
 buffered file I/O with seeking.
 
+### Network tests (Phase 8)
+
+`make test` attaches a virtio-net card on QEMU's user network.
+[`tests/kernel/net_tests.c`](../../tests/kernel/net_tests.c) covers:
+
+- the Internet checksum (RFC 1071 example) and address parsing
+- ping, UDP (ports, peek, truncation, broadcast permission, ICMP port
+  unreachable, timeouts) and TCP over loopback: connect/accept, data both
+  ways, half close, end of stream, connection refused
+- a 1 MiB transfer between two kernel threads, whose slow reader forces the
+  sender into a full window
+- the DNS resolver against a fake server thread on 127.0.0.1:5353
+  (case-insensitive names, cache, NXDOMAIN, numeric names, `localhost`,
+  invalid names, query encoding)
+- the VirtIO NIC: static configuration, ARP and ping to the user network's
+  gateway 10.0.2.2, and a TCP reset from a closed host port
+
 ## Integration test: the shell (milestone M6)
 
 After the kernel tests pass, `make test` boots a second time, normally this
@@ -119,6 +136,22 @@ types a command and checks the output up to the next prompt:
 
 Afterwards the host checks `::/motd.txt` on the test disk with `mtype`. The
 console log of the run is saved to `build/shell-test.log`.
+
+**Network (milestone M7).** The script starts an HTTP server and TCP/UDP
+echo servers on the host's 127.0.0.1. JellyOS reaches them as 10.0.2.2
+through QEMU's user network. The steps check:
+
+- the DHCP lease from `networkd` (`ifconfig eth0`, retried until it appears)
+- `ping` to the gateway and `nslookup`
+- `http` downloads (to stdout and with `-o`), a 404 with its exit code
+- `nc` over TCP and UDP (the echo servers answer in upper case, which proves
+  both directions)
+- "connection refused" for a closed port, and the state of the `network`
+  service
+
+Access to the real Internet is not part of `make test`, so the tests do not
+depend on the host's connectivity. Check it by hand with `make run`, then
+`nslookup example.com` and `http http://example.com/`.
 
 Requirements on the host: `sgdisk` (gdisk) and `mtools`.
 

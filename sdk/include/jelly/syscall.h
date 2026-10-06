@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define JELLY_SYSCALL_ABI_VERSION 3
+#define JELLY_SYSCALL_ABI_VERSION 4
 
 typedef uint32_t jelly_handle_t;
 #define JELLY_HANDLE_INVALID 0u
@@ -70,6 +70,20 @@ enum {
     SYS_PROCESS_KILL     = 43, /* (handle, int32_t exit_code) */
     SYS_PIPE_CREATE      = 44, /* (jelly_handle_t *read_end, jelly_handle_t *write_end) */
     SYS_SYSTEM_POWER     = 45, /* (uint32_t action)                                          root only */
+    /* ABI version 4: networking */
+    SYS_SOCKET_CREATE    = 46, /* (uint32_t domain, uint32_t type, uint32_t protocol, jelly_handle_t *socket) */
+    SYS_SOCKET_BIND      = 47, /* (handle, const jelly_sockaddr_in_t *address) */
+    SYS_SOCKET_CONNECT   = 48, /* (handle, const jelly_sockaddr_in_t *address) */
+    SYS_SOCKET_LISTEN    = 49, /* (handle, uint32_t backlog) */
+    SYS_SOCKET_ACCEPT    = 50, /* (handle, jelly_handle_t *connection, jelly_sockaddr_in_t *peer or NULL) */
+    SYS_SOCKET_SEND      = 51, /* (handle, buffer, size, const jelly_sockaddr_in_t *to or NULL, flags, size_t *done) */
+    SYS_SOCKET_RECEIVE   = 52, /* (handle, buffer, size, jelly_sockaddr_in_t *from or NULL, flags, size_t *done) */
+    SYS_SOCKET_SHUTDOWN  = 53, /* (handle, uint32_t how) */
+    SYS_SOCKET_SET_OPTION = 54, /* (handle, uint32_t option, uint64_t value) */
+    SYS_SOCKET_INFO      = 55, /* (handle, jelly_socket_info_t *info) */
+    SYS_NET_INTERFACE_INFO = 56, /* (uint32_t index, jelly_netif_info_t *info)                NOT_FOUND past the last */
+    SYS_NET_CONFIGURE    = 57, /* (uint32_t index, const jelly_netif_config_t *config)      root only */
+    SYS_NET_RESOLVE      = 58, /* (name, length, uint32_t *address)                          address in network order */
     SYS_COUNT
 };
 
@@ -160,6 +174,86 @@ typedef struct {
     char     name[32];
 } jelly_process_info_t;
 
+/* --- Networking (ABI version 4) ------------------------------------------- */
+
+/* Addresses and ports in jelly_sockaddr_in_t are in network byte order (as in BSD sockaddr_in). */
+#define JELLY_AF_INET         2
+
+#define JELLY_SOCK_STREAM     1 /* TCP */
+#define JELLY_SOCK_DGRAM      2 /* UDP; with protocol JELLY_IPPROTO_ICMP: ICMP echo ("ping socket") */
+
+#define JELLY_IPPROTO_ICMP    1
+#define JELLY_IPPROTO_TCP     6
+#define JELLY_IPPROTO_UDP     17
+
+typedef struct {
+    uint16_t family;   /* JELLY_AF_INET */
+    uint16_t port;     /* network order */
+    uint32_t address;  /* network order */
+    uint8_t  zero[8];
+} jelly_sockaddr_in_t;
+
+/* SYS_SOCKET_SHUTDOWN */
+#define JELLY_SHUT_READ       0
+#define JELLY_SHUT_WRITE      1
+#define JELLY_SHUT_BOTH       2
+
+/* SYS_SOCKET_SEND / RECEIVE flags */
+#define JELLY_MSG_PEEK        (1u << 0) /* receive without removing the data */
+#define JELLY_MSG_DONTWAIT    (1u << 1) /* WOULD_BLOCK instead of blocking */
+
+/* SYS_SOCKET_SET_OPTION */
+#define JELLY_SO_RECEIVE_TIMEOUT 1 /* ns, 0 = forever */
+#define JELLY_SO_SEND_TIMEOUT    2 /* ns, 0 = forever; also limits connect */
+#define JELLY_SO_NONBLOCKING     3 /* 0/1 */
+#define JELLY_SO_BROADCAST       4 /* 0/1: allow sending to 255.255.255.255 */
+#define JELLY_SO_REUSE_ADDRESS   5 /* 0/1: bind to a port still in TIME_WAIT */
+#define JELLY_SO_INTERFACE       6 /* interface index + 1, 0 = any: send and receive only there */
+
+#define JELLY_SOCKET_STATE_UNCONNECTED 0
+#define JELLY_SOCKET_STATE_LISTENING   1
+#define JELLY_SOCKET_STATE_CONNECTING  2
+#define JELLY_SOCKET_STATE_CONNECTED   3
+#define JELLY_SOCKET_STATE_CLOSING     4 /* the peer or we have shut down a direction */
+#define JELLY_SOCKET_STATE_CLOSED      5
+
+typedef struct {
+    uint32_t            type;      /* JELLY_SOCK_* */
+    uint32_t            protocol;  /* JELLY_IPPROTO_* */
+    uint32_t            state;     /* JELLY_SOCKET_STATE_* */
+    uint32_t            pending_error; /* status_t of a failed connection, else 0 */
+    jelly_sockaddr_in_t local;
+    jelly_sockaddr_in_t remote;
+    uint64_t            readable;  /* bytes (stream) or datagrams queued */
+} jelly_socket_info_t;
+
+#define JELLY_NETIF_NAME_MAX    16
+#define JELLY_NETIF_UP          (1u << 0)
+#define JELLY_NETIF_LOOPBACK    (1u << 1)
+#define JELLY_NETIF_LINK        (1u << 2) /* carrier detected */
+#define JELLY_NETIF_CONFIGURED  (1u << 3) /* has an IPv4 address */
+
+typedef struct {
+    uint32_t index;
+    uint32_t flags;                    /* JELLY_NETIF_* */
+    char     name[JELLY_NETIF_NAME_MAX];
+    uint8_t  mac[6];
+    uint16_t mtu;
+    uint32_t address;                  /* IPv4, network order; 0 = none */
+    uint32_t netmask;
+    uint32_t gateway;
+    uint32_t dns;
+    uint64_t rx_packets, rx_bytes, rx_dropped;
+    uint64_t tx_packets, tx_bytes, tx_dropped;
+} jelly_netif_info_t;
+
+typedef struct {
+    uint32_t address;                  /* network order; 0 removes the configuration */
+    uint32_t netmask;
+    uint32_t gateway;                  /* 0: none */
+    uint32_t dns;                      /* 0: none */
+} jelly_netif_config_t;
+
 /* SYS_SYSTEM_POWER actions */
 #define JELLY_POWER_OFF    1
 #define JELLY_POWER_REBOOT 2
@@ -173,6 +267,7 @@ typedef struct {
 #define JELLY_RIGHT_DUPLICATE (1u << 5) /* SYS_HANDLE_DUPLICATE */
 #define JELLY_RIGHT_MANAGE    (1u << 6) /* SYS_PROCESS_KILL */
 #define JELLY_RIGHTS_ALL      0x7Fu
+/* Sockets: READ receive/accept, WRITE send/connect/bind/listen/options, WAIT readable */
 
 /* SYS_MEMORY_ALLOCATE / SYS_SHM_MAP flags (memory is always readable) */
 #define JELLY_MEMORY_WRITE    (1u << 0)

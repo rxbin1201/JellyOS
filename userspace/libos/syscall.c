@@ -294,3 +294,72 @@ status_t jelly_system_power(uint32_t action)
 {
     return (status_t)SYSCALL1(SYS_SYSTEM_POWER, action);
 }
+
+/* --- Networking (ABI version 4) ---------------------------------------------------- */
+
+status_t jelly_socket(uint32_t domain, uint32_t type, uint32_t protocol, jelly_handle_t *socket)
+{
+    return (status_t)SYSCALL4(SYS_SOCKET_CREATE, domain, type, protocol, socket);
+}
+
+status_t jelly_bind(jelly_handle_t socket, const jelly_sockaddr_in_t *address)
+{
+    return (status_t)SYSCALL2(SYS_SOCKET_BIND, socket, address);
+}
+
+status_t jelly_connect(jelly_handle_t socket, const jelly_sockaddr_in_t *address)
+{
+    return (status_t)SYSCALL2(SYS_SOCKET_CONNECT, socket, address);
+}
+
+status_t jelly_listen(jelly_handle_t socket, uint32_t backlog)
+{
+    return (status_t)SYSCALL2(SYS_SOCKET_LISTEN, socket, backlog);
+}
+
+status_t jelly_accept(jelly_handle_t socket, jelly_handle_t *connection, jelly_sockaddr_in_t *peer)
+{
+    return (status_t)SYSCALL3(SYS_SOCKET_ACCEPT, socket, connection, peer);
+}
+
+status_t jelly_send(jelly_handle_t socket, const void *data, size_t size, const jelly_sockaddr_in_t *to,
+                    uint32_t flags, size_t *done)
+{
+    return (status_t)SYSCALL6(SYS_SOCKET_SEND, socket, data, size, to, flags, done);
+}
+
+status_t jelly_receive(jelly_handle_t socket, void *buffer, size_t size, jelly_sockaddr_in_t *from, uint32_t flags,
+                       size_t *done)
+{
+    return (status_t)SYSCALL6(SYS_SOCKET_RECEIVE, socket, buffer, size, from, flags, done);
+}
+
+status_t jelly_shutdown(jelly_handle_t socket, uint32_t how)
+{
+    return (status_t)SYSCALL2(SYS_SOCKET_SHUTDOWN, socket, how);
+}
+
+status_t jelly_socket_option(jelly_handle_t socket, uint32_t option, uint64_t value)
+{
+    return (status_t)SYSCALL3(SYS_SOCKET_SET_OPTION, socket, option, value);
+}
+
+status_t jelly_socket_info(jelly_handle_t socket, jelly_socket_info_t *info)
+{
+    return (status_t)SYSCALL2(SYS_SOCKET_INFO, socket, info);
+}
+
+status_t jelly_net_interface_info(uint32_t index, jelly_netif_info_t *info)
+{
+    return (status_t)SYSCALL2(SYS_NET_INTERFACE_INFO, index, info);
+}
+
+status_t jelly_net_configure(uint32_t index, const jelly_netif_config_t *config)
+{
+    return (status_t)SYSCALL2(SYS_NET_CONFIGURE, index, config);
+}
+
+status_t jelly_net_resolve(const char *name, uint32_t *address)
+{
+    return (status_t)SYSCALL3(SYS_NET_RESOLVE, name, length_of(name), address);
+}

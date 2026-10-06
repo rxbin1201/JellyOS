@@ -1,13 +1,14 @@
 # JellyOS Userspace: libc, init, Service Manager and Shell
 
 **Code:** [`userspace/`](../../userspace/), headers in [`sdk/include/`](../../sdk/include/), image in [`tools/image_builder/`](../../tools/image_builder/)
-**ABI:** [../abi/syscalls.md](../abi/syscalls.md) (version 3)
+**ABI:** [../abi/syscalls.md](../abi/syscalls.md) (version 4)
 
 Phase 7 (milestone M6) boots into a command line:
 
 ```text
 kernel ──spawn──▶ /init ──spawn──▶ /sbin/servicemanager ──spawn──▶ services
  (critical)                         reads /etc/services.conf        motd (oneshot)
+                                                                     network: /sbin/networkd (DHCP)
                                                                      shell: /bin/sh ──spawn──▶ /bin/ls, ...
 ```
 
@@ -40,7 +41,16 @@ the host's C library; GCC supplies only its freestanding headers
 | `threads.h` | C11 `thrd_*` on JellyOS threads (64 KiB stacks), `mtx_*` on futexes |
 | `dirent.h` | `opendir`/`readdir`/`closedir` |
 | `process.h` | JellyOS: `process_spawn` (with `$PATH` search and explicit stdio handles), `process_wait`, `process_run`, `process_find` |
+| `sys/socket.h`, `netinet/in.h` | BSD sockets: `socket`, `bind`, `connect`, `listen`, `accept`, `send`/`recv`, `sendto`/`recvfrom`, `shutdown`, `setsockopt` (`SO_RCVTIMEO`, `SO_SNDTIMEO`, `SO_BROADCAST`, `SO_REUSEADDR`, `SO_JELLY_INTERFACE`), `getsockname`, `getpeername`. IPv4 only |
+| `arpa/inet.h`, `netdb.h` | `inet_aton`/`inet_ntoa`/`inet_pton`/`inet_ntop`; `gethostbyname` and `getaddrinfo` (numeric ports) through the kernel resolver |
+| `unistd.h` | `read`, `write`, `close` on any handle (files, pipes, console, sockets); `sleep`, `usleep`, `getcwd`, `chdir`, `unlink` |
+| `sys/types.h`, `sys/time.h` | `ssize_t` and friends, `struct timeval` |
 | `assert.h`, `limits.h` | as usual |
+
+**Descriptors:** a socket descriptor is the socket's handle. Handles always
+fit a positive `int`, and `STDIN_FILENO`..`STDERR_FILENO` (0–2) map to the
+startup handles, which are never 0–2 themselves. Programs are linked
+against libgcc as well, for compiler helper routines.
 
 Design notes:
 
@@ -138,6 +148,18 @@ ends the shell; the service manager then starts a new one.
 `cat`, `cp`, `echo`, `false`, `ls` (`-a`, `-l`), `mkdir` (`-p`), `mv`, `rm`
 (`-r`, `-f`), `sleep` (fractions allowed), `touch`, `true` in
 [`userspace/applications/coreutils/`](../../userspace/applications/coreutils/).
+
+Network tools in
+[`userspace/applications/network/`](../../userspace/applications/network/):
+`ifconfig`, `ping`, `nslookup`, `http` and `nc`. They are described in
+[networking.md](networking.md).
+
+## Network service
+
+`/sbin/networkd` (service `network`) configures the Ethernet interfaces by
+DHCP or from `/etc/network.conf` and keeps the leases renewed; see
+[networking.md](networking.md). The shell does not wait for it, so the
+console is usable at once while DHCP runs in the background.
 
 ## Power
 

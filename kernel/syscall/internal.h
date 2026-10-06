@@ -42,4 +42,21 @@ status_t sys_process_kill(const uint64_t *a);
 status_t sys_pipe_create(const uint64_t *a);
 status_t sys_system_power(const uint64_t *a);
 
+/* Networking (net_syscalls.c) */
+status_t sys_socket_create(const uint64_t *a);
+status_t sys_socket_bind(const uint64_t *a);
+status_t sys_socket_connect(const uint64_t *a);
+status_t sys_socket_listen(const uint64_t *a);
+status_t sys_socket_accept(const uint64_t *a);
+status_t sys_socket_send(const uint64_t *a);
+status_t sys_socket_receive(const uint64_t *a);
+status_t sys_socket_shutdown(const uint64_t *a);
+status_t sys_socket_set_option(const uint64_t *a);
+status_t sys_socket_info(const uint64_t *a);
+status_t sys_net_interface_info(const uint64_t *a);
+status_t sys_net_configure(const uint64_t *a);
+status_t sys_net_resolve(const uint64_t *a);
+/* SYS_FILE_READ / WRITE on a socket handle */
+status_t syscall_socket_file_io(uint64_t handle, bool write, uint64_t buffer, uint64_t size, uint64_t *done);
+
 #endif

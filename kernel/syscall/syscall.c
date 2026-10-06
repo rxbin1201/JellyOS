@@ -406,6 +406,19 @@ static const syscall_fn table[SYS_COUNT] = {
     [SYS_PROCESS_KILL]     = sys_process_kill,
     [SYS_PIPE_CREATE]      = sys_pipe_create,
     [SYS_SYSTEM_POWER]     = sys_system_power,
+    [SYS_SOCKET_CREATE]    = sys_socket_create,
+    [SYS_SOCKET_BIND]      = sys_socket_bind,
+    [SYS_SOCKET_CONNECT]   = sys_socket_connect,
+    [SYS_SOCKET_LISTEN]    = sys_socket_listen,
+    [SYS_SOCKET_ACCEPT]    = sys_socket_accept,
+    [SYS_SOCKET_SEND]      = sys_socket_send,
+    [SYS_SOCKET_RECEIVE]   = sys_socket_receive,
+    [SYS_SOCKET_SHUTDOWN]  = sys_socket_shutdown,
+    [SYS_SOCKET_SET_OPTION] = sys_socket_set_option,
+    [SYS_SOCKET_INFO]      = sys_socket_info,
+    [SYS_NET_INTERFACE_INFO] = sys_net_interface_info,
+    [SYS_NET_CONFIGURE]    = sys_net_configure,
+    [SYS_NET_RESOLVE]      = sys_net_resolve,
 };
 
 uint64_t syscall_dispatch(uint64_t number, const uint64_t args[6])
