@@ -14,6 +14,7 @@ typedef struct {
     uint64_t virt_base;
     uint64_t size;
     uint32_t required_boot_version; /* from the JellyOS kernel note */
+    uint32_t note_flags;            /* BOOT_NOTE_FLAG_* */
 } loaded_kernel_t;
 
 /*

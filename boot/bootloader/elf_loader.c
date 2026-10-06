@@ -174,6 +174,7 @@ EFI_STATUS elf_validate_kernel(const void *file, UINTN file_size, loaded_kernel_
     kernel->entry = eh->entry;
     kernel->phys_base = 0;
     kernel->required_boot_version = note.required_version;
+    kernel->note_flags = note.flags;
 
     if (kernel->size > MAX_KERNEL_SPAN) {
         log_error(L"Kernel image is too large (%ld bytes)", kernel->size);

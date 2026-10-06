@@ -58,7 +58,7 @@ static void collect_uefi(EFI_SYSTEM_TABLE *st, boot_uefi_info_t *uefi)
     uefi->firmware_vendor[i] = '\0';
 }
 
-static bool secure_boot_enabled(void)
+bool firmware_secure_boot_enabled(void)
 {
     UINT8 value = 0;
     UINTN size = sizeof(value);
@@ -73,7 +73,7 @@ void firmware_collect(EFI_SYSTEM_TABLE *st, boot_info_t *info)
     collect_acpi(st, &info->acpi);
     collect_smbios(st, &info->smbios);
     collect_uefi(st, &info->uefi);
-    if (secure_boot_enabled())
+    if (firmware_secure_boot_enabled())
         info->flags |= BOOT_FLAG_SECURE_BOOT;
 }
 

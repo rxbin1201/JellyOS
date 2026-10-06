@@ -90,6 +90,25 @@ uint64_t memory_map_highest_address(void)
     return highest;
 }
 
+uint64_t memory_map_total_ram(void)
+{
+    UINTN count, key, desc_size;
+    UINT32 desc_version;
+    uint64_t total = 0;
+
+    EFI_MEMORY_DESCRIPTOR *raw = LibMemoryMap(&count, &key, &desc_size, &desc_version);
+    if (!raw)
+        return 0;
+
+    for (UINTN i = 0; i < count; i++) {
+        const EFI_MEMORY_DESCRIPTOR *d = descriptor((const UINT8 *)raw, desc_size, i);
+        if (is_ram_like(d->Type) && d->Type != EfiUnusableMemory)
+            total += d->NumberOfPages * BOOT_PAGE_SIZE;
+    }
+    FreePool(raw);
+    return total;
+}
+
 static void sort_entries(boot_memory_entry_t *entries, UINTN count)
 {
     for (UINTN i = 1; i < count; i++) {

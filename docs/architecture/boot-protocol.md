@@ -1,7 +1,8 @@
 # JellyOS Boot Protocol
 
-**Version:** 1
+**Version:** 2
 **Header:** [`boot/protocol/jelly/boot_info.h`](../../boot/protocol/jelly/boot_info.h), [`boot/protocol/jelly/boot_layout.h`](../../boot/protocol/jelly/boot_layout.h)
+**Related:** [boot-configuration.md](boot-configuration.md), [boot-state.md](boot-state.md), [memory-layout.md](memory-layout.md)
 
 This document defines the contract between the JellyOS Boot Manager and the kernel:
 which kernels the boot manager accepts, how it loads them, and the exact machine
@@ -12,7 +13,8 @@ state at kernel entry.
 ## 1. Kernel image requirements
 
 The kernel is a static ELF64 executable (`ET_EXEC`, `EM_X86_64`, little endian).
-The boot manager loads it from `\boot\kernels\kernel-current.elf` on the boot volume.
+The boot manager loads it from the path in the selected configuration entry
+(default `/boot/kernels/kernel-current.elf`).
 
 | Requirement | Reason |
 |---|---|
@@ -31,12 +33,16 @@ Every kernel carries a `PT_NOTE` entry:
 |---|---|
 | name | `"JellyOS"` |
 | type | `BOOT_NOTE_TYPE_PROTOCOL` (1) |
-| desc | `boot_note_protocol_t { uint32_t required_version; uint32_t reserved; }` |
+| desc | `boot_note_protocol_t { uint32_t required_version; uint32_t flags; }` |
 
 The boot manager refuses a kernel when the note is missing or when
 `required_version` is greater than the `boot_info_t` version it produces. The
 check happens **before** `ExitBootServices()`, so the error is still visible and
 the boot manager can fall back to another entry.
+
+| Note flag | Meaning |
+|---|---|
+| `BOOT_NOTE_FLAG_REPORTS_SUCCESS` | The kernel writes `BOOT_SUCCESS` to the boot state variable. Only then does it take part in failure counting and rollback (boot-state.md) |
 
 ---
 
@@ -62,7 +68,7 @@ Compatibility works in both directions:
 
 ---
 
-## 3. boot_info_t contents (version 1)
+## 3. boot_info_t contents
 
 **All addresses inside `boot_info_t` are physical.** They are stored as `uint64_t`,
 never as pointers. The kernel converts them with `hhdm_base + phys`.
@@ -70,7 +76,7 @@ never as pointers. The kernel converts them with `hhdm_base + phys`.
 | Field | Description |
 |---|---|
 | `magic`, `version`, `size` | See section 2 |
-| `flags` | `BOOT_FLAG_DEBUG`, `SAFE_MODE`, `RECOVERY`, `SECURE_BOOT` |
+| `flags` | `BOOT_FLAG_DEBUG`, `SAFE_MODE`, `RECOVERY`, `SECURE_BOOT`, `ROLLBACK` |
 | `hhdm_base`, `hhdm_size` | Direct map of physical memory (see memory-layout.md) |
 | `kernel` | Physical and virtual base and size of the loaded image |
 | `memory` | Converted memory map (section 4) |
@@ -78,11 +84,18 @@ never as pointers. The kernel converts them with `hhdm_base + phys`.
 | `acpi` | RSDP address and revision |
 | `smbios` | SMBIOS 3.x entry point, or 2.x as a fallback |
 | `uefi` | System table address, revisions, firmware vendor (ASCII) |
-| `modules` | Boot modules (initramfs, early drivers). Empty in v1 |
+| `modules` | Boot modules: the initramfs first (name `"initrd"`), then early modules in configuration order (name = file name) |
 | `cmdline_phys`, `cmdline_length` | Kernel command line, ASCII, NUL terminated, never null |
+| **Added in version 2** | |
+| `cpu` | CPUID vendor, brand, family, model and stepping; logical CPU count reported by the firmware |
+| `boot_device` | Partition type (GPT/MBR), number and ID of the boot partition; firmware device path text |
+| `boot_mode` | `BOOT_MODE_NORMAL`, `FALLBACK`, `RECOVERY` or `MANUAL` |
+| `entry_name` | Name of the configuration entry |
+| `log_phys`, `log_length` | Boot manager log (ASCII, lines end with `\n`) for the kernel log, recovery and diagnostics |
 
-Flags are currently fixed. They will be derived from the boot configuration and
-the boot state once those exist.
+Flags come from the command line (`debug=1`, `safe_mode=1`, `recovery=1`) and
+the firmware Secure Boot state. `BOOT_FLAG_ROLLBACK` is set when the previous
+kernel was booted after repeated failures.
 
 ---
 
@@ -129,14 +142,10 @@ firmware map and are translated exactly, so no range bookkeeping is needed.
 
 ---
 
-## 6. Planned extensions (still Phase 1)
+## 6. Image verification
 
-These do not change version 1 of the layout. They only fill in fields that
-already exist:
-
-- Boot configuration file (README section 4) → `cmdline`, `flags`, kernel path
-- Boot menu, timeout, entries
-- Boot state tracking and rollback (README sections 5 and 6)
-- Recovery and safe-mode entries
-- Initramfs and early modules → `modules`
-- Diagnostics screen
+Every kernel, initramfs and module passes through `verify_image()`
+([`boot/bootloader/verify.c`](../../boot/bootloader/verify.c)) before it is
+used. No signature policy exists yet, so all images are accepted, and a warning
+is logged when Secure Boot is enabled. Signed kernels and modules (Phase 15)
+add their checks there without changing the loader.

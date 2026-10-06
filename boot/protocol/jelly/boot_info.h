@@ -21,7 +21,7 @@
 #define BOOT_INFO_MAGIC   0x004942594C4C454AULL
 
 /* Current boot_info_t version written by the boot manager. */
-#define BOOT_INFO_VERSION 1
+#define BOOT_INFO_VERSION 2
 
 /* --- Kernel compatibility note ---------------------------------------------
  *
@@ -34,9 +34,16 @@
 #define BOOT_NOTE_NAME          "JellyOS"
 #define BOOT_NOTE_TYPE_PROTOCOL 1
 
+/*
+ * The kernel marks successful boots in the boot state variable
+ * (boot_state.h). Only kernels with this flag take part in failure
+ * counting and automatic rollback.
+ */
+#define BOOT_NOTE_FLAG_REPORTS_SUCCESS (1u << 0)
+
 typedef struct {
     uint32_t required_version; /* minimum boot_info_t version the kernel needs */
-    uint32_t reserved;
+    uint32_t flags;            /* BOOT_NOTE_FLAG_* */
 } boot_note_protocol_t;
 
 /* --- Boot flags ------------------------------------------------------------ */
@@ -45,6 +52,14 @@ typedef struct {
 #define BOOT_FLAG_SAFE_MODE   (1ULL << 1) /* minimal driver set, "safe_mode=1" */
 #define BOOT_FLAG_RECOVERY    (1ULL << 2) /* recovery boot, "recovery=1" */
 #define BOOT_FLAG_SECURE_BOOT (1ULL << 3) /* firmware reports Secure Boot enabled */
+#define BOOT_FLAG_ROLLBACK    (1ULL << 4) /* fallback kernel booted after repeated failures */
+
+/* --- Boot modes (why this kernel was chosen) ------------------------------- */
+
+#define BOOT_MODE_NORMAL   0 /* default entry, current kernel */
+#define BOOT_MODE_FALLBACK 1 /* default entry, previous known-good kernel */
+#define BOOT_MODE_RECOVERY 2 /* recovery entry */
+#define BOOT_MODE_MANUAL   3 /* any other entry chosen in the boot menu */
 
 /* --- Memory map ------------------------------------------------------------ */
 
@@ -130,6 +145,28 @@ typedef struct {
     uint32_t reserved;
 } boot_module_list_t;
 
+/* --- CPU and boot device (version 2) --------------------------------------- */
+
+typedef struct {
+    char     vendor[16];   /* CPUID vendor string, e.g. "GenuineIntel" */
+    char     brand[64];    /* CPUID brand string, may be empty */
+    uint32_t family;       /* display family */
+    uint32_t model;        /* display model */
+    uint32_t stepping;
+    uint32_t logical_cpus; /* enabled logical CPUs reported by firmware, 0 if unknown */
+} boot_cpu_info_t;
+
+#define BOOT_PARTITION_UNKNOWN 0
+#define BOOT_PARTITION_MBR     1
+#define BOOT_PARTITION_GPT     2
+
+typedef struct {
+    uint32_t partition_type;      /* BOOT_PARTITION_* */
+    uint32_t partition_number;    /* 1-based, 0 if unknown */
+    uint8_t  partition_id[16];    /* GPT unique partition GUID, or MBR disk signature in bytes 0-3 */
+    char     device_path[192];    /* firmware device path text (ASCII), diagnostics only */
+} boot_device_t;
+
 /* --- Top level ------------------------------------------------------------- */
 
 typedef struct {
@@ -152,7 +189,19 @@ typedef struct {
     uint64_t cmdline_phys;   /* ASCII, NUL terminated, never 0 */
     uint64_t cmdline_length; /* without the terminating NUL */
 
-    /* version 1 ends here - new fields are appended below */
+    /* --- version 2 --- */
+
+    boot_cpu_info_t cpu;
+    boot_device_t   boot_device;
+
+    uint32_t boot_mode;      /* BOOT_MODE_* */
+    uint32_t reserved0;
+    char     entry_name[64]; /* boot configuration entry, ASCII */
+
+    uint64_t log_phys;       /* boot manager log, ASCII, lines end with '\n' */
+    uint64_t log_length;     /* bytes, without terminating NUL */
+
+    /* new fields are appended below */
 } boot_info_t;
 
 #endif

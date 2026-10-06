@@ -75,6 +75,35 @@ static void report_memory(const boot_info_t *info)
     print(" MiB reclaimable\n");
 }
 
+/* Fields appended in boot_info_t version 2. */
+static void report_v2(const boot_info_t *info)
+{
+    static const char *const modes[] = { "normal", "previous kernel", "recovery", "manual" };
+
+    if (info->version < 2 || info->size < offsetof(boot_info_t, log_length) + sizeof(info->log_length))
+        return;
+
+    print("entry:        ");
+    print(info->entry_name);
+    print(" (");
+    print(info->boot_mode < 4 ? modes[info->boot_mode] : "unknown");
+    print(")\n");
+
+    print("cpu:          ");
+    print(info->cpu.brand[0] ? info->cpu.brand : info->cpu.vendor);
+    print(", ");
+    print_dec(info->cpu.logical_cpus);
+    print(" logical CPUs\n");
+
+    print("modules:      ");
+    print_dec(info->modules.module_count);
+    print("\n");
+
+    print("boot log:     ");
+    print_dec(info->log_length);
+    print(" bytes from the boot manager\n");
+}
+
 static void fill_framebuffer(const boot_info_t *info)
 {
     const boot_framebuffer_t *fb = &info->framebuffer;
@@ -137,6 +166,7 @@ void kernel_main(const boot_info_t *info)
     print_hex(info->acpi.rsdp_phys);
     print("\n");
 
+    report_v2(info);
     fill_framebuffer(info);
 
     print("Phase 1 handoff complete, halting.\n");

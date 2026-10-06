@@ -1,68 +1,82 @@
 /*
  * JellyOS Boot Manager - UEFI entry point.
  *
- * Boot flow (Phase 1 core path):
- *   load kernel ELF -> validate -> build page tables -> collect firmware info
- *   -> ExitBootServices() -> convert memory map -> jump to the kernel
+ * Boot flow:
+ *   boot state -> configuration -> rollback decision -> menu (optional)
+ *   -> load kernel and modules -> build page tables -> ExitBootServices()
+ *   -> convert memory map -> jump to the kernel
  *
- * Boot configuration, boot menu, boot state tracking and recovery are added
- * on top of this path in later Phase 1 steps.
+ * A failed attempt releases its memory and falls back: current kernel ->
+ * previous kernel -> recovery entry -> boot menu.
  */
 
 #include "boot.h"
+#include "boot_tracker.h"
+#include "config.h"
 #include "cpu.h"
+#include "diagnostics.h"
 #include "elf_loader.h"
 #include "file.h"
 #include "firmware.h"
 #include "handoff.h"
 #include "log.h"
 #include "memory_map.h"
+#include "menu.h"
 #include "paging.h"
+#include "text.h"
+#include "verify.h"
 
 #include <jelly/boot_info.h>
 #include <jelly/boot_layout.h>
 
-#define BOOT_MANAGER_VERSION L"0.2.0"
-#define KERNEL_PATH          L"\\boot\\kernels\\kernel-current.elf"
-
-/* Replaced by the boot configuration parser. */
-#define DEFAULT_CMDLINE      "loglevel=info"
+#define BOOT_MANAGER_VERSION   L"0.3.0"
 
 /* Extra descriptors for allocations made after sizing the memory map. */
-#define MEMORY_MAP_HEADROOM  64
+#define MEMORY_MAP_HEADROOM    64
 
-#define GIB                  0x40000000ULL
+/* Countdown when a failure forces the menu but the configuration has timeout=0. */
+#define FAILURE_MENU_TIMEOUT   10
+
+#define GIB                    0x40000000ULL
 
 typedef struct {
-    EFI_HANDLE        image;
-    boot_info_t      *info;
-    page_tables_t     tables;
-    loaded_kernel_t   kernel;
-    efi_memory_map_t  memory_map;
-    uint64_t          stack_phys;
-} boot_context_t;
+    EFI_HANDLE          image;
+    const boot_entry_t *entry;
+    const char         *kernel_path;
+    uint32_t            mode;
+    boot_info_t        *info;
+    char               *log_copy;
+    page_tables_t       tables;
+    loaded_kernel_t     kernel;
+    efi_memory_map_t    memory_map;
+    uint64_t            stack_phys;
+} boot_attempt_t;
 
-void *boot_alloc_pages(UINTN pages, EFI_MEMORY_TYPE type)
+static boot_config_t config;
+static boot_tracker_t tracker;
+
+static uint64_t direct_map(const boot_attempt_t *a, uint64_t phys)
 {
-    EFI_PHYSICAL_ADDRESS addr = 0;
-
-    if (EFI_ERROR(BS->AllocatePages(AllocateAnyPages, type, pages, &addr)))
-        return NULL;
-    ZeroMem((void *)(UINTN)addr, pages * BOOT_PAGE_SIZE);
-    return (void *)(UINTN)addr;
+    return a->info->hhdm_base + phys;
 }
 
-static uint64_t direct_map(const boot_context_t *ctx, uint64_t phys)
+static uint64_t cmdline_flags(const char *cmdline)
 {
-    return ctx->info->hhdm_base + phys;
+    uint64_t flags = 0;
+
+    if (text_has_token(cmdline, "debug=1"))
+        flags |= BOOT_FLAG_DEBUG;
+    if (text_has_token(cmdline, "safe_mode=1"))
+        flags |= BOOT_FLAG_SAFE_MODE;
+    if (text_has_token(cmdline, "recovery=1"))
+        flags |= BOOT_FLAG_RECOVERY;
+    return flags;
 }
 
 /* boot_info_t and the command line share one BOOT_DATA page. */
-static EFI_STATUS create_boot_info(boot_context_t *ctx)
+static EFI_STATUS create_boot_info(boot_attempt_t *a)
 {
-    static const char cmdline[] = DEFAULT_CMDLINE;
-
-    _Static_assert(sizeof(boot_info_t) + sizeof(cmdline) <= BOOT_PAGE_SIZE, "boot data exceeds one page");
+    _Static_assert(sizeof(boot_info_t) + CONFIG_CMDLINE_MAX <= BOOT_PAGE_SIZE, "boot data exceeds one page");
 
     uint8_t *page = boot_alloc_pages(1, BOOT_EFI_MEMORY_BOOT_DATA);
     if (!page)
@@ -73,51 +87,136 @@ static EFI_STATUS create_boot_info(boot_context_t *ctx)
     info->version = BOOT_INFO_VERSION;
     info->size = sizeof(boot_info_t);
     info->hhdm_base = BOOT_HHDM_BASE;
-
-    char *cmdline_copy = (char *)(page + sizeof(boot_info_t));
-    CopyMem(cmdline_copy, cmdline, sizeof(cmdline));
-    info->cmdline_phys = (uint64_t)(UINTN)cmdline_copy;
-    info->cmdline_length = sizeof(cmdline) - 1;
-
-    info->modules.entry_size = sizeof(boot_module_t);
     info->memory.entry_size = sizeof(boot_memory_entry_t);
+    info->modules.entry_size = sizeof(boot_module_t);
 
-    ctx->info = info;
+    char *cmdline = (char *)(page + sizeof(boot_info_t));
+    text_copy(cmdline, CONFIG_CMDLINE_MAX, a->entry->cmdline);
+    info->cmdline_phys = (uint64_t)(UINTN)cmdline;
+    info->cmdline_length = text_length(cmdline);
+
+    info->flags = cmdline_flags(cmdline);
+    if (a->mode == BOOT_MODE_FALLBACK)
+        info->flags |= BOOT_FLAG_ROLLBACK;
+    info->boot_mode = a->mode;
+    text_copy(info->entry_name, sizeof(info->entry_name), a->entry->name);
+
+    diagnostics_collect_cpu(&info->cpu);
+    diagnostics_collect_boot_device(a->image, &info->boot_device);
+
+    a->info = info;
     return EFI_SUCCESS;
 }
 
-static EFI_STATUS load_kernel(boot_context_t *ctx)
+static EFI_STATUS load_kernel(boot_attempt_t *a)
 {
+    CHAR16 path[CONFIG_PATH_MAX];
     void *file;
     UINTN file_size;
     EFI_STATUS status;
 
-    status = file_read_all(ctx->image, KERNEL_PATH, &file, &file_size);
+    if (!text_to_path(path, ARRAY_SIZE(path), a->kernel_path))
+        return EFI_INVALID_PARAMETER;
+
+    status = file_read_all(a->image, path, &file, &file_size);
     if (EFI_ERROR(status)) {
-        log_error(L"Cannot read %s: %r", KERNEL_PATH, status);
+        log_error(L"Cannot read kernel %s: %r", path, status);
         return status;
     }
 
-    status = elf_validate_kernel(file, file_size, &ctx->kernel);
+    status = verify_image(VERIFY_KERNEL, path, file, file_size);
     if (!EFI_ERROR(status))
-        status = elf_load_kernel(file, &ctx->tables, &ctx->kernel);
+        status = elf_validate_kernel(file, file_size, &a->kernel);
+    if (!EFI_ERROR(status))
+        status = elf_load_kernel(file, &a->tables, &a->kernel);
     FreePool(file);
     if (EFI_ERROR(status))
         return status;
 
-    ctx->info->kernel.phys_base = ctx->kernel.phys_base;
-    ctx->info->kernel.virt_base = ctx->kernel.virt_base;
-    ctx->info->kernel.size = ctx->kernel.size;
+    a->info->kernel.phys_base = a->kernel.phys_base;
+    a->info->kernel.virt_base = a->kernel.virt_base;
+    a->info->kernel.size = a->kernel.size;
 
-    log_info(L"Kernel %s: %ld KiB at phys 0x%lx, entry 0x%lx (needs boot protocol %d)",
-             KERNEL_PATH, ctx->kernel.size / 1024, ctx->kernel.phys_base, ctx->kernel.entry,
-             ctx->kernel.required_boot_version);
+    log_info(L"Kernel %s: %ld KiB at 0x%lx, entry 0x%lx, protocol %d%s", path, a->kernel.size / 1024,
+             a->kernel.phys_base, a->kernel.entry, a->kernel.required_boot_version,
+             (a->kernel.note_flags & BOOT_NOTE_FLAG_REPORTS_SUCCESS) ? L", reports success" : L"");
     return EFI_SUCCESS;
 }
 
-static EFI_STATUS map_direct_region(boot_context_t *ctx)
+static const char *base_name(const char *path)
 {
-    const boot_framebuffer_t *fb = &ctx->info->framebuffer;
+    const char *name = path;
+
+    for (; *path; path++) {
+        if (*path == '/')
+            name = path + 1;
+    }
+    return name;
+}
+
+static EFI_STATUS load_module(boot_attempt_t *a, boot_module_t *module, const char *path_text,
+                              const char *name, verify_kind_t kind)
+{
+    CHAR16 path[CONFIG_PATH_MAX];
+    void *data;
+    UINTN size;
+    EFI_STATUS status;
+
+    if (!text_to_path(path, ARRAY_SIZE(path), path_text))
+        return EFI_INVALID_PARAMETER;
+
+    status = file_load_pages(a->image, path, BOOT_EFI_MEMORY_KERNEL, &data, &size);
+    if (EFI_ERROR(status)) {
+        log_error(L"Cannot load %s: %r", path, status);
+        return status;
+    }
+    status = verify_image(kind, path, data, size);
+    if (EFI_ERROR(status))
+        return status;
+
+    module->phys_base = (uint64_t)(UINTN)data;
+    module->size = size;
+    text_copy(module->name, sizeof(module->name), name);
+    log_info(L"Module '%a': %s, %ld KiB at 0x%lx", module->name, path, (uint64_t)size / 1024, module->phys_base);
+    return EFI_SUCCESS;
+}
+
+/* Initramfs first, then early modules in configuration order. */
+static EFI_STATUS load_modules(boot_attempt_t *a)
+{
+    const boot_entry_t *e = a->entry;
+    UINTN count = (e->initrd[0] ? 1 : 0) + e->module_count;
+    EFI_STATUS status;
+
+    if (count == 0)
+        return EFI_SUCCESS;
+
+    UINTN bytes = count * sizeof(boot_module_t);
+    boot_module_t *modules = boot_alloc_pages(align_up(bytes, BOOT_PAGE_SIZE) / BOOT_PAGE_SIZE,
+                                              BOOT_EFI_MEMORY_BOOT_DATA);
+    if (!modules)
+        return EFI_OUT_OF_RESOURCES;
+
+    UINTN n = 0;
+    if (e->initrd[0]) {
+        status = load_module(a, &modules[n++], e->initrd, "initrd", VERIFY_INITRD);
+        if (EFI_ERROR(status))
+            return status;
+    }
+    for (UINTN i = 0; i < e->module_count; i++) {
+        status = load_module(a, &modules[n++], e->modules[i], base_name(e->modules[i]), VERIFY_MODULE);
+        if (EFI_ERROR(status))
+            return status;
+    }
+
+    a->info->modules.modules_phys = (uint64_t)(UINTN)modules;
+    a->info->modules.module_count = n;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS map_direct_region(boot_attempt_t *a)
+{
+    const boot_framebuffer_t *fb = &a->info->framebuffer;
     uint64_t highest = memory_map_highest_address();
 
     if (fb->phys_base && fb->phys_base + fb->size > highest)
@@ -131,51 +230,38 @@ static EFI_STATUS map_direct_region(boot_context_t *ctx)
         return EFI_UNSUPPORTED;
     }
 
-    ctx->info->hhdm_size = size;
-    return paging_map_direct(&ctx->tables, ctx->info->hhdm_base, size);
+    a->info->hhdm_size = size;
+    return paging_map_direct(&a->tables, a->info->hhdm_base, size);
 }
 
 /* Identity map the handoff trampoline: it is executing while CR3 changes. */
-static EFI_STATUS map_trampoline(boot_context_t *ctx)
+static EFI_STATUS map_trampoline(boot_attempt_t *a)
 {
     uint64_t start = align_down((uint64_t)(UINTN)boot_handoff, BOOT_PAGE_SIZE);
     uint64_t end = align_up((uint64_t)(UINTN)boot_handoff_end, BOOT_PAGE_SIZE);
 
     for (uint64_t page = start; page < end; page += BOOT_PAGE_SIZE) {
-        EFI_STATUS status = paging_map_page(&ctx->tables, page, page, MAP_EXECUTABLE);
+        EFI_STATUS status = paging_map_page(&a->tables, page, page, MAP_EXECUTABLE);
         if (EFI_ERROR(status))
             return status;
     }
     return EFI_SUCCESS;
 }
 
-static EFI_STATUS allocate_stack(boot_context_t *ctx)
+static EFI_STATUS allocate_handoff_data(boot_attempt_t *a)
 {
     void *stack = boot_alloc_pages(BOOT_STACK_SIZE / BOOT_PAGE_SIZE, BOOT_EFI_MEMORY_BOOT_DATA);
-
-    if (!stack)
+    a->log_copy = boot_alloc_pages(align_up(BOOT_LOG_CAPACITY, BOOT_PAGE_SIZE) / BOOT_PAGE_SIZE,
+                                   BOOT_EFI_MEMORY_BOOT_DATA);
+    if (!stack || !a->log_copy)
         return EFI_OUT_OF_RESOURCES;
-    ctx->stack_phys = (uint64_t)(UINTN)stack;
+
+    a->stack_phys = (uint64_t)(UINTN)stack;
     return EFI_SUCCESS;
 }
 
-static void log_summary(const boot_info_t *info)
-{
-    const boot_framebuffer_t *fb = &info->framebuffer;
-
-    log_info(L"Firmware: %a, UEFI %d.%d", info->uefi.firmware_vendor,
-             info->uefi.uefi_revision >> 16, info->uefi.uefi_revision & 0xFFFF);
-    if (fb->phys_base)
-        log_info(L"Framebuffer: %dx%d, pitch %d at 0x%lx", fb->width, fb->height, fb->pitch, fb->phys_base);
-    log_info(L"ACPI RSDP: 0x%lx (revision %d)", info->acpi.rsdp_phys, info->acpi.revision);
-    log_info(L"SMBIOS %d entry: 0x%lx", info->smbios.major, info->smbios.entry_phys);
-    log_info(L"Secure Boot: %s", (info->flags & BOOT_FLAG_SECURE_BOOT) ? L"enabled" : L"disabled");
-    log_info(L"Direct map: %ld GiB at 0x%lx", info->hhdm_size / GIB, info->hhdm_base);
-    log_info(L"Command line: %a", (const char *)(UINTN)info->cmdline_phys);
-}
-
-/* Everything that may fail and still allows returning to the firmware. */
-static EFI_STATUS prepare_boot(boot_context_t *ctx)
+/* Everything that may fail and still allows another attempt. */
+static EFI_STATUS prepare_boot(boot_attempt_t *a)
 {
     EFI_STATUS status;
 
@@ -184,51 +270,53 @@ static EFI_STATUS prepare_boot(boot_context_t *ctx)
         return EFI_UNSUPPORTED;
     }
 
-    status = create_boot_info(ctx);
-    if (EFI_ERROR(status))
-        return status;
-
-    status = paging_create(&ctx->tables, cpu_supports_nx());
-    if (EFI_ERROR(status))
-        return status;
-
-    status = load_kernel(ctx);
-    if (EFI_ERROR(status))
-        return status;
-
-    firmware_collect(ST, ctx->info);
-    firmware_get_framebuffer(&ctx->info->framebuffer);
-
-    status = map_direct_region(ctx);
+    status = create_boot_info(a);
     if (!EFI_ERROR(status))
-        status = map_trampoline(ctx);
+        status = paging_create(&a->tables, cpu_supports_nx());
     if (!EFI_ERROR(status))
-        status = allocate_stack(ctx);
+        status = load_kernel(a);
+    if (!EFI_ERROR(status))
+        status = load_modules(a);
+    if (EFI_ERROR(status))
+        return status;
+
+    boot_tracker_begin(&tracker, a->mode, a->kernel.note_flags & BOOT_NOTE_FLAG_REPORTS_SUCCESS);
+    boot_tracker_set(&tracker, KERNEL_LOADED);
+
+    firmware_collect(ST, a->info);
+    firmware_get_framebuffer(&a->info->framebuffer);
+
+    status = map_direct_region(a);
+    if (!EFI_ERROR(status))
+        status = map_trampoline(a);
+    if (!EFI_ERROR(status))
+        status = allocate_handoff_data(a);
     if (EFI_ERROR(status)) {
         log_error(L"Cannot set up kernel address space: %r", status);
         return status;
     }
 
-    log_summary(ctx->info);
+    if (a->info->flags & BOOT_FLAG_DEBUG)
+        diagnostics_print(a->info, a->entry, a->kernel_path, &tracker);
 
     /* Must be the last allocation before ExitBootServices(). */
-    status = memory_map_prepare(&ctx->memory_map, MEMORY_MAP_HEADROOM);
+    status = memory_map_prepare(&a->memory_map, MEMORY_MAP_HEADROOM);
     if (EFI_ERROR(status))
         log_error(L"Cannot allocate memory map buffers: %r", status);
     return status;
 }
 
 /* After the first ExitBootServices() attempt only GetMemoryMap() may be called. */
-static EFI_STATUS exit_boot_services(boot_context_t *ctx)
+static EFI_STATUS exit_boot_services(boot_attempt_t *a)
 {
     EFI_STATUS status = EFI_ABORTED;
 
     for (int attempt = 0; attempt < 4; attempt++) {
-        status = memory_map_fetch(&ctx->memory_map);
+        status = memory_map_fetch(&a->memory_map);
         if (EFI_ERROR(status))
             return status;
 
-        status = BS->ExitBootServices(ctx->image, ctx->memory_map.key);
+        status = BS->ExitBootServices(a->image, a->memory_map.key);
         if (status != EFI_INVALID_PARAMETER)
             return status;
     }
@@ -241,20 +329,72 @@ __attribute__((noreturn)) static void halt(void)
         __asm__ volatile("cli; hlt");
 }
 
-static void wait_for_key(void)
+/* Returns only if the attempt failed before ExitBootServices(). */
+static EFI_STATUS boot(EFI_HANDLE image, const menu_action_t *action)
 {
-    UINTN index;
-    EFI_INPUT_KEY key;
+    boot_attempt_t a = {
+        .image = image,
+        .entry = &config.entries[action->entry],
+        .mode = action->mode,
+    };
+    a.kernel_path = a.mode == BOOT_MODE_FALLBACK ? config.fallback_kernel : a.entry->kernel;
 
-    ST->ConIn->Reset(ST->ConIn, FALSE);
-    BS->WaitForEvent(1, &ST->ConIn->WaitForKey, &index);
-    ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
+    log_set_verbose(text_has_token(a.entry->cmdline, "debug=1"));
+    log_info(L"Booting '%a' (%s)", a.entry->name, boot_mode_name(a.mode));
+
+    EFI_STATUS status = prepare_boot(&a);
+    if (EFI_ERROR(status))
+        return status;
+
+    boot_tracker_set(&tracker, KERNEL_STARTED);
+    log_info(L"Starting kernel");
+
+    /* Last log line handed to the kernel; no more logging from here on. */
+    UINTN log_length;
+    const char *log = log_text(&log_length);
+    CopyMem(a.log_copy, log, log_length + 1);
+    a.info->log_phys = (uint64_t)(UINTN)a.log_copy;
+    a.info->log_length = log_length;
+
+    status = exit_boot_services(&a);
+    if (EFI_ERROR(status))
+        halt(); /* firmware services are unusable now, nothing can be reported */
+
+    /* ---- No firmware boot services beyond this point ---- */
+
+    a.info->memory.entries_phys = (uint64_t)(UINTN)a.memory_map.entries;
+    a.info->memory.entry_count = memory_map_convert(&a.memory_map);
+
+    if (a.tables.nx_supported)
+        cpu_enable_nx();
+
+    boot_handoff(paging_root(&a.tables),
+                 direct_map(&a, a.stack_phys + BOOT_STACK_SIZE),
+                 direct_map(&a, (uint64_t)(UINTN)a.info),
+                 a.kernel.entry);
+}
+
+/*
+ * Next automatic attempt after a failed one: current kernel -> previous
+ * kernel -> recovery. Returns false when only the menu is left.
+ */
+static bool next_automatic_attempt(menu_action_t *action)
+{
+    if (action->mode == BOOT_MODE_NORMAL && config.fallback_kernel[0]) {
+        action->mode = BOOT_MODE_FALLBACK;
+        return true;
+    }
+    if (action->mode != BOOT_MODE_RECOVERY && config.recovery_index != CONFIG_NO_ENTRY) {
+        action->entry = config.recovery_index;
+        action->mode = BOOT_MODE_RECOVERY;
+        return true;
+    }
+    return false;
 }
 
 EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 {
-    boot_context_t ctx = { .image = image };
-    EFI_STATUS status;
+    boot_decision_t decision;
 
     InitializeLib(image, st);
 
@@ -264,29 +404,52 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     ST->ConOut->ClearScreen(ST->ConOut);
     Print(L"JellyOS Boot Manager " BOOT_MANAGER_VERSION L"\r\n\r\n");
 
-    status = prepare_boot(&ctx);
-    if (EFI_ERROR(status)) {
-        log_error(L"Boot failed: %r. Press any key to return to firmware.", status);
-        wait_for_key();
-        return status;
+    boot_tracker_init(&tracker);
+    config_load(image, &config);
+    boot_tracker_set(&tracker, BOOT_CONFIGURATION_LOADED);
+
+    boot_tracker_decide(&tracker, &config, &decision);
+    if (decision.reason[0])
+        log_warn(L"%s", decision.reason);
+
+    menu_action_t action = { .kind = ACTION_BOOT, .entry = decision.entry, .mode = decision.mode };
+    bool show_menu = decision.show_menu || config.menu == MENU_ALWAYS;
+    UINTN countdown = config.timeout;
+
+    if (decision.show_menu && countdown == 0)
+        countdown = FAILURE_MENU_TIMEOUT;
+    if (!show_menu && config.menu == MENU_AUTO && config.timeout > 0)
+        show_menu = menu_prompt(&config, &decision);
+    if (show_menu && !decision.show_menu && config.menu == MENU_AUTO)
+        countdown = 0; /* the user interrupted the countdown */
+
+    for (;;) {
+        if (show_menu) {
+            action = menu_run(image, &config, &tracker, &decision, countdown);
+            countdown = 0;
+        }
+
+        if (action.kind == ACTION_REBOOT)
+            RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+        if (action.kind == ACTION_EXIT)
+            return EFI_ABORTED;
+
+        EFI_STATUS status = boot(image, &action);
+
+        /* The attempt failed before ExitBootServices(): release it and fall back. */
+        boot_alloc_release_all();
+        log_error(L"Booting '%a' (%s) failed: %r", config.entries[action.entry].name,
+                  boot_mode_name(action.mode), status);
+        SPrint(decision.reason, sizeof(decision.reason), L"Booting '%a' (%s) failed: %r",
+               config.entries[action.entry].name, boot_mode_name(action.mode), status);
+
+        if (!action.chosen_by_user && next_automatic_attempt(&action)) {
+            log_warn(L"Trying '%a' (%s)", config.entries[action.entry].name, boot_mode_name(action.mode));
+            continue;
+        }
+
+        decision.entry = action.entry;
+        decision.mode = action.mode;
+        show_menu = true;
     }
-
-    log_info(L"Starting kernel");
-
-    status = exit_boot_services(&ctx);
-    if (EFI_ERROR(status))
-        halt(); /* firmware services are unusable now, nothing can be reported */
-
-    /* ---- No firmware boot services beyond this point ---- */
-
-    ctx.info->memory.entries_phys = (uint64_t)(UINTN)ctx.memory_map.entries;
-    ctx.info->memory.entry_count = memory_map_convert(&ctx.memory_map);
-
-    if (ctx.tables.nx_supported)
-        cpu_enable_nx();
-
-    boot_handoff(paging_root(&ctx.tables),
-                 direct_map(&ctx, ctx.stack_phys + BOOT_STACK_SIZE),
-                 direct_map(&ctx, (uint64_t)(UINTN)ctx.info),
-                 ctx.kernel.entry);
 }

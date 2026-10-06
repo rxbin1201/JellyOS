@@ -32,6 +32,9 @@ EFI_STATUS memory_map_fetch(efi_memory_map_t *map);
 /* Highest physical end address of all RAM-like regions in the current map. */
 uint64_t memory_map_highest_address(void);
 
+/* Total RAM known to the firmware (all RAM-like regions), for diagnostics. */
+uint64_t memory_map_total_ram(void);
+
 /*
  * Translate the fetched map into boot_memory_entry_t: sorted, merged,
  * page aligned. Runs after ExitBootServices() and does not allocate.

@@ -7,6 +7,7 @@
 
 #define BOOT_NOTE_TYPE_PROTOCOL 1
 #define REQUIRED_BOOT_VERSION   1
+#define NOTE_FLAGS              0  /* no BOOT_NOTE_FLAG_REPORTS_SUCCESS yet */
 
     .section .note.jellyos, "a", @note
     .balign 4
@@ -16,7 +17,7 @@
 1:  .asciz  "JellyOS"
 2:  .balign 4
 3:  .long   REQUIRED_BOOT_VERSION   /* required_version */
-    .long   0                       /* reserved */
+    .long   NOTE_FLAGS              /* flags */
 4:  .balign 4
 
     .section .note.GNU-stack, "", @progbits

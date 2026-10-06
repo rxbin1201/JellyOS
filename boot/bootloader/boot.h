@@ -18,8 +18,16 @@
 #define BOOT_EFI_MEMORY_KERNEL    ((EFI_MEMORY_TYPE)0x80000001) /* kernel image, modules */
 #define BOOT_EFI_MEMORY_BOOT_DATA ((EFI_MEMORY_TYPE)0x80000002) /* boot_info, page tables, stack */
 
-/* Allocate zeroed, page-aligned physical memory. Returns NULL on failure. */
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+
+/*
+ * Allocate zeroed, page-aligned physical memory. Returns NULL on failure.
+ * Every allocation is recorded so a failed boot attempt can release them all.
+ */
 void *boot_alloc_pages(UINTN pages, EFI_MEMORY_TYPE type);
+
+/* Free everything allocated with boot_alloc_pages() since the last release. */
+void  boot_alloc_release_all(void);
 
 static inline uint64_t align_down(uint64_t value, uint64_t align)
 {

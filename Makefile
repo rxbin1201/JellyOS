@@ -28,6 +28,7 @@ BOOT_SRCS    := $(wildcard $(BOOT_SRC_DIR)/*.c $(BOOT_SRC_DIR)/*.S)
 BOOT_OBJS    := $(patsubst $(BOOT_SRC_DIR)/%,$(BOOT_OBJ_DIR)/%.o,$(BOOT_SRCS))
 BOOT_SO      := $(BOOT_OBJ_DIR)/bootx64.so
 BOOT_EFI     := $(ESP)/EFI/BOOT/BOOTX64.EFI
+BOOT_CFG     := $(ESP)/boot/boot.cfg
 
 BOOT_CFLAGS := -std=gnu11 -O2 -g -Wall -Wextra -Werror \
                -I$(GNUEFI_INC) -I$(GNUEFI_INC)/x86_64 -I$(PROTOCOL_INC) \
@@ -74,9 +75,9 @@ QEMU_FLAGS := -machine q35 -m 512M -no-reboot \
 
 # --- Targets -----------------------------------------------------------------
 
-.PHONY: all run debug clean
+.PHONY: all run debug reset-vars clean
 
-all: $(BOOT_EFI) $(KERNEL_ESP)
+all: $(BOOT_EFI) $(BOOT_CFG) $(KERNEL_ESP)
 
 $(BOOT_OBJ_DIR)/%.o: $(BOOT_SRC_DIR)/%
 	@mkdir -p $(@D)
@@ -90,6 +91,10 @@ $(BOOT_EFI): $(BOOT_SO)
 	$(OBJCOPY) -j .text -j .sdata -j .data -j .rodata -j .dynamic -j .dynsym \
 	           -j .rel -j .rela -j .rel.* -j .rela.* -j .reloc \
 	           --target efi-app-x86_64 --subsystem=10 $< $@
+
+$(BOOT_CFG): $(BOOT_SRC_DIR)/boot.cfg
+	@mkdir -p $(@D)
+	cp $< $@
 
 $(BUILD)/kernel/%.o: kernel/%
 	@mkdir -p $(@D)
@@ -111,6 +116,10 @@ run: all $(VARS_COPY)
 
 debug: all $(VARS_COPY)
 	$(QEMU) $(QEMU_FLAGS) -s -S
+
+# Forget the persistent boot state (fresh UEFI variable store).
+reset-vars:
+	rm -f $(VARS_COPY)
 
 clean:
 	rm -rf $(BUILD)
