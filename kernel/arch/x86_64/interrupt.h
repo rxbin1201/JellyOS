@@ -30,6 +30,11 @@ struct arch_interrupt_frame {
 
 typedef void (*interrupt_handler_t)(struct arch_interrupt_frame *frame);
 
+static inline int interrupt_from_user(const struct arch_interrupt_frame *frame)
+{
+    return (frame->cs & 3) == 3;
+}
+
 void idt_init(void);
 
 /* Install a handler for a vector. Exceptions without a handler panic. */

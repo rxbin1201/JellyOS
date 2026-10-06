@@ -59,15 +59,31 @@ SDK_INC        := sdk/include
 KSYMS_DIR      := $(BUILD)/ksyms
 KSYMS_TOOL     := tools/debugger/ksyms.py
 
+# -fno-tree-loop-distribute-patterns: never turn the memset/memcpy loops into calls to themselves
 KERNEL_CFLAGS := -std=gnu11 -O2 -g -Wall -Wextra -Werror \
                  -I. -Ikernel -I$(PROTOCOL_INC) -I$(SDK_INC) \
                  -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
                  -mcmodel=kernel -mno-red-zone -mgeneral-regs-only \
-                 -fno-omit-frame-pointer \
+                 -fno-omit-frame-pointer -fno-tree-loop-distribute-patterns \
                  -MMD -MP
 
 KERNEL_LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -z noexecstack \
                   -T $(KERNEL_LDS)
+
+# --- Userspace (static ELF64 programs on libos) -------------------------------
+
+USER_LDS     := userspace/libos/user.ld
+LIBOS_SRCS   := $(wildcard userspace/libos/*.c)
+LIBOS_OBJS   := $(patsubst %,$(BUILD)/%.o,$(LIBOS_SRCS))
+
+USER_CFLAGS  := -std=gnu11 -O2 -g -Wall -Wextra -Werror -I$(SDK_INC) -I. \
+                -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
+                -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns \
+                -MMD -MP
+USER_LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -z noexecstack -T $(USER_LDS)
+
+# Test program embedded into the kernel (tests/kernel/user_images.S)
+USERTEST_ELF := $(BUILD)/tests/userspace/usertest.elf
 
 # --- QEMU --------------------------------------------------------------------
 
@@ -125,6 +141,20 @@ $(BUILD)/tests/%.o: tests/%
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
+# User code: the more specific patterns win over the kernel rules above.
+$(BUILD)/userspace/%.o: userspace/%
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/tests/userspace/%.o: tests/userspace/%
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+$(USERTEST_ELF): $(BUILD)/tests/userspace/usertest.c.o $(LIBOS_OBJS) $(USER_LDS)
+	$(LD) $(USER_LDFLAGS) $(BUILD)/tests/userspace/usertest.c.o $(LIBOS_OBJS) -o $@
+
+$(BUILD)/tests/kernel/user_images.S.o: $(USERTEST_ELF)
+
 $(KSYMS_DIR)/empty.c: $(KSYMS_TOOL)
 	@mkdir -p $(@D)
 	python3 $(KSYMS_TOOL) --empty > $@
@@ -179,4 +209,4 @@ reset-vars:
 clean:
 	rm -rf $(BUILD)
 
--include $(BOOT_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d)
+-include $(BOOT_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(LIBOS_OBJS:.o=.d) $(BUILD)/tests/userspace/usertest.c.d

@@ -22,12 +22,15 @@
 #define TIMER_HZ          1000
 #define DEBUG_EXIT_PORT   0xF4 /* QEMU isa-debug-exit */
 
+void syscall_init(void);
+
 status_t arch_init_cpu(void)
 {
     cpu_init();
     gdt_init();
     idt_init();
     exceptions_init();
+    syscall_init();
     pic_disable();
     return STATUS_SUCCESS;
 }

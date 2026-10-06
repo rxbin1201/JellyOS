@@ -195,16 +195,25 @@ volatile void *vmm_map_mmio(uint64_t phys, uint64_t size, uint32_t cache)
     return (volatile void *)(uintptr_t)(virt + (phys - start));
 }
 
+#define MAX_FREE_STACK_SLOTS 1024
+
+static uint64_t free_stack_slots[MAX_FREE_STACK_SLOTS];
+static size_t free_stack_slot_count;
+
 status_t vmm_alloc_kernel_stack(uint64_t *top)
 {
     uint64_t flags = arch_interrupts_save();
-    uint64_t slot = next_stack_slot;
+    uint64_t slot;
 
-    if (slot + KERNEL_STACK_SLOT > KERNEL_STACK_REGION + KERNEL_STACK_REGION_SIZE) {
+    if (free_stack_slot_count) {
+        slot = free_stack_slots[--free_stack_slot_count];
+    } else if (next_stack_slot + KERNEL_STACK_SLOT <= KERNEL_STACK_REGION + KERNEL_STACK_REGION_SIZE) {
+        slot = next_stack_slot;
+        next_stack_slot += KERNEL_STACK_SLOT;
+    } else {
         arch_interrupts_restore(flags);
         return STATUS_OUT_OF_MEMORY;
     }
-    next_stack_slot += KERNEL_STACK_SLOT;
     arch_interrupts_restore(flags);
 
     /* The first page of every slot stays unmapped as the guard. */
@@ -213,6 +222,19 @@ status_t vmm_alloc_kernel_stack(uint64_t *top)
     if (status == STATUS_SUCCESS)
         *top = base + KERNEL_STACK_PAGES * PAGE_SIZE;
     return status;
+}
+
+void vmm_free_kernel_stack(uint64_t top)
+{
+    uint64_t base = top - KERNEL_STACK_PAGES * PAGE_SIZE;
+    uint64_t slot = base - PAGE_SIZE;
+
+    vmm_free(&kernel_space, base, KERNEL_STACK_PAGES * PAGE_SIZE);
+
+    uint64_t flags = arch_interrupts_save();
+    if (free_stack_slot_count < MAX_FREE_STACK_SLOTS)
+        free_stack_slots[free_stack_slot_count++] = slot; /* otherwise the slot is not reused */
+    arch_interrupts_restore(flags);
 }
 
 bool vmm_is_stack_guard(uint64_t address)

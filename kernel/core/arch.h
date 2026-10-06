@@ -41,6 +41,34 @@ void     arch_interrupts_restore(uint64_t state);
 /* Sleep until the next interrupt. */
 void     arch_wait_for_interrupt(void);
 
+/* With interrupts disabled: enable them and halt without a wakeup window. */
+void     arch_idle(void);
+
+/* --- Threads --------------------------------------------------------------- */
+
+/* Saved CPU context (callee-saved registers, FPU/SSE state). Opaque to generic code. */
+struct arch_thread;
+
+/* New kernel thread: runs thread_kernel_start(entry, arg) on the given stack. */
+status_t arch_thread_create_kernel(struct arch_thread **thread, uint64_t stack_top,
+                                   void (*entry)(void *), void *arg);
+
+/* New user thread: enters ring 3 at ip/sp with RDI, RSI, RDX = arg0..arg2. */
+status_t arch_thread_create_user(struct arch_thread **thread, uint64_t stack_top, uint64_t ip, uint64_t sp,
+                                 uint64_t arg0, uint64_t arg1, uint64_t arg2);
+
+/* Context for the code that is already running (the boot thread). */
+status_t arch_thread_create_current(struct arch_thread **thread);
+
+void     arch_thread_destroy(struct arch_thread *thread);
+
+/* Save from, switch to `to`, whose kernel stack top is used for entries from user mode. */
+void     arch_thread_switch(struct arch_thread *from, struct arch_thread *to, uint64_t to_stack_top);
+
+/* Bracket kernel accesses to user memory (SMAP). */
+void     arch_user_access_begin(void);
+void     arch_user_access_end(void);
+
 unsigned arch_cpu_id(void);
 
 /* Print registers and a stack trace. frame may be NULL (current context). */

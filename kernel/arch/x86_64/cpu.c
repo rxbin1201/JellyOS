@@ -25,6 +25,14 @@ static void detect_features(cpu_features_t *f)
     f->apic = d & (1u << 9);
     f->x2apic = c & (1u << 21);
 
+    cpu_cpuid(0, 0, &a, &b, &c, &d);
+    if (a >= 7) {
+        cpu_cpuid(7, 0, &a, &b, &c, &d);
+        f->smep = b & (1u << 7);
+        f->smap = b & (1u << 20);
+        f->umip = c & (1u << 2);
+    }
+
     cpu_cpuid(0x80000000, 0, &max_ext, &b, &c, &d);
     if (max_ext >= 0x80000001) {
         cpu_cpuid(0x80000001, 0, &a, &b, &c, &d);
@@ -49,8 +57,19 @@ void cpu_init(void)
 {
     detect_features(&cpu_features);
 
-    /* Honor read-only pages in ring 0 as well (the boot protocol leaves WP as found). */
-    cpu_write_cr0(cpu_read_cr0() | CR0_WP);
+    /*
+     * CR0: honor read-only pages in ring 0 (WP), FPU present without emulation (MP, !EM, !TS).
+     * CR4: FXSAVE/SSE for user threads; SMEP/SMAP/UMIP harden the user/kernel boundary.
+     */
+    cpu_write_cr0((cpu_read_cr0() | CR0_WP | CR0_MP) & ~(CR0_EM | CR0_TS));
+    uint64_t cr4 = cpu_read_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT;
+    if (cpu_features.smep)
+        cr4 |= CR4_SMEP;
+    if (cpu_features.smap)
+        cr4 |= CR4_SMAP;
+    if (cpu_features.umip)
+        cr4 |= CR4_UMIP;
+    cpu_write_cr4(cr4);
 
     const char *brand = cpu_features.brand;
     while (*brand == ' ')
@@ -59,8 +78,28 @@ void cpu_init(void)
     klog_info("cpu: features apic=%d x2apic=%d nx=%d tsc=%d invariant_tsc=%d 1g_pages=%d",
               cpu_features.apic, cpu_features.x2apic, cpu_features.nx, cpu_features.tsc,
               cpu_features.invariant_tsc, cpu_features.page_1g);
+    klog_info("cpu: protection smep=%d smap=%d umip=%d", cpu_features.smep, cpu_features.smap,
+              cpu_features.umip);
     if (cpu_features.nx && !(cpu_read_msr(MSR_EFER) & EFER_NXE))
         klog_warn("cpu: NX supported but EFER.NXE is not set");
+}
+
+void arch_user_access_begin(void)
+{
+    if (cpu_features.smap)
+        __asm__ volatile("stac" : : : "memory");
+}
+
+void arch_user_access_end(void)
+{
+    if (cpu_features.smap)
+        __asm__ volatile("clac" : : : "memory");
+}
+
+void arch_idle(void)
+{
+    /* STI takes effect after the next instruction, so no interrupt slips in before HLT. */
+    __asm__ volatile("sti; hlt" : : : "memory");
 }
 
 void arch_interrupts_enable(void)

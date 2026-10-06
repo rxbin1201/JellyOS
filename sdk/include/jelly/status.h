@@ -23,6 +23,13 @@ typedef enum {
     STATUS_IO_ERROR         = 7,
     STATUS_TIMEOUT          = 8,
     STATUS_DEVICE_ERROR     = 9,
+    /* appended in syscall ABI version 1 */
+    STATUS_WOULD_BLOCK      = 10,
+    STATUS_BUFFER_TOO_SMALL = 11,
+    STATUS_PEER_CLOSED      = 12,
+    STATUS_BAD_HANDLE       = 13,
+    STATUS_LIMIT_EXCEEDED   = 14,
+    STATUS_INTERRUPTED      = 15,
 } status_t;
 
 #define STATUS_IS_ERROR(s) ((s) != STATUS_SUCCESS)
@@ -40,6 +47,12 @@ static inline const char *status_name(status_t status)
     case STATUS_IO_ERROR:         return "IO_ERROR";
     case STATUS_TIMEOUT:          return "TIMEOUT";
     case STATUS_DEVICE_ERROR:     return "DEVICE_ERROR";
+    case STATUS_WOULD_BLOCK:      return "WOULD_BLOCK";
+    case STATUS_BUFFER_TOO_SMALL: return "BUFFER_TOO_SMALL";
+    case STATUS_PEER_CLOSED:      return "PEER_CLOSED";
+    case STATUS_BAD_HANDLE:       return "BAD_HANDLE";
+    case STATUS_LIMIT_EXCEEDED:   return "LIMIT_EXCEEDED";
+    case STATUS_INTERRUPTED:      return "INTERRUPTED";
     }
     return "UNKNOWN";
 }

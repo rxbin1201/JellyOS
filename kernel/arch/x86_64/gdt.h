@@ -17,6 +17,11 @@
 #define IST_NMI           2
 #define IST_MACHINE_CHECK 3
 
+#include <stdint.h>
+
 void gdt_init(void);
+
+/* Stack the CPU switches to on interrupts from ring 3 (TSS.RSP0). */
+void gdt_set_kernel_stack(uint64_t top);
 
 #endif

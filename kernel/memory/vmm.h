@@ -49,6 +49,7 @@ volatile void *vmm_map_mmio(uint64_t phys, uint64_t size, uint32_t cache);
 
 /* Allocate a KERNEL_STACK_PAGES stack below an unmapped guard page. */
 status_t    vmm_alloc_kernel_stack(uint64_t *top);
+void        vmm_free_kernel_stack(uint64_t top);
 bool        vmm_is_stack_guard(uint64_t address);
 
 /* Try to resolve a page fault (no demand paging yet). Returns true if handled. */

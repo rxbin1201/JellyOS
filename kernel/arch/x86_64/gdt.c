@@ -67,6 +67,11 @@ static void load_segments(void)
         : "rax", "memory");
 }
 
+void gdt_set_kernel_stack(uint64_t top)
+{
+    tss.rsp[0] = top;
+}
+
 void gdt_init(void)
 {
     gdt[0] = 0;

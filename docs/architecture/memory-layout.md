@@ -9,6 +9,7 @@ belongs to userspace and the upper half to the kernel.
 ```text
 0x0000_0000_0000_0000 ┐ page 0: never mapped (null pointer guard)
 0x0000_0000_0000_1000 │ User space (per process)                     128 TiB
+                      │   layout: see processes.md
 0x0000_7FFF_FFFF_FFFF ┘
         ... non-canonical hole ...
 0xFFFF_8000_0000_0000 ┐ PML4 256

@@ -18,6 +18,15 @@ uses exactly the same definitions.
 | `STATUS_IO_ERROR` | 7 | Transfer failed |
 | `STATUS_TIMEOUT` | 8 | Operation did not complete in time |
 | `STATUS_DEVICE_ERROR` | 9 | Device misbehaved |
+| `STATUS_WOULD_BLOCK` | 10 | Non-blocking operation cannot proceed now (empty or full queue, futex value changed) |
+| `STATUS_BUFFER_TOO_SMALL` | 11 | Output buffer too small; the required size is reported |
+| `STATUS_PEER_CLOSED` | 12 | The other end of a channel is gone |
+| `STATUS_BAD_HANDLE` | 13 | Handle invalid, closed or of the wrong type |
+| `STATUS_LIMIT_EXCEEDED` | 14 | A resource limit (handles, threads, memory) was reached |
+| `STATUS_INTERRUPTED` | 15 | A wait ended because the thread is being terminated |
+
+Codes 0–9 are the initial set from the README. Codes 10–15 were appended with
+syscall ABI version 1.
 
 ## Rules
 
@@ -27,4 +36,4 @@ uses exactly the same definitions.
   parameters. Errors are never encoded in pointers or sizes.
 - `status_name()` gives a stable name for logs and diagnostics.
 - Unrecoverable kernel states use `panic()` or `ASSERT()`, not error codes.
-- How syscalls encode `status_t` is defined with the syscall ABI (Phase 4).
+- System calls return `status_t` in `RAX` (see [../abi/syscalls.md](../abi/syscalls.md)).

@@ -3,6 +3,7 @@
 #include "gdt.h"
 
 #include "core/log.h"
+#include "scheduler/thread.h"
 
 #define GATE_INTERRUPT 0x8E /* present, ring 0, 64-bit interrupt gate */
 
@@ -59,7 +60,7 @@ void interrupt_set_handler(uint8_t vector, interrupt_handler_t handler)
     handlers[vector] = handler;
 }
 
-void interrupt_dispatch(struct arch_interrupt_frame *frame)
+static void dispatch(struct arch_interrupt_frame *frame)
 {
     uint8_t vector = (uint8_t)frame->vector;
 
@@ -75,4 +76,13 @@ void interrupt_dispatch(struct arch_interrupt_frame *frame)
     if (vector == VECTOR_PIC_SPURIOUS_1 || vector == VECTOR_PIC_SPURIOUS_2)
         return;
     klog_warn("interrupt: unexpected vector %u", vector);
+}
+
+void interrupt_dispatch(struct arch_interrupt_frame *frame)
+{
+    dispatch(frame);
+
+    /* Preemption and pending kills take effect on the way back to ring 3. */
+    if (interrupt_from_user(frame))
+        thread_return_to_user();
 }

@@ -4,6 +4,7 @@
 
 #include "tests/kernel/ktest.h"
 
+#include "core/arch.h"
 #include "core/string.h"
 #include "memory/heap.h"
 #include "memory/layout.h"
@@ -77,8 +78,10 @@ KTEST(vmm_user_space_lifecycle)
     /* Write through the direct map, read back through the user mapping. */
     *(volatile uint32_t *)phys_to_virt(phys) = 0xC0FFEE;
     vmm_space_activate(&space);
+    arch_user_access_begin(); /* SMAP */
     uint32_t seen = *(volatile uint32_t *)(uintptr_t)(TEST_USER_BASE + PAGE_SIZE + 0x10);
     uint32_t zero = *(volatile uint32_t *)(uintptr_t)TEST_USER_BASE;
+    arch_user_access_end();
     vmm_space_activate(vmm_kernel_space());
     KEXPECT(seen == 0xC0FFEE);
     KEXPECT(zero == 0);

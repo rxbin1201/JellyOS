@@ -1,6 +1,9 @@
 /*
- * CPU exception handling: every exception is fatal except breakpoints and
- * page faults the VMM can resolve.
+ * CPU exception handling.
+ *
+ * In ring 0 every exception is fatal (panic) except breakpoints and page
+ * faults the VMM can resolve. In ring 3 an unresolved exception terminates
+ * only the faulting process.
  */
 
 #include "cpu.h"
@@ -10,6 +13,7 @@
 #include "core/log.h"
 #include "core/panic.h"
 #include "memory/vmm.h"
+#include "process/process.h"
 
 #define VECTOR_BREAKPOINT   3
 #define VECTOR_DOUBLE_FAULT 8
@@ -34,6 +38,19 @@ static const char *const exception_names[32] = {
 
 static char reason[192];
 
+/* Kill the process for faults in ring 3, panic for faults in the kernel. */
+__attribute__((noreturn)) static void fatal(struct arch_interrupt_frame *frame)
+{
+    if (interrupt_from_user(frame)) {
+        size_t length = 0;
+        while (reason[length])
+            length++;
+        format(reason + length, sizeof(reason) - length, " at rip %p", (void *)frame->rip);
+        process_fault(reason);
+    }
+    panic_with_frame(frame, reason);
+}
+
 static void breakpoint(struct arch_interrupt_frame *frame)
 {
     klog_warn("breakpoint at %p, continuing", (void *)frame->rip);
@@ -53,7 +70,7 @@ static void page_fault(struct arch_interrupt_frame *frame)
            vmm_fault_cause(address, access), (e & PF_USER) ? "user" : "kernel",
            (e & PF_FETCH) ? "instruction fetch" : (e & PF_WRITE) ? "write" : "read",
            (e & PF_PRESENT) ? ", page present" : "");
-    panic_with_frame(frame, reason);
+    fatal(frame);
 }
 
 /* A fault while pushing onto an overflowed stack escalates to a double fault. */
@@ -70,7 +87,7 @@ void exception_handle(struct arch_interrupt_frame *frame)
 {
     format(reason, sizeof(reason), "%s (vector %u, error code 0x%lx)", exception_names[frame->vector & 31],
            (unsigned)frame->vector, frame->error_code);
-    panic_with_frame(frame, reason);
+    fatal(frame);
 }
 
 void exceptions_init(void)

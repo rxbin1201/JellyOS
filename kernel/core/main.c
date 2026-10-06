@@ -3,8 +3,9 @@
  *
  * Stage 1 (entry stack in .bss): copy boot data, bring up the CPU, memory
  * management and the timer, then switch to a guarded kernel stack.
- * Stage 2: reclaim boot memory, enable interrupts, run optional self-tests
- * and idle. Processes and scheduling follow in Phase 4.
+ * Stage 2: reclaim boot memory, start the scheduler (this code becomes the
+ * "kernel-main" thread), run optional self-tests, then exit so only the
+ * idle thread and user processes remain.
  */
 
 #include "core/arch.h"
@@ -15,12 +16,15 @@
 #include "core/string.h"
 #include "memory/memory.h"
 #include "memory/vmm.h"
+#include "scheduler/scheduler.h"
 #include "time/clock.h"
 
 #include "tests/kernel/ktest.h"
 
-#define KERNEL_VERSION   "0.3.0"
+#define KERNEL_VERSION   "0.4.0"
 #define TIMER_CHECK_MS   100
+
+static uint64_t main_stack_top;
 
 static const char *const boot_modes[] = { "normal", "previous kernel", "recovery", "manual" };
 
@@ -61,14 +65,14 @@ static void log_boot_info(const boot_info_t *info)
         klog_warn("boot: %zu memory map or module entries dropped", boot_truncated_entries());
 }
 
-/* Wait until the timer has advanced, proving interrupts and EOI work. */
+/* Sleep on the timer, proving interrupts, EOI and scheduler wakeups work. */
 static void check_timer(void)
 {
     uint64_t start = clock_monotonic_ns();
 
-    while (clock_monotonic_ns() - start < TIMER_CHECK_MS * 1000000ull)
-        arch_wait_for_interrupt();
-    klog_info("time: timer running, %lu ticks after %u ms", clock_ticks(), TIMER_CHECK_MS);
+    thread_sleep(TIMER_CHECK_MS * 1000000ull);
+    klog_info("time: slept %lu ms, %lu ticks since start", (clock_monotonic_ns() - start) / 1000000,
+              clock_ticks());
 }
 
 static void run_self_tests(void)
@@ -104,15 +108,15 @@ static void run_crash_test(void)
 __attribute__((noreturn)) static void kernel_stage2(void)
 {
     memory_reclaim_boot();
+    scheduler_init(main_stack_top);
 
     arch_interrupts_enable();
     check_timer();
     run_self_tests();
     run_crash_test();
 
-    klog_info("kernel: initialization complete, idling");
-    for (;;)
-        arch_wait_for_interrupt();
+    klog_info("kernel: initialization complete");
+    thread_exit();
 }
 
 void kernel_main(const boot_info_t *loader_info)
@@ -144,9 +148,8 @@ void kernel_main(const boot_info_t *loader_info)
         panic("timer initialization failed: %s", status_name(status));
 
     /* Leave the unguarded entry stack for one with a guard page below it. */
-    uint64_t stack_top;
-    status = vmm_alloc_kernel_stack(&stack_top);
+    status = vmm_alloc_kernel_stack(&main_stack_top);
     if (STATUS_IS_ERROR(status))
         panic("cannot allocate the kernel stack: %s", status_name(status));
-    arch_switch_stack(stack_top, kernel_stage2);
+    arch_switch_stack(main_stack_top, kernel_stage2);
 }

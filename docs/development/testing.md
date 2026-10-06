@@ -31,6 +31,25 @@ the result through QEMU's `isa-debug-exit` device:
 
 On a normal boot, `selftest=1` runs the tests and keeps the system running.
 
+### User-mode tests
+
+[`tests/userspace/usertest.c`](../../tests/userspace/usertest.c) is a static
+user program built on libos. It is embedded in the kernel
+(`tests/kernel/user_images.S`) and started by
+[`tests/kernel/process_tests.c`](../../tests/kernel/process_tests.c) with a
+scenario number and startup handles. Exit code 0 means success; any other code
+is the source line of the failed check. Fault scenarios must be killed with
+`JELLY_EXIT_FAULT`.
+
+The process tests cover ring 3 execution, isolation (faults, foreign address
+spaces, bad pointers), threads with a futex mutex, FPU state across
+preemption, sleep, memory limits, handle rights and generations, channels,
+shared memory, and the release of all resources after exit.
+
+To confirm that a test can actually fail, break the code it covers once. For
+example, disabling `FXSAVE`/`FXRSTOR` in `kernel/arch/x86_64/thread.c` makes
+`preemption_preserves_fpu_state` fail.
+
 ## Fault tests
 
 `crashtest=<kind>` on the kernel command line triggers a fault after

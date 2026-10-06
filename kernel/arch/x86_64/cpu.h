@@ -11,7 +11,15 @@
 #define MSR_APIC_BASE 0x1B
 #define MSR_EFER      0xC0000080
 
+#define CR0_MP        (1ULL << 1)
+#define CR0_EM        (1ULL << 2)
+#define CR0_TS        (1ULL << 3)
 #define CR0_WP        (1ULL << 16)
+#define CR4_OSFXSR    (1ULL << 9)
+#define CR4_OSXMMEXCPT (1ULL << 10)
+#define CR4_UMIP      (1ULL << 11)
+#define CR4_SMEP      (1ULL << 20)
+#define CR4_SMAP      (1ULL << 21)
 #define RFLAGS_IF     (1ULL << 9)
 #define EFER_NXE      (1ULL << 11)
 
@@ -24,6 +32,9 @@ typedef struct {
     bool     tsc;
     bool     invariant_tsc;
     bool     page_1g;
+    bool     smep;
+    bool     smap;
+    bool     umip;
 } cpu_features_t;
 
 extern cpu_features_t cpu_features;
@@ -63,6 +74,11 @@ DEFINE_CR_READ(4)
 static inline void cpu_write_cr0(uint64_t v)
 {
     __asm__ volatile("mov %0, %%cr0" : : "r"(v) : "memory");
+}
+
+static inline void cpu_write_cr4(uint64_t v)
+{
+    __asm__ volatile("mov %0, %%cr4" : : "r"(v) : "memory");
 }
 
 static inline uint64_t cpu_read_rflags(void)
