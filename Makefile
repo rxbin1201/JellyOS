@@ -45,8 +45,9 @@ BOOT_LDFLAGS := -nostdlib -shared -Bsymbolic -znocombreloc -z noexecstack \
 # --- Kernel (ELF64, higher half) ---------------------------------------------
 
 KERNEL_OBJ_DIR := $(BUILD)/kernel
-# Kernel tests (tests/kernel) are linked into the kernel and run with selftest=1.
-KERNEL_SRCS    := $(shell find kernel tests/kernel -name '*.c' -o -name '*.S')
+# Built-in drivers live in drivers/. Kernel tests (tests/kernel) are linked
+# into the kernel and run with selftest=1.
+KERNEL_SRCS    := $(shell find kernel drivers tests/kernel -name '*.c' -o -name '*.S')
 KERNEL_OBJS    := $(patsubst %,$(BUILD)/%.o,$(KERNEL_SRCS))
 KERNEL_LDS     := kernel/arch/x86_64/linker.ld
 KERNEL_ELF     := $(BUILD)/kernel.elf
@@ -85,6 +86,17 @@ USER_LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -z noexecstack
 # Test program embedded into the kernel (tests/kernel/user_images.S)
 USERTEST_ELF := $(BUILD)/tests/userspace/usertest.elf
 
+# --- Loadable kernel modules (ELF64 relocatable, .ko) ---------------------------
+
+MODULE_DIR    := $(BUILD)/modules
+MODULE_CFLAGS := $(KERNEL_CFLAGS) -DJELLY_MODULE -fno-asynchronous-unwind-tables
+
+# Test driver modules, loaded as boot modules by `make test`
+TEST_MODULE_SRCS := tests/drivers/edu/edu.c tests/drivers/e1000e_msix/e1000e_msix.c \
+                    tests/drivers/bad/bad_api.c tests/drivers/bad/bad_dependency.c \
+                    tests/drivers/bad/bad_symbol.c
+TEST_MODULES     := $(patsubst %.c,$(MODULE_DIR)/%.ko,$(notdir $(TEST_MODULE_SRCS)))
+
 # --- QEMU --------------------------------------------------------------------
 
 OVMF_CODE := /usr/share/OVMF/OVMF_CODE_4M.fd
@@ -112,7 +124,7 @@ TEST_CMDLINE := loglevel=info selftest=exit
 
 # --- Targets -----------------------------------------------------------------
 
-.PHONY: all run debug test reset-vars clean
+.PHONY: all run debug test modules reset-vars clean
 
 all: $(BOOT_EFI) $(BOOT_CFG) $(KERNEL_ESP)
 
@@ -137,6 +149,10 @@ $(BUILD)/kernel/%.o: kernel/%
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
+$(BUILD)/drivers/%.o: drivers/%
+	@mkdir -p $(@D)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
 $(BUILD)/tests/%.o: tests/%
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
@@ -154,6 +170,20 @@ $(USERTEST_ELF): $(BUILD)/tests/userspace/usertest.c.o $(LIBOS_OBJS) $(USER_LDS)
 	$(LD) $(USER_LDFLAGS) $(BUILD)/tests/userspace/usertest.c.o $(LIBOS_OBJS) -o $@
 
 $(BUILD)/tests/kernel/user_images.S.o: $(USERTEST_ELF)
+
+# Module sources compile like kernel code; `ld -r` keeps them relocatable.
+$(BUILD)/tests/drivers/%.o: tests/drivers/%
+	@mkdir -p $(@D)
+	$(CC) $(MODULE_CFLAGS) -c $< -o $@
+
+define module_rule
+$(MODULE_DIR)/$(basename $(notdir $(1))).ko: $(BUILD)/$(1).o
+	@mkdir -p $$(@D)
+	$(LD) -r -o $$@ $$<
+endef
+$(foreach src,$(TEST_MODULE_SRCS),$(eval $(call module_rule,$(src))))
+
+modules: $(TEST_MODULES)
 
 $(KSYMS_DIR)/empty.c: $(KSYMS_TOOL)
 	@mkdir -p $(@D)
@@ -188,16 +218,20 @@ debug: all $(VARS_COPY)
 	$(QEMU) $(QEMU_FLAGS) -s -S
 
 # QEMU's isa-debug-exit turns the kernel's verdict into the exit status: 1 = passed.
-test: all
+# The test drivers are passed as boot modules; edu and e1000e are their devices.
+test: all $(TEST_MODULES)
 	@rm -rf $(TEST_ESP)
-	@mkdir -p $(TEST_ESP)/EFI/BOOT $(TEST_ESP)/boot/kernels
+	@mkdir -p $(TEST_ESP)/EFI/BOOT $(TEST_ESP)/boot/kernels $(TEST_ESP)/boot/modules
 	@cp $(BOOT_EFI) $(TEST_ESP)/EFI/BOOT/
 	@cp $(KERNEL_ESP) $(TEST_ESP)/boot/kernels/
-	@printf '[boot]\ntimeout=0\nmenu=hidden\nfallback_kernel=\n[entry Test]\nkernel=/boot/kernels/kernel-current.elf\ncmdline="$(TEST_CMDLINE)"\n' \
-	    > $(TEST_ESP)/boot/boot.cfg
+	@cp $(TEST_MODULES) $(TEST_ESP)/boot/modules/
+	@{ printf '[boot]\ntimeout=0\nmenu=hidden\nfallback_kernel=\n[entry Test]\n'; \
+	   printf 'kernel=/boot/kernels/kernel-current.elf\ncmdline="$(TEST_CMDLINE)"\n'; \
+	   for m in $(notdir $(TEST_MODULES)); do printf 'module=/boot/modules/%s\n' $$m; done; \
+	 } > $(TEST_ESP)/boot/boot.cfg
 	@cp $(OVMF_VARS) $(TEST_VARS)
 	@timeout $(TEST_TIMEOUT) $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(TEST_ESP),$(TEST_VARS)) -display none \
-	    -device isa-debug-exit,iobase=0xf4,iosize=0x04; \
+	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -device edu -device e1000e; \
 	status=$$?; \
 	if [ $$status -eq 1 ]; then echo "make test: PASSED"; \
 	else echo "make test: FAILED (QEMU exit status $$status)"; exit 1; fi
@@ -209,4 +243,5 @@ reset-vars:
 clean:
 	rm -rf $(BUILD)
 
--include $(BOOT_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(LIBOS_OBJS:.o=.d) $(BUILD)/tests/userspace/usertest.c.d
+-include $(BOOT_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(LIBOS_OBJS:.o=.d) $(BUILD)/tests/userspace/usertest.c.d \
+         $(patsubst %,$(BUILD)/%.d,$(TEST_MODULE_SRCS))

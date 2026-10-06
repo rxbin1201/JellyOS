@@ -1,4 +1,5 @@
 #include "core/log.h"
+#include "core/export.h"
 
 #include "core/arch.h"
 #include "core/format.h"
@@ -70,3 +71,5 @@ void klog_raw(const char *fmt, ...)
     va_end(args);
     arch_early_console_write(line);
 }
+
+EXPORT_SYMBOL(klog);

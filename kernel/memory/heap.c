@@ -1,4 +1,5 @@
 #include "memory/heap.h"
+#include "core/export.h"
 
 #include "memory/layout.h"
 #include "memory/pmm.h"
@@ -197,3 +198,8 @@ void heap_get_stats(heap_stats_t *out)
     *out = stats;
     arch_interrupts_restore(flags);
 }
+
+EXPORT_SYMBOL(kmalloc);
+EXPORT_SYMBOL(kcalloc);
+EXPORT_SYMBOL(krealloc);
+EXPORT_SYMBOL(kfree);

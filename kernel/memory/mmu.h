@@ -43,6 +43,9 @@ status_t   arch_mmu_map(mmu_root_t root, uint64_t virt, uint64_t phys, uint64_t 
 /* Unmap one 4 KiB page, returning what was mapped. */
 status_t   arch_mmu_unmap(mmu_root_t root, uint64_t virt, uint64_t *phys, uint32_t *flags);
 
+/* Change the rights/cache flags of a mapped 4 KiB page, keeping frame and ownership. */
+status_t   arch_mmu_protect(mmu_root_t root, uint64_t virt, uint32_t flags);
+
 /* Translate a virtual address. */
 bool       arch_mmu_query(mmu_root_t root, uint64_t virt, uint64_t *phys, uint32_t *flags);
 

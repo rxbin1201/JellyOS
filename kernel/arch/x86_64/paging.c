@@ -223,6 +223,20 @@ status_t arch_mmu_unmap(mmu_root_t root, uint64_t virt, uint64_t *phys, uint32_t
     return STATUS_SUCCESS;
 }
 
+status_t arch_mmu_protect(mmu_root_t root, uint64_t virt, uint32_t flags)
+{
+    status_t status;
+    uint64_t *entry = walk(root, virt, 1, false, &status);
+
+    if (!entry || !(*entry & PTE_PRESENT))
+        return STATUS_NOT_FOUND;
+
+    uint64_t owned = *entry & PTE_OWNED ? VM_OWNED : 0;
+    *entry = (*entry & PTE_ADDR_MASK) | leaf_bits(flags | (uint32_t)owned);
+    flush(root, virt);
+    return STATUS_SUCCESS;
+}
+
 bool arch_mmu_query(mmu_root_t root, uint64_t virt, uint64_t *phys, uint32_t *flags)
 {
     uint64_t *t = table(root);

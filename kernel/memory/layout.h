@@ -29,6 +29,14 @@
 #define MMIO_REGION              0xFFFFC10000000000ULL
 #define MMIO_REGION_SIZE         0x0000010000000000ULL /* 1 TiB */
 
+/*
+ * Loadable modules: inside the top 2 GiB next to the kernel image, so module
+ * code built with -mcmodel=kernel can reach kernel symbols with 32-bit
+ * relocations.
+ */
+#define MODULE_REGION            0xFFFFFFFFA0000000ULL
+#define MODULE_REGION_SIZE       0x0000000020000000ULL /* 512 MiB */
+
 static inline uint64_t align_down(uint64_t value, uint64_t align)
 {
     return value & ~(align - 1);

@@ -1,4 +1,5 @@
 #include "core/panic.h"
+#include "core/export.h"
 
 #include "core/arch.h"
 #include "core/format.h"
@@ -41,3 +42,5 @@ void panic_with_frame(const struct arch_interrupt_frame *frame, const char *reas
 {
     panic_common(frame, reason);
 }
+
+EXPORT_SYMBOL(panic);

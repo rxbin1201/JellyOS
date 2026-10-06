@@ -4,8 +4,8 @@
  * Stage 1 (entry stack in .bss): copy boot data, bring up the CPU, memory
  * management and the timer, then switch to a guarded kernel stack.
  * Stage 2: reclaim boot memory, start the scheduler (this code becomes the
- * "kernel-main" thread), run optional self-tests, then exit so only the
- * idle thread and user processes remain.
+ * "kernel-main" thread), bring up devices and drivers, run optional
+ * self-tests, then exit so only the idle thread and user processes remain.
  */
 
 #include "core/arch.h"
@@ -14,6 +14,10 @@
 #include "core/log.h"
 #include "core/panic.h"
 #include "core/string.h"
+#include "core/version.h"
+#include "drivers/acpi/acpi.h"
+#include "drivers/core/device.h"
+#include "drivers/core/module.h"
 #include "memory/memory.h"
 #include "memory/vmm.h"
 #include "scheduler/scheduler.h"
@@ -21,7 +25,6 @@
 
 #include "tests/kernel/ktest.h"
 
-#define KERNEL_VERSION   "0.4.0"
 #define TIMER_CHECK_MS   100
 
 static uint64_t main_stack_top;
@@ -105,6 +108,17 @@ static void run_crash_test(void)
         klog_info("crashtest: '%s' returned, execution continues", kind);
 }
 
+/* Device manager, built-in modules (buses enumerate here), then driver modules from the boot manager. */
+static void start_devices(void)
+{
+    device_manager_init();
+    module_init_builtin();
+    unsigned loaded = module_load_boot_modules();
+    if (loaded)
+        klog_info("modules: %u loaded from boot modules", loaded);
+    device_tree_dump();
+}
+
 __attribute__((noreturn)) static void kernel_stage2(void)
 {
     memory_reclaim_boot();
@@ -112,6 +126,7 @@ __attribute__((noreturn)) static void kernel_stage2(void)
 
     arch_interrupts_enable();
     check_timer();
+    start_devices();
     run_self_tests();
     run_crash_test();
 
@@ -130,7 +145,7 @@ void kernel_main(const boot_info_t *loader_info)
     cmdline_init(boot_cmdline());
     apply_log_level();
 
-    klog_info("JellyOS kernel " KERNEL_VERSION " starting");
+    klog_info("JellyOS kernel " KERNEL_VERSION_STRING " starting");
     log_boot_info(info);
 
     status_t status = arch_init_cpu();
@@ -143,9 +158,14 @@ void kernel_main(const boot_info_t *loader_info)
     if (STATUS_IS_ERROR(status))
         panic("memory initialization failed: %s", status_name(status));
 
+    /* Firmware tables: interrupt controllers and PCI configuration ranges. */
+    if (STATUS_IS_ERROR(acpi_init(info->acpi.rsdp_phys)))
+        klog_warn("acpi: unavailable, continuing without IOAPIC and ECAM");
+
     status = arch_init_timer();
     if (STATUS_IS_ERROR(status))
         panic("timer initialization failed: %s", status_name(status));
+    arch_init_interrupt_routing();
 
     /* Leave the unguarded entry stack for one with a guard page below it. */
     status = vmm_alloc_kernel_stack(&main_stack_top);

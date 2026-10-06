@@ -25,7 +25,9 @@ belongs to userspace and the upper half to the kernel.
                       │ Reserved (vmalloc, per-CPU data, ...)
 0xFFFF_FFFF_7FFF_FFFF ┘
 0xFFFF_FFFF_8000_0000 ┐ PML4 511
-                      │ Kernel image (text, rodata, data, bss)        2 GiB
+                      │ Kernel image (text, rodata, data, bss)
+0xFFFF_FFFF_A000_0000 │ Loadable modules (W^X per section group)      512 MiB
+0xFFFF_FFFF_C000_0000 │ Reserved
 0xFFFF_FFFF_FFFF_FFFF ┘
 ```
 

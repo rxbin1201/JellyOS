@@ -65,6 +65,36 @@ void     arch_thread_destroy(struct arch_thread *thread);
 /* Save from, switch to `to`, whose kernel stack top is used for entries from user mode. */
 void     arch_thread_switch(struct arch_thread *from, struct arch_thread *to, uint64_t to_stack_top);
 
+/* --- I/O ports (x86; other architectures have none) ------------------------ */
+
+uint8_t  arch_io_read8(uint16_t port);
+uint16_t arch_io_read16(uint16_t port);
+uint32_t arch_io_read32(uint16_t port);
+void     arch_io_write8(uint16_t port, uint8_t value);
+void     arch_io_write16(uint16_t port, uint16_t value);
+void     arch_io_write32(uint16_t port, uint32_t value);
+
+/* --- Device interrupts ----------------------------------------------------- */
+
+/* Runs in interrupt context; the architecture layer sends the EOI afterwards. */
+typedef void (*irq_handler_t)(void *context);
+
+/* Platform interrupt routing (IOAPIC from ACPI). Missing hardware leaves only MSI. */
+status_t arch_init_interrupt_routing(void);
+
+/* Reserve an interrupt vector for a device handler. */
+status_t arch_irq_allocate(irq_handler_t handler, void *context, uint32_t *irq);
+void     arch_irq_free(uint32_t irq);
+
+/* MSI/MSI-X message (address, data) that delivers irq. */
+void     arch_irq_msi_message(uint32_t irq, uint64_t *address, uint32_t *data);
+
+/* Route an interrupt controller input (global system interrupt) to irq. */
+status_t arch_irq_route_gsi(uint32_t gsi, bool level_triggered, bool active_low, uint32_t irq);
+/* Route a legacy ISA IRQ, applying firmware overrides. Reports the GSI used. */
+status_t arch_irq_route_isa(uint8_t isa_irq, uint32_t irq, uint32_t *gsi);
+void     arch_irq_mask_gsi(uint32_t gsi);
+
 /* Bracket kernel accesses to user memory (SMAP). */
 void     arch_user_access_begin(void);
 void     arch_user_access_end(void);

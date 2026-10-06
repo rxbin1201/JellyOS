@@ -3,6 +3,7 @@
  */
 
 #include "core/string.h"
+#include "core/export.h"
 
 #include <stdint.h>
 
@@ -73,3 +74,11 @@ int strncmp(const char *a, const char *b, size_t count)
     }
     return 0;
 }
+
+EXPORT_SYMBOL(memset);
+EXPORT_SYMBOL(memcpy);
+EXPORT_SYMBOL(memmove);
+EXPORT_SYMBOL(memcmp);
+EXPORT_SYMBOL(strlen);
+EXPORT_SYMBOL(strcmp);
+EXPORT_SYMBOL(strncmp);

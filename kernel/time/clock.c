@@ -1,4 +1,5 @@
 #include "time/clock.h"
+#include "core/export.h"
 
 #include "scheduler/scheduler.h"
 
@@ -26,3 +27,5 @@ uint64_t clock_monotonic_ns(void)
 {
     return ticks * period_ns;
 }
+
+EXPORT_SYMBOL(clock_monotonic_ns);

@@ -178,16 +178,25 @@ status_t pmm_alloc_page(uint64_t *phys)
 
 status_t pmm_alloc_pages(size_t count, uint64_t *phys)
 {
-    if (count == 0)
-        return STATUS_INVALID_ARGUMENT;
     if (count == 1)
         return pmm_alloc_page(phys);
+    return pmm_alloc_pages_below(count, ~0ULL, phys);
+}
+
+status_t pmm_alloc_pages_below(size_t count, uint64_t limit, uint64_t *phys)
+{
+    if (count == 0)
+        return STATUS_INVALID_ARGUMENT;
+
+    size_t end_frame = frame_count;
+    if (limit != ~0ULL && (limit + 1) / PAGE_SIZE < end_frame)
+        end_frame = (limit + 1) / PAGE_SIZE;
 
     uint64_t flags = arch_interrupts_save();
     size_t run = 0, start = 0;
     bool found = false;
 
-    for (size_t f = LOW_MEMORY_LIMIT / PAGE_SIZE; f < frame_count; f++) {
+    for (size_t f = LOW_MEMORY_LIMIT / PAGE_SIZE; f < end_frame; f++) {
         if (f % 64 == 0 && bitmap[f / 64] == ~0ULL) {
             run = 0;
             f += 63;

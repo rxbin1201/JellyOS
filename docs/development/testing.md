@@ -46,6 +46,23 @@ spaces, bad pointers), threads with a futex mutex, FPU state across
 preemption, sleep, memory limits, handle rights and generations, channels,
 shared memory, and the release of all resources after exit.
 
+### Driver tests
+
+`make test` adds the QEMU devices `edu` (1234:11e8) and `e1000e` (8086:10d3)
+and passes the modules from [`tests/drivers/`](../../tests/drivers/) as boot
+modules:
+
+| Module | Purpose |
+|---|---|
+| `edu.ko` | Probe verifies MMIO, an MSI interrupt and DMA in both directions; supports suspend/resume |
+| `e1000e_msix.ko` | Probe verifies MSI-X delivery (link status change cause through IVAR "other") |
+| `bad_api.ko`, `bad_dependency.ko`, `bad_symbol.ko` | Must be rejected (API version, missing dependency, unexported symbol) |
+
+[`tests/kernel/driver_tests.c`](../../tests/kernel/driver_tests.c) checks
+ACPI, IOAPIC routing (PIT channel 0 through ISA IRQ 0), PCI enumeration and
+BARs, resource conflicts, module loading/rejection/unloading/reloading,
+dependency tracking, and suspend/resume including PCI D3hot.
+
 To confirm that a test can actually fail, break the code it covers once. For
 example, disabling `FXSAVE`/`FXRSTOR` in `kernel/arch/x86_64/thread.c` makes
 `preemption_preserves_fpu_state` fail.

@@ -173,26 +173,58 @@ void vmm_free(vm_space_t *space, uint64_t virt, uint64_t size)
 
 /* --- Kernel regions -------------------------------------------------------- */
 
-volatile void *vmm_map_mmio(uint64_t phys, uint64_t size, uint32_t cache)
+void *vmm_map_physical(uint64_t phys, uint64_t size, uint32_t flags)
 {
     uint64_t start = align_down(phys, PAGE_SIZE);
     uint64_t length = align_up(phys + size, PAGE_SIZE) - start;
-    uint64_t flags = arch_interrupts_save();
+    uint64_t irq = arch_interrupts_save();
 
-    if (!(cache & (VM_UNCACHED | VM_WRITE_COMBINING)) || next_mmio + length > MMIO_REGION + MMIO_REGION_SIZE) {
-        arch_interrupts_restore(flags);
+    if (size == 0 || (flags & (VM_USER | VM_OWNED | VM_EXEC)) || next_mmio + length > MMIO_REGION + MMIO_REGION_SIZE) {
+        arch_interrupts_restore(irq);
         return NULL;
     }
     uint64_t virt = next_mmio;
     next_mmio += length;
-    arch_interrupts_restore(flags);
+    arch_interrupts_restore(irq);
 
     for (uint64_t offset = 0; offset < length; offset += PAGE_SIZE) {
-        uint32_t map_flags = VM_WRITE | VM_GLOBAL | (cache & (VM_UNCACHED | VM_WRITE_COMBINING));
-        if (STATUS_IS_ERROR(arch_mmu_map(kernel_space.root, virt + offset, start + offset, PAGE_SIZE, map_flags)))
+        if (STATUS_IS_ERROR(arch_mmu_map(kernel_space.root, virt + offset, start + offset, PAGE_SIZE,
+                                         flags | VM_GLOBAL)))
             return NULL;
     }
-    return (volatile void *)(uintptr_t)(virt + (phys - start));
+    return (void *)(uintptr_t)(virt + (phys - start));
+}
+
+volatile void *vmm_map_mmio(uint64_t phys, uint64_t size, uint32_t cache)
+{
+    if (!(cache & (VM_UNCACHED | VM_WRITE_COMBINING)))
+        return NULL;
+    return vmm_map_physical(phys, size, VM_WRITE | (cache & (VM_UNCACHED | VM_WRITE_COMBINING)));
+}
+
+void *vmm_phys_to_kernel(uint64_t phys, uint64_t size)
+{
+    uint64_t mapped_phys;
+    uint32_t flags;
+
+    /* RAM ranges are in the direct map; check both ends. */
+    if (size && vmm_query(&kernel_space, hhdm_base + phys, &mapped_phys, &flags) &&
+        vmm_query(&kernel_space, hhdm_base + phys + size - 1, &mapped_phys, &flags))
+        return phys_to_virt(phys);
+    return vmm_map_physical(phys, size, 0);
+}
+
+status_t vmm_protect(vm_space_t *space, uint64_t virt, uint64_t size, uint32_t flags)
+{
+    if ((virt & (PAGE_SIZE - 1)) || !range_allowed(space, virt, align_up(size, PAGE_SIZE), flags))
+        return STATUS_INVALID_ARGUMENT;
+
+    for (uint64_t offset = 0; offset < align_up(size, PAGE_SIZE); offset += PAGE_SIZE) {
+        status_t status = arch_mmu_protect(space->root, virt + offset, flags);
+        if (STATUS_IS_ERROR(status))
+            return status;
+    }
+    return STATUS_SUCCESS;
 }
 
 #define MAX_FREE_STACK_SLOTS 1024

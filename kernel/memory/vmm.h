@@ -47,6 +47,18 @@ void        vmm_free(vm_space_t *space, uint64_t virt, uint64_t size);
 /* Map device memory with VM_UNCACHED or VM_WRITE_COMBINING. Returns NULL on failure. */
 volatile void *vmm_map_mmio(uint64_t phys, uint64_t size, uint32_t cache);
 
+/*
+ * Map physical memory that is not in the direct map (firmware tables in
+ * reserved regions) with explicit flags, e.g. 0 for read-only write-back.
+ */
+void       *vmm_map_physical(uint64_t phys, uint64_t size, uint32_t flags);
+
+/* Kernel address of physical memory: the direct map if it covers the range, else a new mapping. */
+void       *vmm_phys_to_kernel(uint64_t phys, uint64_t size);
+
+/* Change the flags of mapped pages (e.g. to RX after loading code). */
+status_t    vmm_protect(vm_space_t *space, uint64_t virt, uint64_t size, uint32_t flags);
+
 /* Allocate a KERNEL_STACK_PAGES stack below an unmapped guard page. */
 status_t    vmm_alloc_kernel_stack(uint64_t *top);
 void        vmm_free_kernel_stack(uint64_t top);

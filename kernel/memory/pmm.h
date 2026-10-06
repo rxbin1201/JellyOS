@@ -32,6 +32,9 @@ void     pmm_free_page(uint64_t phys);
 
 /* Physically contiguous frames. */
 status_t pmm_alloc_pages(size_t count, uint64_t *phys);
+
+/* Physically contiguous frames that end at or below limit (DMA with address restrictions). */
+status_t pmm_alloc_pages_below(size_t count, uint64_t limit, uint64_t *phys);
 void     pmm_free_pages(uint64_t phys, size_t count);
 
 /* Release all regions of a reclaimable boot memory type. Returns bytes freed. */

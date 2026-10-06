@@ -1,4 +1,5 @@
 #include "scheduler/thread.h"
+#include "core/export.h"
 
 #include "core/arch.h"
 #include "core/panic.h"
@@ -194,3 +195,5 @@ void thread_user_start(void)
     if (thread_current()->kill_pending)
         thread_exit();
 }
+
+EXPORT_SYMBOL(thread_sleep);

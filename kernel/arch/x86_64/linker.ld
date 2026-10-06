@@ -42,6 +42,16 @@ SECTIONS
         KEEP(*(.ktests))
         __ktests_end = .;
     } :rodata
+    .kexports : ALIGN(8) {
+        __kexports_start = .;
+        KEEP(*(.kexports))
+        __kexports_end = .;
+    } :rodata
+    .jelly_modules : ALIGN(8) {
+        __builtin_modules_start = .;
+        KEEP(*(.jelly_module))
+        __builtin_modules_end = .;
+    } :rodata
     .note.jellyos : {
         KEEP(*(.note.jellyos))
     } :rodata :note
