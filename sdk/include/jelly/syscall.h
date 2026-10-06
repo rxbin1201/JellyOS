@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define JELLY_SYSCALL_ABI_VERSION 2
+#define JELLY_SYSCALL_ABI_VERSION 3
 
 typedef uint32_t jelly_handle_t;
 #define JELLY_HANDLE_INVALID 0u
@@ -64,6 +64,12 @@ enum {
     SYS_FS_SYNC          = 38, /* () */
     SYS_MOUNT            = 39, /* (path, length, device, device_length, type, type_length)   root only */
     SYS_UNMOUNT          = 40, /* (path, length)                                             root only */
+    /* ABI version 3: programs, pipes, power */
+    SYS_PROCESS_SPAWN    = 41, /* (const jelly_spawn_t *request, jelly_handle_t *process) */
+    SYS_PROCESS_INFO     = 42, /* (handle, jelly_process_info_t *info) */
+    SYS_PROCESS_KILL     = 43, /* (handle, int32_t exit_code) */
+    SYS_PIPE_CREATE      = 44, /* (jelly_handle_t *read_end, jelly_handle_t *write_end) */
+    SYS_SYSTEM_POWER     = 45, /* (uint32_t action)                                          root only */
     SYS_COUNT
 };
 
@@ -88,6 +94,8 @@ enum {
 #define JELLY_FILE_TYPE_FILE      1
 #define JELLY_FILE_TYPE_DIRECTORY 2
 #define JELLY_FILE_TYPE_SYMLINK   3
+#define JELLY_FILE_TYPE_DEVICE    4 /* character device (/dev/console, /dev/null, ...) */
+#define JELLY_FILE_TYPE_PIPE      5
 
 #define JELLY_NAME_MAX        255
 
@@ -107,6 +115,55 @@ typedef struct {
     char     name[JELLY_NAME_MAX + 1]; /* NUL terminated */
 } jelly_dirent_t;
 
+/* --- Programs (ABI version 3) -------------------------------------------- */
+
+#define JELLY_SPAWN_MAX_HANDLES 8
+#define JELLY_SPAWN_MAX_STRINGS 256   /* argv and envp each */
+#define JELLY_SPAWN_MAX_BYTES   32768 /* all argument and environment strings */
+
+/* Conventional startup handle slots */
+#define JELLY_STDIN  0
+#define JELLY_STDOUT 1
+#define JELLY_STDERR 2
+
+typedef struct {
+    const char        *path;
+    uint64_t           path_length;
+    const char *const *argv;          /* NUL-terminated strings */
+    uint32_t           argc;
+    uint32_t           envc;
+    const char *const *envp;          /* "NAME=value" */
+    uint32_t           handle_count;
+    uint32_t           flags;         /* none defined, must be 0 */
+    jelly_handle_t     handles[JELLY_SPAWN_MAX_HANDLES]; /* copied to the child with the same rights */
+} jelly_spawn_t;
+
+/* Passed to a spawned program's entry point in RDI (in its own memory, on its stack). */
+#define JELLY_STARTUP_VERSION 1
+typedef struct {
+    uint32_t       version;
+    uint32_t       argc;
+    char         **argv;              /* argv[argc] == NULL */
+    uint32_t       envc;
+    uint32_t       handle_count;
+    char         **envp;              /* envp[envc] == NULL */
+    jelly_handle_t handles[JELLY_SPAWN_MAX_HANDLES];
+} jelly_startup_t;
+
+#define JELLY_PROCESS_RUNNING 1
+#define JELLY_PROCESS_EXITED  2
+
+typedef struct {
+    uint64_t pid;
+    uint32_t state;      /* JELLY_PROCESS_* */
+    int32_t  exit_code;  /* valid once exited; JELLY_EXIT_FAULT after a CPU fault */
+    char     name[32];
+} jelly_process_info_t;
+
+/* SYS_SYSTEM_POWER actions */
+#define JELLY_POWER_OFF    1
+#define JELLY_POWER_REBOOT 2
+
 /* Handle rights */
 #define JELLY_RIGHT_READ      (1u << 0) /* receive from a channel */
 #define JELLY_RIGHT_WRITE     (1u << 1) /* send to a channel, write shared memory */
@@ -114,7 +171,8 @@ typedef struct {
 #define JELLY_RIGHT_SIGNAL    (1u << 3) /* signal or reset an event */
 #define JELLY_RIGHT_MAP       (1u << 4) /* map shared memory */
 #define JELLY_RIGHT_DUPLICATE (1u << 5) /* SYS_HANDLE_DUPLICATE */
-#define JELLY_RIGHTS_ALL      0x3Fu
+#define JELLY_RIGHT_MANAGE    (1u << 6) /* SYS_PROCESS_KILL */
+#define JELLY_RIGHTS_ALL      0x7Fu
 
 /* SYS_MEMORY_ALLOCATE / SYS_SHM_MAP flags (memory is always readable) */
 #define JELLY_MEMORY_WRITE    (1u << 0)

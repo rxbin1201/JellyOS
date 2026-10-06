@@ -15,7 +15,8 @@
 | Resource limits | Handles, threads, memory pages |
 | Exit | Exit code and reason; the process object becomes signaled |
 | Working directory | Normalized path string (`SYS_CHDIR`, `SYS_GETCWD`), see storage.md |
-| Environment | With the program loader (Phase 7) |
+| Arguments, environment | Copied onto the new stack by `SYS_PROCESS_SPAWN` (startup block, see the ABI) |
+| Critical flag | Set for init: its exit panics the kernel |
 
 When the last thread is reaped, the process is handed to the **reaper**
 kernel thread, which closes its handles and frees its address space. This does
@@ -28,18 +29,43 @@ VFS lock or the disk. Waiters on the process wake up after finalization.
 0x0000_0000_0000_0000  page 0, never mapped
 0x0000_0000_0040_0000  program image (ELF PT_LOAD segments, below 1 TiB)
 0x0000_0100_0000_0000  SYS_MEMORY_ALLOCATE and SYS_SHM_MAP (each range followed by an unmapped page)
-0x0000_7FFF_FFFE_0000  main thread stack, 64 KiB (unmapped guard below)
+0x0000_7FFF_FFFB_0000  main thread stack, 256 KiB (unmapped guard below)
 0x0000_7FFF_FFFF_0000  stack top
 ```
 
-### Program loading
+### Program loading and spawning
 
 `process_load_elf()` maps a static ELF64 executable. It applies the same rules
 as the boot manager: segments page-separated, never writable and executable,
-and in user space. Phase 4 loads only test programs embedded in the kernel. The
-README places the userspace ELF loader in Phase 7; the loading part was moved
-forward because milestone M3 needs user code. Phase 7 adds loading from the
-initramfs and the VFS.
+and in user space. The ELF part was moved forward to Phase 4 because milestone
+M3 needed user code; Phase 7 completes the loader with programs from files.
+
+`process_spawn()` (`kernel/process/spawn.c`, system call `SYS_PROCESS_SPAWN`)
+starts a program from a file in one step. There is no fork/exec.
+
+1. The file is opened with `VFS_OPEN_EXEC`. It must be a regular file with an
+   execute bit and execute permission for the caller. It is read whole (at
+   most 64 MiB).
+2. A new process gets the caller's credentials and working directory and the
+   program's base name.
+3. The ELF image is mapped, and the startup handles are installed in slots
+   0–7 of the child's handle table.
+4. The stack receives the strings, the `argv`/`envp` arrays and the
+   `jelly_startup_t` block. The main thread starts with `RDI` pointing at the
+   block.
+
+The caller gets a process handle with `WAIT` (exit), `MANAGE` (kill) and
+`DUPLICATE`. `SYS_PROCESS_INFO` reports the PID, the state and the exit code.
+
+### init
+
+After initialization, `kernel_main` unpacks the initramfs (see storage.md) and
+spawns `/init` as root with the working directory `/`. Its startup handles 0,
+1 and 2 are `/dev/console` for reading and writing. Its environment is
+`PATH=/bin:/sbin`, `HOME=/` and `JELLY_CMDLINE=<kernel command line>`. init is
+marked **critical**: if it exits, the kernel panics, because nothing could
+take over its role. `SYS_PROCESS_KILL` refuses critical processes. Userspace
+from init onward is described in [userspace.md](userspace.md).
 
 ## Threads and scheduler (README section 18)
 
@@ -94,8 +120,10 @@ One mechanism per problem:
 | Shared memory | Bulk data | Frames owned by the object; mappings keep it alive |
 | Futex | User-space locks and condition variables | Wait/wake on a 32-bit word, keyed by physical address so it works across processes |
 
-Not yet available: passing handles through channels, pipes (byte streams for
-file descriptors, with the VFS) and sockets (with the network stack).
+| Pipe | Byte stream between programs (shell `a \| b`) | 16 KiB ring, file handles (stream vnodes), EOF without writers, `PEER_CLOSED` without readers |
+
+Not yet available: passing handles through channels, waiting on several
+objects at once, and sockets (with the network stack).
 
 ## Isolation and security (README section 41)
 

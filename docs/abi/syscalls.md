@@ -1,6 +1,6 @@
 # JellyOS System Call ABI
 
-**ABI version:** 2 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20.
+**ABI version:** 3 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`.
 **Headers:** [`sdk/include/jelly/syscall.h`](../../sdk/include/jelly/syscall.h) (numbers, rights, flags), [`sdk/include/jelly/status.h`](../../sdk/include/jelly/status.h) (errors), [`sdk/include/jelly/os.h`](../../sdk/include/jelly/os.h) (libos wrappers)
 
 ## Calling convention (x86_64)
@@ -33,14 +33,33 @@ The main thread starts at the ELF entry point with:
 
 | Register | Value |
 |---|---|
-| `RDI`, `RSI`, `RDX` | Startup arguments 0–2 from the creator (scenario numbers, handles, ...) |
-| `RSP` | Top of a 64 KiB stack, `RSP ≡ 8 (mod 16)` as after a `call` |
+| `RDI` | Programs started with `SYS_PROCESS_SPAWN`: pointer to the `jelly_startup_t` block (below) |
+| `RDI`, `RSI`, `RDX` | Programs started by the kernel tests directly: startup arguments 0–2 |
+| `RSP` | Top of a 256 KiB stack, `RSP ≡ 8 (mod 16)` as after a `call` |
 | `RFLAGS` | `IF` set, everything else clear |
 | FPU/SSE | `FCW = 0x037F`, `MXCSR = 0x1F80` |
 
 Threads created with `SYS_THREAD_CREATE` start the same way at `entry` with
-`RDI = arg0` and `RSI = arg1`. libos's `_start` calls
-`main(arg0, arg1, arg2)` and exits with its return value.
+`RDI = arg0` and `RSI = arg1`.
+
+The startup block lies on the new stack, above it the argument and
+environment strings and the `argv`/`envp` arrays (each ending with `NULL`):
+
+```c
+typedef struct {
+    uint32_t       version;          /* JELLY_STARTUP_VERSION (1) */
+    uint32_t       argc;
+    char         **argv;
+    uint32_t       envc;
+    uint32_t       handle_count;
+    char         **envp;
+    jelly_handle_t handles[8];       /* 0 stdin, 1 stdout, 2 stderr by convention */
+} jelly_startup_t;
+```
+
+libc's entry code (`userspace/libc/crt0.c`) turns this into
+`main(argc, argv, envp)`, `environ` and `stdin`/`stdout`/`stderr`. Bare libos
+programs (`userspace/libos/start.c`) call `main(arg0, arg1, arg2)`.
 
 ## Calls (version 1)
 
@@ -98,9 +117,45 @@ the semantics.
 | 39 | `SYS_MOUNT` | `path, length, device, device_length, type, type_length` | | Root only. `type_length` 0 probes all file system types |
 | 40 | `SYS_UNMOUNT` | `path, length` | | Root only. `BUSY` while files are open |
 
+Device files (`/dev`) and pipes are **streams**: they have no position
+(`SYS_FILE_SEEK` returns `NOT_SUPPORTED`), and a read returns what is
+available, blocking only while nothing is. A read of 0 bytes means end of
+file: a pipe without writers, or Ctrl-D on the console.
+
+### Programs, pipes and power (version 3)
+
+| # | Name | Arguments | Output | Rights / notes |
+|---|---|---|---|---|
+| 41 | `SYS_PROCESS_SPAWN` | `const jelly_spawn_t *request, jelly_handle_t *process` | process handle (`WAIT`, `MANAGE`, `DUPLICATE`) | Needs execute permission on the program file. The child inherits credentials and working directory. Startup handles are copied with the caller's rights |
+| 42 | `SYS_PROCESS_INFO` | `handle, jelly_process_info_t *info` | pid, state, exit code, name | |
+| 43 | `SYS_PROCESS_KILL` | `handle, int32_t exit_code` | | Needs `MANAGE`. Not for the caller itself or critical processes (`ACCESS_DENIED`) |
+| 44 | `SYS_PIPE_CREATE` | `jelly_handle_t *read_end, *write_end` | two file handles (`READ` / `WRITE`, `DUPLICATE`) | 16 KiB buffer. Writing blocks while full and fails with `PEER_CLOSED` without readers |
+| 45 | `SYS_SYSTEM_POWER` | `uint32_t action` | returns only on failure | Root only. `JELLY_POWER_OFF` (ACPI S5), `JELLY_POWER_REBOOT`. File systems are synced first |
+
 ```c
 typedef struct {
-    uint32_t type;   /* JELLY_FILE_TYPE_FILE, _DIRECTORY, _SYMLINK */
+    const char        *path;          /* program file, relative to the working directory */
+    uint64_t           path_length;
+    const char *const *argv;          /* NUL-terminated strings */
+    uint32_t           argc;
+    uint32_t           envc;
+    const char *const *envp;          /* "NAME=value" */
+    uint32_t           handle_count;  /* at most 8 */
+    uint32_t           flags;         /* 0 */
+    jelly_handle_t     handles[8];
+} jelly_spawn_t;                      /* at most 256 arguments, 256 variables, 32 KiB of strings */
+
+typedef struct {
+    uint64_t pid;
+    uint32_t state;                   /* JELLY_PROCESS_RUNNING, JELLY_PROCESS_EXITED */
+    int32_t  exit_code;
+    char     name[32];
+} jelly_process_info_t;
+```
+
+```c
+typedef struct {
+    uint32_t type;   /* JELLY_FILE_TYPE_FILE, _DIRECTORY, _SYMLINK, _DEVICE, _PIPE */
     uint32_t mode;   /* permission bits 0777 */
     uint32_t uid, gid;
     uint64_t size;
@@ -129,6 +184,7 @@ accident. `0` is never a valid handle. Every handle carries rights:
 | `JELLY_RIGHT_SIGNAL` | Signaling or resetting an event |
 | `JELLY_RIGHT_MAP` | Mapping shared memory |
 | `JELLY_RIGHT_DUPLICATE` | Duplicating the handle (with equal or fewer rights) |
+| `JELLY_RIGHT_MANAGE` | Killing a process (`SYS_PROCESS_KILL`) |
 
 Waitable objects and their signaled state:
 

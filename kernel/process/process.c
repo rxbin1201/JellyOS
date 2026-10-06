@@ -55,9 +55,13 @@ static void finalize(process_t *p)
     if (p->space.root)
         vmm_space_destroy(&p->space);
 
-    if (p->started)
-        klog_info("process %lu (%s) exited with code %d%s%s", p->pid, p->name, p->exit_code,
-                  p->exit_reason[0] ? ": " : "", p->exit_reason);
+    /* Ordinary exits are the parent's business; faults and kills stay visible on the console. */
+    if (p->started && p->exit_reason[0])
+        klog_info("process %lu (%s) exited with code %d: %s", p->pid, p->name, p->exit_code, p->exit_reason);
+    else if (p->started)
+        klog_debug("process %lu (%s) exited with code %d", p->pid, p->name, p->exit_code);
+    if (p->critical)
+        panic("critical process %lu (%s) exited with code %d", p->pid, p->name, p->exit_code);
     object_notify(&p->object);
 }
 
@@ -113,16 +117,21 @@ status_t process_load_elf(process_t *p, const void *image, size_t size, uint64_t
     return status;
 }
 
-status_t process_start(process_t *p, uint64_t entry, uint64_t arg0, uint64_t arg1, uint64_t arg2)
+status_t process_allocate_stack(process_t *p, uint64_t *top)
 {
-    thread_t *main;
     status_t status = vmm_alloc(&p->space, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE, VM_USER | VM_WRITE);
     if (STATUS_IS_ERROR(status))
         return status;
     p->memory_pages += USER_STACK_SIZE / PAGE_SIZE;
+    *top = USER_STACK_TOP;
+    return STATUS_SUCCESS;
+}
 
-    /* RSP = 8 mod 16 at entry, as after a call, so entry may be a C function. */
-    status = thread_create_user(p, "main", entry, USER_STACK_TOP - 8, arg0, arg1, arg2, &main);
+status_t process_start_thread(process_t *p, uint64_t entry, uint64_t sp, uint64_t arg0, uint64_t arg1,
+                              uint64_t arg2)
+{
+    thread_t *main;
+    status_t status = thread_create_user(p, "main", entry, sp, arg0, arg1, arg2, &main);
     if (STATUS_IS_ERROR(status))
         return status;
 
@@ -130,6 +139,37 @@ status_t process_start(process_t *p, uint64_t entry, uint64_t arg0, uint64_t arg
     klog_debug("process %lu (%s) started, entry %p", p->pid, p->name, (void *)entry);
     thread_start(main);
     object_release(&main->object);
+    return STATUS_SUCCESS;
+}
+
+status_t process_start(process_t *p, uint64_t entry, uint64_t arg0, uint64_t arg1, uint64_t arg2)
+{
+    uint64_t top;
+    status_t status = process_allocate_stack(p, &top);
+    if (STATUS_IS_ERROR(status))
+        return status;
+
+    /* RSP = 8 mod 16 at entry, as after a call, so entry may be a C function. */
+    return process_start_thread(p, entry, top - 8, arg0, arg1, arg2);
+}
+
+status_t process_copy_to(process_t *p, uint64_t address, const void *data, size_t size)
+{
+    const uint8_t *in = data;
+
+    while (size) {
+        uint64_t phys;
+        uint32_t flags;
+        size_t chunk = PAGE_SIZE - (address & (PAGE_SIZE - 1));
+        if (chunk > size)
+            chunk = size;
+        if (!vmm_query(&p->space, address, &phys, &flags) || !(flags & VM_USER))
+            return STATUS_INVALID_ARGUMENT;
+        memcpy(phys_to_virt(phys), in, chunk);
+        address += chunk;
+        in += chunk;
+        size -= chunk;
+    }
     return STATUS_SUCCESS;
 }
 

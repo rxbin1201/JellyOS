@@ -1,9 +1,9 @@
 # JellyOS top-level build
 #
-#   make        build boot manager and kernel into build/esp
+#   make        build boot manager, kernel and initramfs (userspace) into build/esp
 #   make run    boot in QEMU + OVMF (serial on stdio), KVM=1 for hardware virtualization
 #   make debug  like run, but wait for GDB on :1234
-#   make test   run the kernel self-tests in QEMU (exit status = result)
+#   make test   kernel self-tests, then the shell integration test, in QEMU (exit status = result)
 #   make clean  remove build output
 
 BUILD   := build
@@ -71,17 +71,39 @@ KERNEL_CFLAGS := -std=gnu11 -O2 -g -Wall -Wextra -Werror \
 KERNEL_LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -z noexecstack \
                   -T $(KERNEL_LDS)
 
-# --- Userspace (static ELF64 programs on libos) -------------------------------
+# --- Userspace (static ELF64 programs on libc and libos) ----------------------
 
 USER_LDS     := userspace/libos/user.ld
 LIBOS_SRCS   := $(wildcard userspace/libos/*.c)
 LIBOS_OBJS   := $(patsubst %,$(BUILD)/%.o,$(LIBOS_SRCS))
+# libos.a holds only the system call wrappers; start.c and string.c serve bare libos programs (usertest).
+LIBOS_A      := $(BUILD)/userspace/libos.a
 
-USER_CFLAGS  := -std=gnu11 -O2 -g -Wall -Wextra -Werror -I$(SDK_INC) -I. \
-                -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
-                -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns \
-                -MMD -MP
+# libc: crt0 is linked as an object (it holds the entry point), the rest as an archive.
+LIBC_SRCS    := $(wildcard userspace/libc/*.c)
+LIBC_OBJS    := $(patsubst %,$(BUILD)/%.o,$(filter-out userspace/libc/crt0.c,$(LIBC_SRCS)))
+LIBC_CRT0    := $(BUILD)/userspace/libc/crt0.c.o
+LIBC_A       := $(BUILD)/userspace/libc.a
+
+# User code sees only the SDK headers and GCC's freestanding ones (stddef, stdint, stdarg, limits, ...).
+USER_CFLAGS  := -std=gnu11 -O2 -g -Wall -Wextra -Werror -nostdinc -isystem $(shell $(CC) -print-file-name=include)                 -I$(SDK_INC) -I.                 -ffreestanding -fno-stack-protector -fno-pic -fno-pie                 -fno-asynchronous-unwind-tables -fno-tree-loop-distribute-patterns                 -MMD -MP
 USER_LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -z noexecstack -T $(USER_LDS)
+
+# Programs of the initramfs: <name>:<install path>:<sources>
+PROGRAM_DIR  := $(BUILD)/userspace/programs
+COREUTILS    := cat cp echo false ls mkdir mv rm sleep touch true
+PROGRAMS     := init:/init:userspace/init/init.c                 servicemanager:/sbin/servicemanager:userspace/services/servicemanager/servicemanager.c                 sh:/bin/sh:userspace/shell/shell.c                 $(foreach u,$(COREUTILS),$(u):/bin/$(u):userspace/applications/coreutils/$(u).c)
+program_name   = $(word 1,$(subst :, ,$(1)))
+program_path   = $(word 2,$(subst :, ,$(1)))
+program_source = $(word 3,$(subst :, ,$(1)))
+PROGRAM_ELFS := $(foreach p,$(PROGRAMS),$(PROGRAM_DIR)/$(call program_name,$(p)).elf)
+
+# Initramfs (cpio newc): programs plus the skeleton in tools/image_builder/initramfs
+INITRAMFS_SKEL  := tools/image_builder/initramfs
+INITRAMFS_ROOT  := $(BUILD)/initramfs-root
+INITRAMFS       := $(BUILD)/initramfs.img
+INITRAMFS_ESP   := $(ESP)/boot/initrd/current.img
+INITRAMFS_TOOL  := tools/image_builder/mkinitramfs.py
 
 # Test program embedded into the kernel (tests/kernel/user_images.S)
 USERTEST_ELF := $(BUILD)/tests/userspace/usertest.elf
@@ -137,11 +159,15 @@ TEST_DISK_FILES := $(BUILD)/test-disk-files
 HOST_CHECK_PATH := ::/jellyos/written.txt
 HOST_CHECK_TEXT := Written by the JellyOS FAT32 driver.
 
+# Integration test (tests/integration/shell_test.py): normal boot with the initramfs into the shell
+SHELL_TEST_ESP  := $(BUILD)/shell-test-esp
+SHELL_TEST_VARS := $(BUILD)/OVMF_VARS_shell.fd
+
 # --- Targets -----------------------------------------------------------------
 
-.PHONY: all run debug test modules reset-vars clean
+.PHONY: all run debug test modules programs reset-vars clean
 
-all: $(BOOT_EFI) $(BOOT_CFG) $(KERNEL_ESP)
+all: $(BOOT_EFI) $(BOOT_CFG) $(KERNEL_ESP) $(INITRAMFS_ESP)
 
 $(BOOT_OBJ_DIR)/%.o: $(BOOT_SRC_DIR)/%
 	@mkdir -p $(@D)
@@ -188,7 +214,42 @@ $(BUILD)/tests/userspace/%.o: tests/userspace/%
 $(USERTEST_ELF): $(BUILD)/tests/userspace/usertest.c.o $(LIBOS_OBJS) $(USER_LDS)
 	$(LD) $(USER_LDFLAGS) $(BUILD)/tests/userspace/usertest.c.o $(LIBOS_OBJS) -o $@
 
-$(BUILD)/tests/kernel/user_images.S.o: $(USERTEST_ELF)
+$(LIBOS_A): $(BUILD)/userspace/libos/syscall.c.o
+	@rm -f $@
+	ar rcs $@ $^
+
+$(LIBC_A): $(LIBC_OBJS)
+	@rm -f $@
+	ar rcs $@ $^
+
+define program_rule
+$(PROGRAM_DIR)/$(call program_name,$(1)).elf: $(BUILD)/$(call program_source,$(1)).o $(LIBC_CRT0) $(LIBC_A) $(LIBOS_A) $(USER_LDS)
+	@mkdir -p $$(@D)
+	$(LD) $(USER_LDFLAGS) $(LIBC_CRT0) $(BUILD)/$(call program_source,$(1)).o 	      --start-group $(LIBC_A) $(LIBOS_A) --end-group -o $$@
+endef
+$(foreach p,$(PROGRAMS),$(eval $(call program_rule,$(p))))
+# libc test program embedded into the kernel (tests/kernel/user_images.S); not part of the initramfs
+SPAWNTEST := spawntest:-:tests/userspace/spawntest.c
+$(eval $(call program_rule,$(SPAWNTEST)))
+
+programs: $(PROGRAM_ELFS)
+
+# The root is rebuilt from scratch so removed programs disappear from the image.
+$(INITRAMFS): $(PROGRAM_ELFS) $(INITRAMFS_TOOL) $(shell find $(INITRAMFS_SKEL) -type f)
+	@rm -rf $(INITRAMFS_ROOT) && mkdir -p $(INITRAMFS_ROOT)
+	@cp -r $(INITRAMFS_SKEL)/. $(INITRAMFS_ROOT)/
+	@mkdir -p $(INITRAMFS_ROOT)/bin $(INITRAMFS_ROOT)/sbin $(INITRAMFS_ROOT)/lib
+	@chmod -R u=rwX,go=rX $(INITRAMFS_ROOT)
+	@$(foreach p,$(PROGRAMS),install -D -m 0755 $(PROGRAM_DIR)/$(call program_name,$(p)).elf \
+	    $(INITRAMFS_ROOT)$(call program_path,$(p)) && \
+	    strip --strip-debug $(INITRAMFS_ROOT)$(call program_path,$(p)) &&) true
+	python3 $(INITRAMFS_TOOL) $(INITRAMFS_ROOT) $@
+
+$(INITRAMFS_ESP): $(INITRAMFS)
+	@mkdir -p $(@D)
+	cp $< $@
+
+$(BUILD)/tests/kernel/user_images.S.o: $(USERTEST_ELF) $(PROGRAM_DIR)/spawntest.elf
 
 # Module sources compile like kernel code; `ld -r` keeps them relocatable.
 $(BUILD)/tests/drivers/%.o: tests/drivers/%
@@ -238,7 +299,7 @@ debug: all $(VARS_COPY)
 
 # QEMU's isa-debug-exit turns the kernel's verdict into the exit status: 1 = passed.
 # The test drivers are passed as boot modules; edu and e1000e are their devices.
-test: all $(TEST_MODULES)
+test: all $(TEST_MODULES) $(INITRAMFS)
 	@rm -rf $(TEST_ESP)
 	@mkdir -p $(TEST_ESP)/EFI/BOOT $(TEST_ESP)/boot/kernels $(TEST_ESP)/boot/modules
 	@cp $(BOOT_EFI) $(TEST_ESP)/EFI/BOOT/
@@ -262,6 +323,22 @@ test: all $(TEST_MODULES)
 	@if [ "$$(mtype -i $(TEST_DISK)@@1M $(HOST_CHECK_PATH))" = "$(HOST_CHECK_TEXT)" ]; then \
 	    echo "make test: host reads the file written by JellyOS"; \
 	else echo "make test: FAILED (host cannot read $(HOST_CHECK_PATH) correctly)"; exit 1; fi
+	@# Milestone M6: boot normally into the shell and drive it through the serial console.
+	@rm -rf $(SHELL_TEST_ESP)
+	@mkdir -p $(SHELL_TEST_ESP)/EFI/BOOT $(SHELL_TEST_ESP)/boot/kernels $(SHELL_TEST_ESP)/boot/initrd
+	@cp $(BOOT_EFI) $(SHELL_TEST_ESP)/EFI/BOOT/
+	@cp $(KERNEL_ESP) $(SHELL_TEST_ESP)/boot/kernels/
+	@cp $(INITRAMFS) $(SHELL_TEST_ESP)/boot/initrd/current.img
+	@printf '[boot]\ntimeout=0\nmenu=hidden\nfallback_kernel=\n[entry Shell]\nkernel=/boot/kernels/kernel-current.elf\n' \
+	    > $(SHELL_TEST_ESP)/boot/boot.cfg
+	@printf 'initrd=/boot/initrd/current.img\ncmdline="loglevel=info"\n' >> $(SHELL_TEST_ESP)/boot/boot.cfg
+	@cp $(OVMF_VARS) $(SHELL_TEST_VARS)
+	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) -- \
+	    $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(SHELL_TEST_ESP),$(SHELL_TEST_VARS)) -display none \
+	    $(call virtio_disk,$(TEST_DISK),testdisk) || { echo "make test: FAILED (shell test)"; exit 1; }
+	@if mtype -i $(TEST_DISK)@@1M ::/motd.txt | grep -q "Welcome to JellyOS"; then \
+	    echo "make test: host reads the file the shell copied"; \
+	else echo "make test: FAILED (host cannot read ::/motd.txt)"; exit 1; fi
 	@echo "make test: PASSED"
 
 # Forget the persistent boot state (fresh UEFI variable store).
@@ -271,5 +348,5 @@ reset-vars:
 clean:
 	rm -rf $(BUILD)
 
--include $(BOOT_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(LIBOS_OBJS:.o=.d) $(BUILD)/tests/userspace/usertest.c.d \
+-include $(BOOT_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(LIBOS_OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(LIBC_CRT0:.o=.d) \n         $(foreach p,$(PROGRAMS) $(SPAWNTEST),$(BUILD)/$(call program_source,$(p)).d) $(BUILD)/tests/userspace/usertest.c.d \
          $(patsubst %,$(BUILD)/%.d,$(TEST_MODULE_SRCS))

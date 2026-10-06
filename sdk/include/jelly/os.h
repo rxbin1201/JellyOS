@@ -3,9 +3,9 @@
  *
  * Thin wrappers around the system calls in <jelly/syscall.h>. Every function
  * that can fail returns status_t; results come back through pointers.
- * A program provides
+ * Programs built on libc get main(argc, argv, envp) from the libc entry code.
+ * Bare libos programs (the kernel test images) link userspace/libos/start.c and provide
  *     int main(uint64_t arg0, uint64_t arg1, uint64_t arg2);
- * and receives the startup arguments (often handles) its creator passed.
  */
 
 #ifndef JELLY_OS_H
@@ -75,6 +75,17 @@ status_t jelly_getcwd(char *buffer, size_t size, size_t *length);
 status_t jelly_sync(void);
 status_t jelly_mount(const char *path, const char *device, const char *type);
 status_t jelly_unmount(const char *path);
+
+/* Programs, pipes and power (ABI version 3) */
+status_t jelly_spawn(const jelly_spawn_t *request, jelly_handle_t *process);
+status_t jelly_process_info(jelly_handle_t process, jelly_process_info_t *info);
+status_t jelly_process_kill(jelly_handle_t process, int32_t code);
+status_t jelly_pipe_create(jelly_handle_t *read_end, jelly_handle_t *write_end);
+status_t jelly_system_power(uint32_t action);
+
+/* Startup handle slot `index` of a libc program (JELLY_HANDLE_INVALID if absent).
+   Provided by the libc entry code, not by libos. */
+jelly_handle_t jelly_startup_handle(unsigned index);
 
 /* Raw system call */
 uint64_t jelly_syscall(uint64_t number, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,

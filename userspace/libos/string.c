@@ -1,6 +1,6 @@
 /*
- * Memory routines the compiler may call implicitly. libc (Phase 7) provides
- * the full string library.
+ * Memory routines the compiler may call implicitly, for bare libos programs
+ * (usertest). Programs on libc get them from userspace/libc/string.c.
  */
 
 #include <stddef.h>

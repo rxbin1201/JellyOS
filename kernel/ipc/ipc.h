@@ -45,6 +45,10 @@ status_t shm_create(uint64_t size, object_t **shm);
 status_t shm_map(process_t *process, object_t *shm, uint32_t vm_flags, uint64_t *address);
 uint64_t shm_size(object_t *shm);
 
+/* Pipes: two file objects (read end, write end) on one byte stream. */
+struct file;
+status_t pipe_create(struct file **read_end, struct file **write_end);
+
 /* Futex: the key is the physical address of the word, so it works across processes. */
 status_t futex_wait(uint64_t user_address, uint32_t expected, uint64_t timeout_ns);
 status_t futex_wake(uint64_t user_address, uint32_t count, uint32_t *woken);

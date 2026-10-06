@@ -29,7 +29,7 @@
 #define USER_MAP_BASE      0x0000010000000000ULL /* SYS_MEMORY_ALLOCATE, SYS_SHM_MAP */
 #define USER_MAP_END       0x00007F0000000000ULL
 #define USER_STACK_TOP     0x00007FFFFFFF0000ULL
-#define USER_STACK_SIZE    0x10000ULL            /* 64 KiB, unmapped guard below */
+#define USER_STACK_SIZE    0x40000ULL            /* 256 KiB, unmapped guard below */
 
 typedef struct {
     uint32_t max_handles;
@@ -56,6 +56,7 @@ typedef struct process {
 
     char             cwd[PROCESS_CWD_MAX]; /* normalized absolute path */
 
+    bool             critical;      /* the system cannot continue without it (init) */
     bool             exiting;
     bool             exited;
     int32_t          exit_code;
@@ -77,6 +78,14 @@ status_t   process_load_elf(process_t *process, const void *image, size_t size, 
  * RDI/RSI/RDX = arg0..arg2. Startup handles are installed before this.
  */
 status_t   process_start(process_t *process, uint64_t entry, uint64_t arg0, uint64_t arg1, uint64_t arg2);
+
+/* The two halves of process_start, for callers that prepare the stack themselves. */
+status_t   process_allocate_stack(process_t *process, uint64_t *top);
+status_t   process_start_thread(process_t *process, uint64_t entry, uint64_t sp, uint64_t arg0, uint64_t arg1,
+                                uint64_t arg2);
+
+/* Write into a (not necessarily active) process's user memory. */
+status_t   process_copy_to(process_t *process, uint64_t address, const void *data, size_t size);
 
 process_t *process_current(void);
 

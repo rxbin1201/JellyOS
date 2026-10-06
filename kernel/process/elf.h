@@ -1,8 +1,8 @@
 /*
  * Static ELF64 executables for user processes.
  *
- * Phase 4 needs this to run isolated user programs (milestone M3); loading
- * programs from the initramfs and the VFS follows in Phase 7.
+ * Used for the embedded test programs (milestone M3) and by process_spawn()
+ * for program files (process/spawn.c).
  */
 
 #ifndef PROCESS_ELF_H

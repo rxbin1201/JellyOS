@@ -32,6 +32,8 @@ typedef enum {
     VNODE_FILE      = JELLY_FILE_TYPE_FILE,
     VNODE_DIRECTORY = JELLY_FILE_TYPE_DIRECTORY,
     VNODE_SYMLINK   = JELLY_FILE_TYPE_SYMLINK,
+    VNODE_DEVICE    = JELLY_FILE_TYPE_DEVICE, /* stream: no position, own locking */
+    VNODE_PIPE      = JELLY_FILE_TYPE_PIPE,   /* stream: no position, own locking */
 } vnode_type_t;
 
 typedef jelly_stat_t   vfs_stat_t;
@@ -58,6 +60,7 @@ typedef struct {
     status_t (*readdir)(struct vnode *dir, uint64_t *cookie, vfs_dirent_t *entry); /* NOT_FOUND at the end */
     status_t (*symlink)(struct vnode *dir, const char *name, size_t length, const char *target, size_t target_length);
     status_t (*readlink)(struct vnode *link, char *buffer, size_t size, size_t *length);
+    void     (*close)(struct vnode *vnode, uint32_t open_flags); /* an open file on it was closed */
     void     (*release)(struct vnode *vnode); /* last reference gone */
 } vnode_ops_t;
 
@@ -74,6 +77,15 @@ typedef struct vnode {
     void              *data;      /* file system private */
     struct mount      *mounted;   /* file system mounted on this directory */
 } vnode_t;
+
+/*
+ * Devices and pipes are streams: reads and writes may block for a long time,
+ * so the VFS calls them without its lock and without a file position.
+ */
+static inline int vnode_is_stream(const vnode_t *vnode)
+{
+    return vnode->type == VNODE_DEVICE || vnode->type == VNODE_PIPE;
+}
 
 typedef struct filesystem {
     const struct fs_type *type;
@@ -100,7 +112,7 @@ typedef struct mount {
 } mount_t;
 
 /* Open file (kernel object behind a file handle). */
-typedef struct {
+typedef struct file {
     object_t object;
     vnode_t *vnode;
     uint64_t position;
@@ -116,6 +128,7 @@ status_t vfs_register_type(fs_type_t *type);
 /* Offer a new block device to all file system types and mount it under /volumes/<name>. */
 void     vfs_automount(block_device_t *device);
 
+/* device may be NULL for virtual file systems ("ramfs", "devfs"). */
 status_t vfs_mount(const char *path, block_device_t *device, const char *type_name);
 status_t vfs_unmount(const char *path);
 status_t vfs_sync(void);
@@ -143,6 +156,15 @@ status_t vfs_truncate(file_t *file, uint64_t size);
 status_t vfs_fstat(file_t *file, vfs_stat_t *stat);
 status_t vfs_readdir(file_t *file, vfs_dirent_t *entry);
 
+/* Open file on a vnode that has no path (pipes); takes a new reference. */
+status_t vfs_file_from_vnode(vnode_t *vnode, uint32_t flags, file_t **file);
+
+/* Kernel-internal open flag: the caller wants to execute the file (needs x permission). */
+#define VFS_OPEN_EXEC (1u << 31)
+
+/* Set owner and permission bits (kernel use: initramfs unpacking). */
+status_t vfs_set_attributes(const char *path, uint32_t uid, uint32_t gid, uint32_t mode);
+
 /* --- Helpers for file systems ----------------------------------------------------- */
 
 /* Initialize a vnode embedded in a file system node (one reference). */
@@ -152,5 +174,10 @@ void     vnode_release(vnode_t *vnode);
 
 /* In-memory file system (fs/filesystems/ramfs). */
 filesystem_t *ramfs_create(void);
+extern fs_type_t ramfs_type;
+
+/* Device file system (fs/filesystems/devfs), mounted at /dev. */
+extern fs_type_t devfs_type;
+status_t devfs_register(const char *name, const vnode_ops_t *ops, uint32_t mode, void *data);
 
 #endif

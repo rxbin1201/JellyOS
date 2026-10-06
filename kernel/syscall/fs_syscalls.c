@@ -360,14 +360,17 @@ status_t sys_mount(const uint64_t *a)
 
     if (credentials()->uid != UID_ROOT)
         return STATUS_ACCESS_DENIED;
-    status_t status = user_name(a[2], a[3], device_name, sizeof(device_name));
+
+    /* Without a device only virtual file systems ("ramfs") can be mounted: the type is required. */
+    status_t status = a[3] ? user_name(a[2], a[3], device_name, sizeof(device_name))
+                           : a[5] ? STATUS_SUCCESS : STATUS_INVALID_ARGUMENT;
     if (!STATUS_IS_ERROR(status) && a[5])
         status = user_name(a[4], a[5], type, sizeof(type));
     if (STATUS_IS_ERROR(status))
         return status;
 
-    block_device_t *device = block_find(device_name);
-    if (!device)
+    block_device_t *device = NULL;
+    if (a[3] && !(device = block_find(device_name)))
         return STATUS_NOT_FOUND;
     status = take_path(a[0], a[1], &path);
     if (STATUS_IS_ERROR(status))

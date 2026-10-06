@@ -401,6 +401,11 @@ static const syscall_fn table[SYS_COUNT] = {
     [SYS_FS_SYNC]          = sys_fs_sync,
     [SYS_MOUNT]            = sys_mount,
     [SYS_UNMOUNT]          = sys_unmount,
+    [SYS_PROCESS_SPAWN]    = sys_process_spawn,
+    [SYS_PROCESS_INFO]     = sys_process_info,
+    [SYS_PROCESS_KILL]     = sys_process_kill,
+    [SYS_PIPE_CREATE]      = sys_pipe_create,
+    [SYS_SYSTEM_POWER]     = sys_system_power,
 };
 
 uint64_t syscall_dispatch(uint64_t number, const uint64_t args[6])

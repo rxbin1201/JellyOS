@@ -83,6 +83,43 @@ root rights, is tested through `usertest` (scenarios `FILES` and
 After QEMU exits, the host reads `/jellyos/written.txt` from the image with
 `mtype`. The file must contain exactly what the kernel's FAT32 driver wrote.
 
+### Userspace tests (Phase 7)
+
+[`tests/kernel/userspace_tests.c`](../../tests/kernel/userspace_tests.c)
+covers devfs (`null`, `zero`, nodes cannot be created by name), pipes (data,
+end of file without writers, `PEER_CLOSED` without readers), the initramfs
+unpacker (a cpio archive built in the test, plus damaged archives), and spawn
+checks (missing file, no execute permission, not an ELF file, a directory).
+
+`spawn_runs_libc_program` writes
+[`tests/userspace/spawntest.c`](../../tests/userspace/spawntest.c), a libc
+program embedded in the kernel, into `/tmp` and starts it through
+`process_spawn`. It gets arguments, an environment, `/dev/zero` as stdin, a
+pipe as stdout/stderr and `/tmp` as its working directory. The program
+reports what it received and exercises the libc: heap, `printf` formats,
+number conversion, sorting, environment, C11 threads with a mutex, and
+buffered file I/O with seeking.
+
+## Integration test: the shell (milestone M6)
+
+After the kernel tests pass, `make test` boots a second time, normally this
+time: boot manager, kernel, initramfs, init, service manager and shell, with
+the test disk attached. [`tests/integration/shell_test.py`](../../tests/integration/shell_test.py)
+drives QEMU's serial console. It waits for each prompt (`jelly:/path# `),
+types a command and checks the output up to the next prompt:
+
+- Builtins, programs, pipes (`a | b | c`), `<`, `>`, `>>`, `2>`, `;`, `$?`,
+  variables and quoting
+- Exit codes (`[exit 127]` for unknown commands)
+- File tools on the ramfs (`mkdir -p`, `touch`, `mv`, `rm -r`, `ls`)
+- `svc` talking to the service manager over its control channel
+- Reading from and copying onto the FAT32 test disk, then `sync`
+- `cat` reading the console until Ctrl-D
+- `poweroff`, after which QEMU must exit by itself (ACPI S5)
+
+Afterwards the host checks `::/motd.txt` on the test disk with `mtype`. The
+console log of the run is saved to `build/shell-test.log`.
+
 Requirements on the host: `sgdisk` (gdisk) and `mtools`.
 
 To confirm that a test can actually fail, break the code it covers once. For

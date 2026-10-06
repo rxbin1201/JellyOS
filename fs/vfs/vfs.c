@@ -452,9 +452,12 @@ status_t vfs_readlink(const char *path, const credentials_t *cred, char *buffer,
 static void file_destroy(object_t *object)
 {
     file_t *file = container_of(object, file_t, object);
+    vnode_t *v = file->vnode;
 
+    if (v->ops->close)
+        v->ops->close(v, file->flags); /* pipes count their readers and writers */
     mutex_lock(&lock);
-    vnode_release(file->vnode);
+    vnode_release(v);
     mutex_unlock(&lock);
     kfree(file);
 }
@@ -466,7 +469,8 @@ static const object_ops_t file_ops = {
 status_t vfs_open(const char *path, uint32_t flags, uint32_t mode, const credentials_t *cred, file_t **result)
 {
     const uint32_t known = JELLY_OPEN_READ | JELLY_OPEN_WRITE | JELLY_OPEN_CREATE | JELLY_OPEN_EXCLUSIVE |
-                           JELLY_OPEN_TRUNCATE | JELLY_OPEN_APPEND | JELLY_OPEN_DIRECTORY | JELLY_OPEN_NOFOLLOW;
+                           JELLY_OPEN_TRUNCATE | JELLY_OPEN_APPEND | JELLY_OPEN_DIRECTORY | JELLY_OPEN_NOFOLLOW |
+                           VFS_OPEN_EXEC;
     vnode_t *v = NULL;
     bool created = false;
 
@@ -496,8 +500,12 @@ status_t vfs_open(const char *path, uint32_t flags, uint32_t mode, const credent
         else if (!created && (((flags & JELLY_OPEN_READ) && !permitted(v, cred, MAY_READ)) ||
                               ((flags & JELLY_OPEN_WRITE) && !permitted(v, cred, MAY_WRITE))))
             status = STATUS_ACCESS_DENIED;
+        else if ((flags & VFS_OPEN_EXEC) && (v->type != VNODE_FILE || !(v->mode & 0111) ||
+                                             !permitted(v, cred, MAY_EXEC)))
+            status = STATUS_ACCESS_DENIED; /* even root needs some x bit, as on Unix */
     }
-    if (!STATUS_IS_ERROR(status) && (flags & JELLY_OPEN_TRUNCATE) && (flags & JELLY_OPEN_WRITE) && v->size)
+    if (!STATUS_IS_ERROR(status) && (flags & JELLY_OPEN_TRUNCATE) && (flags & JELLY_OPEN_WRITE) && v->size &&
+        !vnode_is_stream(v))
         status = v->ops->truncate ? v->ops->truncate(v, 0) : STATUS_NOT_SUPPORTED;
 
     if (STATUS_IS_ERROR(status)) {
@@ -523,6 +531,8 @@ status_t vfs_read(file_t *file, void *buffer, size_t size, size_t *done)
         return STATUS_ACCESS_DENIED;
     if (file->vnode->type == VNODE_DIRECTORY)
         return STATUS_IS_DIRECTORY;
+    if (vnode_is_stream(file->vnode))
+        return file->vnode->ops->read(file->vnode, 0, buffer, size, done);
 
     mutex_lock(&lock);
     status_t status = file->vnode->ops->read(file->vnode, file->position, buffer, size, done);
@@ -538,6 +548,8 @@ status_t vfs_write(file_t *file, const void *buffer, size_t size, size_t *done)
         return STATUS_ACCESS_DENIED;
     if (!file->vnode->ops->write)
         return STATUS_NOT_SUPPORTED;
+    if (vnode_is_stream(file->vnode))
+        return file->vnode->ops->write(file->vnode, 0, buffer, size, done);
 
     mutex_lock(&lock);
     if (file->flags & JELLY_OPEN_APPEND)
@@ -552,6 +564,8 @@ status_t vfs_seek(file_t *file, int64_t offset, uint32_t whence, uint64_t *posit
 {
     int64_t base;
 
+    if (vnode_is_stream(file->vnode))
+        return STATUS_NOT_SUPPORTED;
     mutex_lock(&lock);
     switch (whence) {
     case JELLY_SEEK_SET:     base = 0; break;
@@ -614,6 +628,35 @@ status_t vfs_readdir(file_t *file, vfs_dirent_t *entry)
     return status;
 }
 
+status_t vfs_file_from_vnode(vnode_t *vnode, uint32_t flags, file_t **result)
+{
+    file_t *file = kcalloc(1, sizeof(*file));
+    if (!file)
+        return STATUS_OUT_OF_MEMORY;
+    object_init(&file->object, OBJECT_FILE, &file_ops);
+    vnode_retain(vnode);
+    file->vnode = vnode;
+    file->flags = flags;
+    *result = file;
+    return STATUS_SUCCESS;
+}
+
+status_t vfs_set_attributes(const char *path, uint32_t uid, uint32_t gid, uint32_t mode)
+{
+    vnode_t *v;
+
+    mutex_lock(&lock);
+    status_t status = walk(path, NULL, false, &v);
+    if (!STATUS_IS_ERROR(status)) {
+        v->uid = uid;
+        v->gid = gid;
+        v->mode = mode & 0777;
+        vnode_release(v);
+    }
+    mutex_unlock(&lock);
+    return status;
+}
+
 /* --- Mounts -------------------------------------------------------------------------- */
 
 status_t vfs_register_type(fs_type_t *type)
@@ -671,7 +714,7 @@ static status_t mount_locked(const char *path, block_device_t *device, const cha
             type->unmount(fs);
             return status;
         }
-        klog_info("vfs: %s (%s) mounted at %s", device->name, type->name, path);
+        klog_info("vfs: %s (%s) mounted at %s", device ? device->name : "none", type->name, path);
         return STATUS_SUCCESS;
     }
     return STATUS_NOT_SUPPORTED;
@@ -773,8 +816,15 @@ status_t vfs_init(void)
         return STATUS_OUT_OF_MEMORY;
 
     vfs_register_type(&fat_type);
+    vfs_register_type(&ramfs_type);
+    vfs_register_type(&devfs_type);
     vfs_mkdir("/volumes", 0755, NULL);
     vfs_mkdir("/tmp", 0777, NULL);
-    klog_info("vfs: ramfs root with /volumes and /tmp");
+    vfs_mkdir("/dev", 0755, NULL);
+
+    status_t status = vfs_mount("/dev", NULL, "devfs");
+    if (STATUS_IS_ERROR(status))
+        return status;
+    klog_info("vfs: ramfs root with /volumes, /tmp and /dev (devfs)");
     return STATUS_SUCCESS;
 }

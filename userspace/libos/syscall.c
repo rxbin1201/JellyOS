@@ -191,9 +191,11 @@ status_t jelly_write(jelly_handle_t file, const void *buffer, size_t size, size_
     return (status_t)SYSCALL4(SYS_FILE_WRITE, file, buffer, size, done);
 }
 
+/* position may be NULL here; the system call itself always needs somewhere to write. */
 status_t jelly_seek(jelly_handle_t file, int64_t offset, uint32_t whence, uint64_t *position)
 {
-    return (status_t)SYSCALL4(SYS_FILE_SEEK, file, offset, whence, position);
+    uint64_t ignored;
+    return (status_t)SYSCALL4(SYS_FILE_SEEK, file, offset, whence, position ? position : &ignored);
 }
 
 status_t jelly_truncate(jelly_handle_t file, uint64_t size)
@@ -264,4 +266,31 @@ status_t jelly_mount(const char *path, const char *device, const char *type)
 status_t jelly_unmount(const char *path)
 {
     return (status_t)SYSCALL2(SYS_UNMOUNT, path, length_of(path));
+}
+
+/* --- Programs, pipes and power (ABI version 3) ------------------------------------ */
+
+status_t jelly_spawn(const jelly_spawn_t *request, jelly_handle_t *process)
+{
+    return (status_t)SYSCALL2(SYS_PROCESS_SPAWN, request, process);
+}
+
+status_t jelly_process_info(jelly_handle_t process, jelly_process_info_t *info)
+{
+    return (status_t)SYSCALL2(SYS_PROCESS_INFO, process, info);
+}
+
+status_t jelly_process_kill(jelly_handle_t process, int32_t code)
+{
+    return (status_t)SYSCALL2(SYS_PROCESS_KILL, process, (int64_t)code);
+}
+
+status_t jelly_pipe_create(jelly_handle_t *read_end, jelly_handle_t *write_end)
+{
+    return (status_t)SYSCALL2(SYS_PIPE_CREATE, read_end, write_end);
+}
+
+status_t jelly_system_power(uint32_t action)
+{
+    return (status_t)SYSCALL1(SYS_SYSTEM_POWER, action);
 }

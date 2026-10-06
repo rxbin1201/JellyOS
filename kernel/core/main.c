@@ -11,6 +11,7 @@
 #include "core/arch.h"
 #include "core/boot.h"
 #include "core/cmdline.h"
+#include "core/format.h"
 #include "core/log.h"
 #include "core/panic.h"
 #include "core/string.h"
@@ -18,10 +19,13 @@
 #include "drivers/acpi/acpi.h"
 #include "drivers/core/device.h"
 #include "drivers/core/module.h"
+#include "fs/initramfs/initramfs.h"
 #include "fs/vfs/vfs.h"
+#include "memory/layout.h"
 #include "memory/memory.h"
 #include "memory/vmm.h"
 #include "process/process.h"
+#include "process/spawn.h"
 #include "scheduler/scheduler.h"
 #include "time/clock.h"
 
@@ -123,6 +127,73 @@ static void start_devices(void)
     device_tree_dump();
 }
 
+/* Unpack the boot module "initrd" (cpio) into the root file system. */
+static bool unpack_initramfs(void)
+{
+    size_t count;
+    const boot_module_t *modules = boot_modules(&count);
+
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(modules[i].name, "initrd") != 0)
+            continue;
+        unsigned entries;
+        status_t status = initramfs_unpack(phys_to_virt(modules[i].phys_base), modules[i].size, &entries);
+        klog_info("initramfs: %u entries unpacked (%lu KiB)%s%s", entries, modules[i].size / 1024,
+                  STATUS_IS_ERROR(status) ? ", error: " : "", STATUS_IS_ERROR(status) ? status_name(status) : "");
+        return !STATUS_IS_ERROR(status);
+    }
+    klog_warn("initramfs: none passed by the boot manager");
+    return false;
+}
+
+/*
+ * Start /init (README section 29) with /dev/console as stdin, stdout and
+ * stderr. Its environment carries the kernel command line, so init can
+ * honor recovery and safe mode.
+ */
+static void start_init(void)
+{
+    static char cmdline_variable[1100];
+    file_t *input, *output;
+    process_t *init;
+
+    if (!unpack_initramfs())
+        return;
+
+    if (STATUS_IS_ERROR(vfs_open("/dev/console", JELLY_OPEN_READ, 0, NULL, &input)))
+        panic("cannot open /dev/console for init");
+    if (STATUS_IS_ERROR(vfs_open("/dev/console", JELLY_OPEN_WRITE, 0, NULL, &output)))
+        panic("cannot open /dev/console for init");
+
+    format(cmdline_variable, sizeof(cmdline_variable), "JELLY_CMDLINE=%s", cmdline_get());
+    char *const argv[] = { "/init" };
+    char *const envp[] = { "PATH=/bin:/sbin", "HOME=/", cmdline_variable };
+    credentials_t root = { UID_ROOT, GID_ROOT };
+    spawn_request_t request = {
+        .path = "/init",
+        .argv = argv,
+        .argc = 1,
+        .envp = envp,
+        .envc = 3,
+        .objects = { &input->object, &output->object, &output->object },
+        .rights = { JELLY_RIGHT_READ | JELLY_RIGHT_DUPLICATE, JELLY_RIGHT_WRITE | JELLY_RIGHT_DUPLICATE,
+                    JELLY_RIGHT_WRITE | JELLY_RIGHT_DUPLICATE },
+        .handle_count = 3,
+        .credentials = &root,
+        .cwd = "/",
+    };
+
+    status_t status = process_spawn(&request, &init);
+    object_release(&input->object);
+    object_release(&output->object);
+    if (STATUS_IS_ERROR(status))
+        panic("cannot start /init: %s", status_name(status));
+
+    init->critical = true;
+    klog_info("init: started as process %lu", init->pid);
+    object_release(&init->object);
+}
+
 __attribute__((noreturn)) static void kernel_stage2(void)
 {
     memory_reclaim_boot();
@@ -137,6 +208,7 @@ __attribute__((noreturn)) static void kernel_stage2(void)
     run_crash_test();
 
     klog_info("kernel: initialization complete");
+    start_init();
     thread_exit();
 }
 

@@ -35,4 +35,11 @@ status_t sys_fs_sync(const uint64_t *a);
 status_t sys_mount(const uint64_t *a);
 status_t sys_unmount(const uint64_t *a);
 
+/* Program, pipe and power calls (process_syscalls.c) */
+status_t sys_process_spawn(const uint64_t *a);
+status_t sys_process_info(const uint64_t *a);
+status_t sys_process_kill(const uint64_t *a);
+status_t sys_pipe_create(const uint64_t *a);
+status_t sys_system_power(const uint64_t *a);
+
 #endif

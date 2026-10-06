@@ -244,6 +244,37 @@ static const vnode_ops_t ops = {
     .release = ram_release,
 };
 
+static void free_tree(ram_node_t *n)
+{
+    list_node_t *node;
+    while ((node = list_pop_front(&n->children)))
+        free_tree(container_of(node, ram_node_t, sibling));
+    free_node(n);
+}
+
+/* "mount -t ramfs": a fresh, empty instance (no device). */
+static status_t ram_mount(block_device_t *device, filesystem_t **fs)
+{
+    if (device)
+        return STATUS_NOT_SUPPORTED;
+    *fs = ramfs_create();
+    return *fs ? STATUS_SUCCESS : STATUS_OUT_OF_MEMORY;
+}
+
+/* The VFS only unmounts when nothing but the root is referenced. */
+static status_t ram_unmount(filesystem_t *fs)
+{
+    free_tree(node_of(fs->root));
+    kfree(fs);
+    return STATUS_SUCCESS;
+}
+
+fs_type_t ramfs_type = {
+    .name = "ramfs",
+    .mount = ram_mount,
+    .unmount = ram_unmount,
+};
+
 filesystem_t *ramfs_create(void)
 {
     filesystem_t *fs = kcalloc(1, sizeof(*fs));

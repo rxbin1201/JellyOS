@@ -1058,7 +1058,7 @@ static status_t fat_mount(block_device_t *device, filesystem_t **result)
 {
     uint8_t boot[512];
 
-    if (device->sector_size != 512 || STATUS_IS_ERROR(block_read_bytes(device, 0, sizeof(boot), boot)))
+    if (!device || device->sector_size != 512 || STATUS_IS_ERROR(block_read_bytes(device, 0, sizeof(boot), boot)))
         return STATUS_NOT_SUPPORTED;
 
     uint32_t sector_size = le16(boot + 11);

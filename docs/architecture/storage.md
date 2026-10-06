@@ -1,7 +1,7 @@
 # JellyOS Storage Stack and File Systems
 
 **Code:** [`fs/block/`](../../fs/block/), [`fs/partition/`](../../fs/partition/), [`fs/vfs/`](../../fs/vfs/), [`fs/filesystems/`](../../fs/filesystems/), [`drivers/bus/virtio/`](../../drivers/bus/virtio/), [`drivers/storage/`](../../drivers/storage/), file system calls in [`kernel/syscall/fs_syscalls.c`](../../kernel/syscall/fs_syscalls.c)
-**ABI:** [../abi/syscalls.md](../abi/syscalls.md) (version 2)
+**ABI:** [../abi/syscalls.md](../abi/syscalls.md) (version 2, devices and pipes version 3)
 
 ## Layers (README section 25)
 
@@ -60,8 +60,9 @@ Not yet included: multiple requests in flight, multiqueue, discard.
 
 | Concept | Implementation |
 |---|---|
-| Vnode | Type (file, directory, symbolic link), mode, uid/gid, size, inode number, operations; reference counted |
-| Operations | lookup, create, read, write, truncate, unlink, rename, readdir, symlink, readlink, release |
+| Vnode | Type (file, directory, symbolic link, device, pipe), mode, uid/gid, size, inode number, operations; reference counted |
+| Operations | lookup, create, read, write, truncate, unlink, rename, readdir, symlink, readlink, close, release |
+| Streams | Device and pipe vnodes have no position. The VFS calls their read/write without its lock, because they may block for a long time (console input, a full pipe), and tells them about every closed file (`close`) |
 | Mount points | A directory vnode points to the mounted file system; walks cross into its root. Unmount refuses while vnodes of the file system are referenced (`BUSY`) |
 | Paths | Absolute and normalized at every entry point. `.` and `..` are resolved lexically, as in Plan 9 and Go's `path.Clean` |
 | Symbolic links | Followed during the walk (relative targets against the link's directory), at most 8 per lookup (`LIMIT_EXCEEDED`) |
@@ -81,20 +82,83 @@ Rules for operations:
 
 | Path | Contents |
 |---|---|
-| `/` | ramfs (root file system) |
+| `/` | ramfs (root file system), filled from the initramfs |
 | `/tmp` | ramfs directory, mode 0777 |
+| `/dev` | devfs |
 | `/volumes/<device>` | Every partition or disk with a recognized file system, mounted automatically |
 
-The automatic mounts under `/volumes` are an interim policy. With Phase 7,
-init decides what is mounted where, using `SYS_MOUNT` / `SYS_UNMOUNT`.
+The kernel mounts devfs itself because it needs `/dev/console` to start init.
+The automatic mounts under `/volumes` remain an interim policy. Once a
+device service exists, userspace decides what is mounted where through
+`SYS_MOUNT` / `SYS_UNMOUNT`. `SYS_MOUNT` with an empty device mounts a
+virtual file system (`ramfs`).
 
 ## File systems
 
 ### ramfs
 
 ramfs lives entirely in memory and supports everything the VFS offers,
-including symbolic links and owners. It is the root file system and will hold
-the initramfs (Phase 7).
+including symbolic links and owners. It is the root file system and holds the
+unpacked initramfs. More instances can be mounted with `SYS_MOUNT`.
+
+### devfs
+
+devfs (`fs/filesystems/devfs`) is a flat directory of device nodes, mounted
+once at `/dev`. Drivers add nodes with `devfs_register(name, ops, mode, data)`.
+Nodes cannot be created, removed or renamed by name.
+
+| Node | Mode | Behavior |
+|---|---|---|
+| `null` | 0666 | Reads return end of file, writes are discarded |
+| `zero` | 0666 | Reads return zeros |
+| `console` | 0620 | The serial console (COM1), see below |
+
+**Console** (`drivers/console/serial_console.c`): output goes to COM1, with
+`\n` turned into `\r\n`. Input arrives through the UART receive interrupt
+(ISA IRQ 4 via the IOAPIC) and passes through a line discipline. Typed
+characters are echoed, Backspace deletes, Enter completes the line, Ctrl-C
+discards it, and Ctrl-D on an empty line produces end of file. A read returns
+at most one line and blocks until one is complete.
+
+### Pipes
+
+`SYS_PIPE_CREATE` (`kernel/ipc/pipe.c`) returns two file handles on a 16 KiB
+ring buffer. A read blocks until data arrives and returns 0 once no writer is
+left. A write blocks while the buffer is full and fails with `PEER_CLOSED`
+when no reader is left. The shell builds `a | b` from them.
+
+## Initramfs (README section 27)
+
+The boot manager loads the `initrd=` file of the boot entry
+(`/boot/initrd/current.img`) as the boot module `initrd`. Before starting
+init, the kernel unpacks it into the root ramfs (`fs/initramfs`):
+
+- Format: cpio "newc" (`070701`), as used by Linux, so standard tools can
+  inspect it (`cpio -itv < current.img`).
+- Supported entries are directories, regular files and symbolic links. Mode,
+  uid and gid are applied. Other types are skipped with a warning.
+- Names are relative to `/`. The archive's `.` entry is accepted, and
+  directories that already exist (`/tmp`) are kept.
+- A damaged header stops the unpacking (`INVALID_ARGUMENT`), and the kernel
+  then does not start init.
+
+[`tools/image_builder/mkinitramfs.py`](../../tools/image_builder/mkinitramfs.py)
+builds the archive from `build/initramfs-root`. The Makefile fills that
+directory with the skeleton in `tools/image_builder/initramfs/` (`/etc`) and
+the programs, stripped of debug information:
+
+```text
+/init                  userspace/init
+/sbin/servicemanager   userspace/services/servicemanager
+/bin/sh                userspace/shell
+/bin/<tool>            userspace/applications/coreutils
+/etc/services.conf     service definitions
+/etc/motd
+/lib/                  empty (static programs only)
+```
+
+The image can be replaced without rebuilding the kernel. The boot pages that
+hold the archive are not reclaimed yet (about 0.5 MiB).
 
 ### FAT32
 
@@ -112,7 +176,8 @@ FAT32 supports reading and writing with long file names (VFAT):
   users of a file see the same size and clusters. Deleting an open file is
   refused (`BUSY`) because its clusters must not be reused.
 - FAT has no owners or permission bits: everything belongs to root, files are
-  0644 (0444 with the read-only attribute) and directories 0755.
+  0644 (0444 with the read-only attribute) and directories 0755. Programs on
+  FAT volumes therefore cannot be executed; programs come from the initramfs.
 
 Not supported: FAT12/16, symbolic links (`NOT_SUPPORTED`), timestamps (a fixed
 date until there is a wall clock), a block cache.
@@ -120,9 +185,9 @@ date until there is a wall clock), a block cache.
 ## Process side
 
 Every process has a working directory, stored as a normalized path string
-(`SYS_CHDIR` / `SYS_GETCWD`), and relative paths are resolved against it. A
-working directory does not pin a mount, so it can become stale if the volume
-is unmounted.
+(`SYS_CHDIR` / `SYS_GETCWD`), and relative paths are resolved against it.
+Spawned programs inherit it. A working directory does not pin a mount, so it
+can become stale if the volume is unmounted.
 
 ## Disk images
 
