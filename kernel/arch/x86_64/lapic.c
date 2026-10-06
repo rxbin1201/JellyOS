@@ -1,11 +1,11 @@
 #include "lapic.h"
 
 #include "cpu.h"
-#include "early_paging.h"
 #include "interrupt.h"
 #include "pit.h"
 
 #include "core/log.h"
+#include "memory/vmm.h"
 #include "time/clock.h"
 
 #include <stdbool.h>
@@ -104,10 +104,10 @@ status_t lapic_init(void)
     cpu_write_msr(MSR_APIC_BASE, base);
 
     if (!x2apic) {
-        mmio = early_map_mmio(phys, 0x1000);
+        mmio = vmm_map_mmio(phys, 0x1000, VM_UNCACHED);
         if (!mmio) {
-            klog_error("lapic: registers at 0x%lx are outside the direct map", phys);
-            return STATUS_NOT_SUPPORTED;
+            klog_error("lapic: cannot map registers at 0x%lx", phys);
+            return STATUS_OUT_OF_MEMORY;
         }
     }
 
@@ -124,10 +124,10 @@ status_t lapic_init(void)
     lapic_eoi();
     ready = true;
 
-    klog_info("lapic: %s mode, id %u, version 0x%x%s", x2apic ? "x2APIC" : "xAPIC", lapic_id(),
-              read_reg(LAPIC_VERSION) & 0xFF, x2apic ? "" : ", registers mapped uncached");
+    klog_info("lapic: %s mode, id %u, version 0x%x", x2apic ? "x2APIC" : "xAPIC", lapic_id(),
+              read_reg(LAPIC_VERSION) & 0xFF);
     if (!x2apic)
-        klog_debug("lapic: registers at phys 0x%lx", phys);
+        klog_debug("lapic: registers at phys 0x%lx mapped uncached at %p", phys, (void *)mmio);
     return STATUS_SUCCESS;
 }
 

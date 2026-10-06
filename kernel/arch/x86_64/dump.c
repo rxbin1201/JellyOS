@@ -23,21 +23,37 @@ static void print_location(const char *prefix, uint64_t address)
         klog_raw("%s%p  ?\n", prefix, (void *)address);
 }
 
-/* Follow the RBP chain (kernel is built with frame pointers). */
+#define MAX_WALK 4096 /* frames followed while collapsing recursion */
+
+/* Follow the RBP chain (kernel is built with frame pointers). Repeated frames are collapsed. */
 static void stack_trace(uint64_t rbp)
 {
-    for (int depth = 0; depth < MAX_FRAMES; depth++) {
+    uint64_t previous = 0, repeats = 0;
+    int printed = 0;
+
+    for (int walked = 0; walked < MAX_WALK && printed < MAX_FRAMES; walked++) {
         if (rbp < KERNEL_HALF_BASE || (rbp & 7))
-            return;
+            break;
         const uint64_t *frame = (const uint64_t *)(uintptr_t)rbp;
         uint64_t return_address = frame[1];
         if (!return_address)
-            return;
+            break;
+        rbp = frame[0];
+
+        if (return_address == previous) {
+            repeats++;
+            continue;
+        }
+        if (repeats)
+            klog_raw("  ... previous frame repeated %lu more times\n", repeats);
+        repeats = 0;
+        previous = return_address;
         /* Return addresses point after the call; step back into it for the symbol. */
         print_location("  ", return_address - 1);
-        rbp = frame[0];
+        printed++;
     }
-    klog_raw("  ...\n");
+    if (repeats)
+        klog_raw("  ... previous frame repeated %lu more times\n", repeats);
 }
 
 void arch_dump_state(const struct arch_interrupt_frame *f)
