@@ -97,5 +97,7 @@ Set in `cmdline=` of an entry:
 | `disks=rw` | Disks built into the machine (NVMe, SATA) may be written; without it they are read-only |
 | `nodriver=<name>[,<name>...]` | Keep these drivers from starting (names as in the log: `e1000`, `rtl8168`, `intel-hda`, `intel-gpu`, ...) |
 | `igpu=native` / `igpu=WIDTHxHEIGHT[@HZ]` | Intel graphics: switch to the monitor's own or the given mode ([graphics.md](graphics.md)). The default entry has `igpu=native`; the entry `FirmwareGrafik` does not |
+| `amdgpu=native` / `amdgpu=on` | AMD graphics of Ryzen 4000/5000 G: the kernel's driver, with or without a switch to the monitor's best mode at the start ([graphics.md](graphics.md)). Further words after a comma leave parts out or add a trace (`amdgpu=native,trace`) |
 | `fbconsole=0` | No kernel console on the screen |
+| `logfile=PATH` | Write the kernel log to this file as well, every two seconds while it changes. The entry `JellyOSLog` writes `/volumes/usb0p1/kernel.log`: the first partition of a USB stick, to be read on another computer ([storage.md](storage.md)) |
 

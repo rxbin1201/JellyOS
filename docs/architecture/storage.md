@@ -249,6 +249,15 @@ verified.
 prints it, optionally only the lines containing one of the words. On a real
 machine this is the way to see what the drivers found.
 
+When the problem is that nothing can be read or typed any more (a graphics
+driver that leaves the screen dark), `logfile=PATH` on the kernel command
+line helps: a kernel thread writes the log to that file every two seconds
+while it changes, and a driver can ask for it at once before a risky step
+(`kmsg_logfile_write()`). The file is overwritten in place and cut to its
+length afterwards, so a machine that stops in the middle leaves the log of
+two seconds earlier, not an empty file. The boot entry `JellyOSLog` uses
+`/volumes/usb0p1/kernel.log`; volumes on removable media are writable.
+
 ## Process side
 
 Every process has a working directory, stored as a normalized path string

@@ -51,7 +51,8 @@ enum { IIO_NOP, IIO_START, IIO_READ, IIO_WRITE, IIO_CLEAR, IIO_SET, IIO_MOVE_IND
 #define IO_IIO   0x80
 
 #define MAX_DEPTH 8
-#define MAX_STEPS 4000000u /* a table that runs longer hangs */
+#define MAX_STEPS 500000u  /* a table that runs longer hangs (the real ones take a few hundred steps) */
+#define MAX_WAIT_US 3000000u /* and so does one that waits longer in all (for a PLL that never locks, say) */
 
 typedef struct {
     atom_t   *atom;
@@ -546,10 +547,15 @@ static void op_calltable(run_t *run, uint32_t *ptr, int arg)
 
 static void op_delay(run_t *run, uint32_t *ptr, int arg)
 {
-    uint32_t count = code8(run, ptr);
+    uint32_t count = code8(run, ptr), us = arg ? count * 1000 : count;
 
+    run->atom->waited_us += us;
+    if (run->atom->waited_us > MAX_WAIT_US) {
+        fail(run, "a table waits for something that does not happen", *ptr);
+        return;
+    }
     if (run->atom->io.delay_us)
-        run->atom->io.delay_us(run->atom->io.context, arg ? count * 1000 : count);
+        run->atom->io.delay_us(run->atom->io.context, us);
 }
 
 static void op_setport(run_t *run, uint32_t *ptr, int arg)
@@ -708,6 +714,7 @@ bool atom_execute(atom_t *atom, uint32_t index, uint32_t *parameters)
     atom->divmul[0] = atom->divmul[1] = 0;
     atom->depth = 0;
     atom->steps = 0;
+    atom->waited_us = 0;
     atom->reads = atom->writes = atom->calls = 0;
     atom->error = NULL;
     atom->error_at = 0;
@@ -725,6 +732,17 @@ bool atom_table_revision(const atom_t *atom, uint32_t index, uint8_t *format, ui
     if (content)
         *content = (uint8_t)image8(atom, base + 3);
     return true;
+}
+
+uint32_t atom_data_table(const atom_t *atom, uint32_t index, uint32_t *size)
+{
+    uint32_t base = image16(atom, atom->data_table + 4 + 2 * index);
+
+    if (!base || base + 4 > atom->size)
+        return 0;
+    if (size)
+        *size = image16(atom, base);
+    return base;
 }
 
 static bool text_at(const atom_t *atom, uint32_t at, const char *text)

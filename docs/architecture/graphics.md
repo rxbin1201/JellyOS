@@ -457,5 +457,56 @@ the fastest the monitor takes. The EDID is read again; another monitor gets
 its own list of modes and, if the mode on the screen is not among them, its
 best one.
 
-Not yet: HDMI modes, a monitor on another connector than the one the
-firmware lit, several screens, acceleration.
+**HDMI.** HDMI and DVI connectors are driven with DVI signalling, as the
+firmware does (no info frames). Three things differ from DisplayPort:
+
+| | DisplayPort | HDMI, DVI |
+| --- | --- | --- |
+| Pixel clock | The DTO: a register holds it in Hz | The PLL of the port's PHY, set by the video BIOS's table `SetPixelClock`; the clock on the screen is found by matching the timing with the monitor's EDID |
+| EDID | I2C over the AUX channel | The DDC line, with the hardware I2C engine |
+| Monitor there? | It answers on the AUX channel | The hot plug pin |
+
+A mode switch on HDMI stops the timing generator, then the transmitter,
+sets the PLL, writes the timing and starts both again. Without scrambling
+the pixel clock ends at 340 MHz.
+
+**Other connectors.** The video BIOS lists the board's connectors (kind,
+encoder, DDC line, hot plug pin); on this hardware connector *n* uses PHY,
+encoder, AUX channel or DDC line and hot plug pin *n*. While no monitor is
+on the connector in use, the hot plug pins of the others are looked at. A
+monitor there gets the picture:
+
+1. The pads of the new connector are set to what it is (AUX channel or I2C
+   line; the firmware does that only for the connector it lights), and the
+   monitor's capabilities and EDID are read.
+2. Stream and timing generator stop, and the video BIOS's table switches
+   the old transmitter off.
+3. The new encoder gets the connector's kind of signal and hot plug pin,
+   the timing generator its source of the pixel clock (DTO or PHY).
+4. DisplayPort: the transmitter is switched on and the link trained, at
+   the monitor's best rate. HDMI: the transmitter goes on with the mode.
+5. The monitor's best mode is set.
+
+So the cable can be moved between DisplayPort and HDMI while the system
+runs. Two rules came out of making this work on real hardware:
+
+- **The video BIOS owns the encoder's "on" state.** Its transmitter table
+  marks the encoder's back end as on and connects the front end to it when
+  it switches a transmitter on, and undoes both when it switches it off. A
+  driver that sets the mark itself gets a table that returns at once ("on
+  already") without touching the PHY.
+- **The front end of an encoder is clocked by its PHY.** Reading one that
+  is connected to a PHY that does not run does not return nonsense, it
+  stops the register bus: from then on every register of the display engine
+  reads as all ones. So the driver asks the PHY for its power state first
+  (`transmitter_runs()`) and leaves the front end alone otherwise.
+
+`amdgpu=on,noflip`, `nopointer`, `novblank` leave single parts of the driver
+out (for finding the cause of a problem). `amdgpu=native,trace` logs every
+register access of the video BIOS's tables (reads that repeat while a table
+waits are counted); together with `logfile=` (the boot entry `JellyOSLog`)
+this shows on another computer what a table did before the screen went
+dark.
+
+Not yet: several screens at once, HDMI with info frames and audio,
+acceleration.

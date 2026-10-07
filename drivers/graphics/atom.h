@@ -51,6 +51,7 @@ typedef struct {
     int            io_mode;
     int            depth;
     uint32_t       steps;
+    uint64_t       waited_us;                 /* all delays of the run together */
     const char    *error;                     /* why the last run stopped early, NULL if it did not */
     uint32_t       error_at;                  /* offset in the BIOS */
 
@@ -64,6 +65,9 @@ bool atom_init(atom_t *atom, const uint8_t *bios, uint32_t size, const atom_io_t
 
 /* Does command table `index` exist? Its format and content revision say which parameters it takes. */
 bool atom_table_revision(const atom_t *atom, uint32_t index, uint8_t *format, uint8_t *content);
+
+/* Where data table `index` of the master list lies in the image (0: not there); *size: its length in bytes. */
+uint32_t atom_data_table(const atom_t *atom, uint32_t index, uint32_t *size);
 
 /* Run command table `index`. parameters: ATOM_PARAMETERS dwords, read and written by the table. */
 bool atom_execute(atom_t *atom, uint32_t index, uint32_t *parameters);
