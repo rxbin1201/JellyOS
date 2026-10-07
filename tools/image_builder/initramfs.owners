@@ -1,0 +1,3 @@
+# Owners for initramfs entries (everything else belongs to root).
+# PATH UID GID     applies to PATH and everything below it
+home/jelly 1000 1000

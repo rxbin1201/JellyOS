@@ -76,8 +76,10 @@ static void free_string_array(char **array, uint32_t count)
     kfree(array);
 }
 
-status_t sys_process_spawn(const uint64_t *a)
+/* Spawn with the caller's credentials, or (SYS_PROCESS_SPAWN_AS, root only) with others. */
+static status_t spawn(uint64_t user_request, const credentials_t *as, uint64_t user_out)
 {
+    const uint64_t a[2] = { user_request, user_out };
     jelly_spawn_t request;
     spawn_request_t r = { 0 };
     char *path = kmalloc(VFS_PATH_MAX), *raw = NULL;
@@ -116,7 +118,7 @@ status_t sys_process_spawn(const uint64_t *a)
         r.argc = request.argc;
         r.envp = envp;
         r.envc = request.envc;
-        r.credentials = &self->credentials;
+        r.credentials = as ? as : &self->credentials;
         r.cwd = self->cwd;
         status = process_spawn(&r, &child);
     }
@@ -131,6 +133,19 @@ status_t sys_process_spawn(const uint64_t *a)
     kfree(raw);
     kfree(path);
     return status;
+}
+
+status_t sys_process_spawn(const uint64_t *a)
+{
+    return spawn(a[0], NULL, a[1]);
+}
+
+status_t sys_process_spawn_as(const uint64_t *a)
+{
+    if (process_current()->credentials.uid != UID_ROOT)
+        return STATUS_ACCESS_DENIED;
+    credentials_t as = { (uint32_t)a[1], (uint32_t)a[2] };
+    return spawn(a[0], &as, a[3]);
 }
 
 status_t sys_process_info(const uint64_t *a)

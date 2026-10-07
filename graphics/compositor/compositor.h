@@ -2,14 +2,17 @@
  * Compositor (README sections 33 and 35): windows, decorations, the
  * pointer and composition onto the display.
  *
- * Windows are kept bottom to top. Changes are recorded as damaged screen
- * rectangles; compositor_render() repaints only those (background, then
- * every window from the bottom, then the pointer) into the display's back
- * buffer and presents them.
+ * Windows live in three layers, painted in this order: normal windows,
+ * panels (taskbar), popups (menus, notifications). Within a layer the array
+ * order is the stacking order. Minimized windows are not painted.
+ *
+ * Changes are recorded as damaged screen rectangles; compositor_render()
+ * repaints only those (background, windows, resize outline, pointer) into
+ * the display's back buffer and presents them.
  *
  * The look belongs to JellyOS's visual identity: a violet-blue desktop,
  * rounded title bars with a "jelly" accent for the focused window, soft
- * shadows and a round close button.
+ * shadows and round title bar buttons (minimize, maximize, close).
  */
 
 #ifndef GRAPHICS_COMPOSITOR_COMPOSITOR_H
@@ -25,11 +28,17 @@
 #define BORDER_WIDTH           1
 #define CORNER_RADIUS          8
 #define SHADOW_SIZE            10
+#define RESIZE_GRIP            14
+#define MIN_WINDOW_WIDTH       120
+#define MIN_WINDOW_HEIGHT      60
 
 typedef enum {
     PART_NONE,
     PART_TITLE,
     PART_CLOSE,
+    PART_MAXIMIZE,
+    PART_MINIMIZE,
+    PART_RESIZE,
     PART_CONTENT,
     PART_BORDER,
 } window_part_t;
@@ -42,12 +51,15 @@ typedef struct comp_window {
     char     title[WM_TITLE_MAX];
     uint32_t flags;          /* WM_WINDOW_* */
     bool     focused;
-    bool     close_hover;
+    bool     minimized;
+    bool     maximized;
+    rect_t   restore;        /* content rectangle before maximizing */
+    window_part_t hover;     /* title bar button under the pointer */
 } comp_window_t;
 
 typedef struct {
     display_t     *display;
-    comp_window_t *windows[COMPOSITOR_MAX_WINDOWS]; /* bottom to top */
+    comp_window_t *windows[COMPOSITOR_MAX_WINDOWS]; /* stacking order within each layer */
     int            count;
     rect_t         damage[COMPOSITOR_MAX_DAMAGE];
     int            damage_count;
@@ -55,6 +67,7 @@ typedef struct {
     bool           pointer_visible;
     uint32_t       next_id;
     const char    *status_text;  /* bottom-right of the desktop */
+    rect_t         outline;      /* resize preview, empty if none */
 } compositor_t;
 
 void           compositor_init(compositor_t *c, display_t *display);
@@ -62,18 +75,27 @@ void           compositor_init(compositor_t *c, display_t *display);
 /* Content rectangle and whole outer rectangle (with decorations, without shadow). */
 rect_t         compositor_content_rect(const comp_window_t *w);
 rect_t         compositor_frame_rect(const comp_window_t *w);
+/* The screen minus reserved panel areas (for maximizing and placing windows). */
+rect_t         compositor_work_area(compositor_t *c);
 
-/* Add a window (positioned in a cascade) above all others; returns NULL when full. */
-comp_window_t *compositor_add(compositor_t *c, canvas_t content, const char *title, uint32_t flags, void *owner);
+/* Add a window above the others of its layer; NULL when full. x, y: used with WM_WINDOW_POSITIONED. */
+comp_window_t *compositor_add(compositor_t *c, canvas_t content, const char *title, uint32_t flags, int32_t x,
+                              int32_t y, void *owner);
 void           compositor_remove(compositor_t *c, comp_window_t *w);
 void           compositor_raise(compositor_t *c, comp_window_t *w);
 void           compositor_move(compositor_t *c, comp_window_t *w, int32_t x, int32_t y);
+/* A new surface (after a resize). */
+void           compositor_set_content(compositor_t *c, comp_window_t *w, canvas_t content);
+void           compositor_set_minimized(compositor_t *c, comp_window_t *w, bool minimized);
 void           compositor_focus(compositor_t *c, comp_window_t *w); /* NULL: none */
 comp_window_t *compositor_focused(compositor_t *c);
+/* The topmost visible normal window, for focus after a change. */
+comp_window_t *compositor_topmost(compositor_t *c);
 void           compositor_set_title(compositor_t *c, comp_window_t *w, const char *title);
-void           compositor_set_close_hover(compositor_t *c, comp_window_t *w, bool hover);
+void           compositor_set_hover(compositor_t *c, comp_window_t *w, window_part_t part);
+void           compositor_set_outline(compositor_t *c, rect_t outline);
 
-/* The window and part at a screen position (topmost first). */
+/* The visible window and part at a screen position (topmost first). */
 comp_window_t *compositor_hit(compositor_t *c, int32_t x, int32_t y, window_part_t *part);
 
 void           compositor_damage(compositor_t *c, rect_t area);

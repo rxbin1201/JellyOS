@@ -412,3 +412,20 @@ status_t jelly_input_read(jelly_handle_t input, jelly_input_event_t *events, siz
 {
     return (status_t)SYSCALL4(SYS_INPUT_READ, input, events, count, read);
 }
+
+/* --- Desktop (ABI version 6) ---------------------------------------------------------- */
+
+status_t jelly_spawn_as(const jelly_spawn_t *request, uint32_t uid, uint32_t gid, jelly_handle_t *process)
+{
+    return (status_t)SYSCALL4(SYS_PROCESS_SPAWN_AS, request, uid, gid, process);
+}
+
+status_t jelly_clock_realtime(uint64_t *ns)
+{
+    return (status_t)SYSCALL1(SYS_CLOCK_REALTIME, ns);
+}
+
+status_t jelly_system_info(jelly_system_info_t *info)
+{
+    return (status_t)SYSCALL1(SYS_SYSTEM_INFO, info);
+}

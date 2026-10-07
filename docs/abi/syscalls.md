@@ -1,6 +1,6 @@
 # JellyOS System Call ABI
 
-**ABI version:** 5 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67).
+**ABI version:** 6 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67); version 6 adds the desktop calls (68–70).
 **Headers:** [`sdk/include/jelly/syscall.h`](../../sdk/include/jelly/syscall.h) (numbers, rights, flags), [`sdk/include/jelly/status.h`](../../sdk/include/jelly/status.h) (errors), [`sdk/include/jelly/os.h`](../../sdk/include/jelly/os.h) (libos wrappers)
 
 ## Calling convention (x86_64)
@@ -197,6 +197,16 @@ See [graphics.md](../architecture/graphics.md).
 | 65 | `SYS_DISPLAY_ACQUIRE` | `index, jelly_handle_t *framebuffer` | memory handle (`MAP`, `WRITE`) | Root only. Exclusive (`BUSY`); map it with `SYS_SHM_MAP` (write-combining). The kernel console resumes when the object is released |
 | 66 | `SYS_INPUT_OPEN` | `jelly_handle_t *input` | input queue (`READ`, `WAIT`) | Root only. Each queue receives every event (512 buffered, oldest dropped) |
 | 67 | `SYS_INPUT_READ` | `handle, jelly_input_event_t *events, count, size_t *read` | events | `WOULD_BLOCK` when empty |
+
+### Desktop (version 6)
+
+See [desktop.md](../architecture/desktop.md).
+
+| # | Name | Arguments | Output | Rights / notes |
+|---|---|---|---|---|
+| 68 | `SYS_PROCESS_SPAWN_AS` | `const jelly_spawn_t *request, uid, gid, jelly_handle_t *process` | process handle | Root only: like `SYS_PROCESS_SPAWN`, but the child runs with the given uid and gid (login starts sessions with it) |
+| 69 | `SYS_CLOCK_REALTIME` | `uint64_t *ns` | nanoseconds since 1970-01-01 UTC | From the CMOS RTC read at boot plus the monotonic clock. `NOT_SUPPORTED` without an RTC |
+| 70 | `SYS_SYSTEM_INFO` | `jelly_system_info_t *info` | version, uptime, memory total/free, live processes, ABI version, wall-clock time | |
 
 ```c
 typedef struct {

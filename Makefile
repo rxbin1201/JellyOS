@@ -115,6 +115,12 @@ PROGRAMS     := init:/init:userspace/init/init.c \
                 sh:/bin/sh:userspace/shell/shell.c \
                 guidemo:/bin/guidemo:userspace/applications/guidemo/guidemo.c \
                 terminal:/bin/terminal:userspace/applications/terminal/terminal.c \
+                login:/sbin/login:userspace/desktop/login/login.c \
+                desktop:/bin/desktop:userspace/desktop/shell/desktop.c \
+                files:/bin/files:userspace/applications/files/files.c \
+                settings:/bin/settings:userspace/applications/settings/settings.c \
+                viewer:/bin/viewer:userspace/applications/viewer/viewer.c \
+                notify:/bin/notify:userspace/applications/notify/notify.c \
                 $(foreach u,$(NETTOOLS),$(u):/bin/$(u):userspace/applications/network/$(u).c) \
                 $(foreach u,$(COREUTILS),$(u):/bin/$(u):userspace/applications/coreutils/$(u).c)
 # Further sources of programs made of several files: PROGRAM_EXTRA_<name>
@@ -130,6 +136,7 @@ INITRAMFS_ROOT  := $(BUILD)/initramfs-root
 INITRAMFS       := $(BUILD)/initramfs.img
 INITRAMFS_ESP   := $(ESP)/boot/initrd/current.img
 INITRAMFS_TOOL  := tools/image_builder/mkinitramfs.py
+INITRAMFS_OWNERS := tools/image_builder/initramfs.owners
 
 # Test program embedded into the kernel (tests/kernel/user_images.S)
 USERTEST_ELF := $(BUILD)/tests/userspace/usertest.elf
@@ -297,7 +304,7 @@ $(eval $(call program_rule,$(SPAWNTEST)))
 programs: $(PROGRAM_ELFS)
 
 # The root is rebuilt from scratch so removed programs disappear from the image.
-$(INITRAMFS): $(PROGRAM_ELFS) $(INITRAMFS_TOOL) $(shell find $(INITRAMFS_SKEL) -type f)
+$(INITRAMFS): $(PROGRAM_ELFS) $(INITRAMFS_TOOL) $(INITRAMFS_OWNERS) $(shell find $(INITRAMFS_SKEL) -type f)
 	@rm -rf $(INITRAMFS_ROOT) && mkdir -p $(INITRAMFS_ROOT)
 	@cp -r $(INITRAMFS_SKEL)/. $(INITRAMFS_ROOT)/
 	@mkdir -p $(INITRAMFS_ROOT)/bin $(INITRAMFS_ROOT)/sbin $(INITRAMFS_ROOT)/lib
@@ -305,7 +312,7 @@ $(INITRAMFS): $(PROGRAM_ELFS) $(INITRAMFS_TOOL) $(shell find $(INITRAMFS_SKEL) -
 	@$(foreach p,$(PROGRAMS),install -D -m 0755 $(PROGRAM_DIR)/$(call program_name,$(p)).elf \
 	    $(INITRAMFS_ROOT)$(call program_path,$(p)) && \
 	    strip --strip-debug $(INITRAMFS_ROOT)$(call program_path,$(p)) &&) true
-	python3 $(INITRAMFS_TOOL) $(INITRAMFS_ROOT) $@
+	python3 $(INITRAMFS_TOOL) $(INITRAMFS_ROOT) $@ $(INITRAMFS_OWNERS)
 
 $(INITRAMFS_ESP): $(INITRAMFS)
 	@mkdir -p $(@D)
@@ -362,13 +369,18 @@ debug: all $(VARS_COPY)
 # QEMU's isa-debug-exit turns the kernel's verdict into the exit status: 1 = passed.
 # The test drivers are passed as boot modules; edu and e1000e are their devices.
 # Host unit tests: code without OS dependencies, built with the host compiler and sanitizers.
-UNIT_TESTS := $(BUILD)/unit/canvas_test
+UNIT_TESTS := $(BUILD)/unit/canvas_test $(BUILD)/unit/sha256_test
+UNIT_CFLAGS := -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -I.
 
 $(BUILD)/unit/canvas_test: tests/unit/canvas_test.c graphics/core/canvas.c graphics/core/canvas.h \
                            graphics/core/font8x16.c
 	@mkdir -p $(@D)
-	$(CC) -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -I. \
-	    tests/unit/canvas_test.c graphics/core/canvas.c graphics/core/font8x16.c -o $@
+	$(CC) $(UNIT_CFLAGS) tests/unit/canvas_test.c graphics/core/canvas.c graphics/core/font8x16.c -o $@
+
+# libc's SHA-256 against the host C library: the SDK directory only supplies sha256.h.
+$(BUILD)/unit/sha256_test: tests/unit/sha256_test.c userspace/libc/sha256.c sdk/include/sha256.h
+	@mkdir -p $(@D)
+	$(CC) $(UNIT_CFLAGS) -idirafter $(SDK_INC) tests/unit/sha256_test.c userspace/libc/sha256.c -o $@
 
 unit: $(UNIT_TESTS)
 	@for t in $(UNIT_TESTS); do $$t || { echo "make unit: FAILED ($$t)"; exit 1; }; done

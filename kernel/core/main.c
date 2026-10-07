@@ -21,6 +21,7 @@
 #include "drivers/core/module.h"
 #include "fs/initramfs/initramfs.h"
 #include "net/net.h"
+#include "time/rtc.h"
 #include "drivers/graphics/display.h"
 #include "fs/vfs/vfs.h"
 #include "memory/layout.h"
@@ -240,6 +241,8 @@ void kernel_main(const boot_info_t *loader_info)
     status = memory_init(info, entries, entry_count);
     if (STATUS_IS_ERROR(status))
         panic("memory initialization failed: %s", status_name(status));
+
+    rtc_init();
 
     /* The screen: the GOP framebuffer becomes display 0 with the kernel console on it. */
     display_init_boot_framebuffer();

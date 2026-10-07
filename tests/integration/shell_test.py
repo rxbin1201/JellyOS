@@ -275,15 +275,22 @@ class Screenshot:
         return r << 16 | g << 8 | b
 
 
-# Window placement follows the compositor's cascade: the terminal (started by
-# displayd) is the first window, guidemo the second.
-DEMO_X, DEMO_Y = 92, 110            # guidemo's content area
+# Window placement follows the compositor's cascade (64-pixel steps of 32):
+# the terminal (from the launcher) is the first window, guidemo the second,
+# files the third, the viewer the fourth, settings the fifth.
+def cascade(n):
+    return 60 + 32 * n, 78 + 32 * n
+
+
+DEMO_X, DEMO_Y = cascade(1)          # guidemo's content area
 TITLE_FOCUSED, TITLE_UNFOCUSED = 0x7C3AED, 0x3B3B4F
 DARK_BACKGROUND = 0x1B1A26
+LAUNCHER = (50, 780)                 # the JellyOS button in the taskbar
+MENU = {"Files": 562, "GUI demo": 590, "Settings": 618, "Terminal": 646, "Log out": 683}
 
 
 def gui_steps(console, qmp, timeout):
-    """Milestone M8: graphical applications run. Returns the number of failures."""
+    """Milestones M8 and M9: graphical applications and the desktop. Returns the number of failures."""
     failures = 0
 
     def check(name, condition, detail=""):
@@ -294,22 +301,51 @@ def gui_steps(console, qmp, timeout):
             failures += 1
             print(f"shell test: FAIL  gui: {name} {detail}")
 
-    def expect(name, text):
+    def expect(name, text, wait=30):
         try:
-            console.wait_for(text, 30)
+            console.wait_for(text, wait)
             check(name, True)
+            return True
         except TimeoutError as error:
             check(name, False, f"(no '{text}'; console: {str(error)[-300:]!r})")
+            return False
 
+    def launch(entry, text):
+        qmp.click(*LAUNCHER)
+        expect(f"the launcher opens ({entry})", "desktop: launcher open")
+        time.sleep(0.5)
+        qmp.click(60, MENU[entry])
+        return expect(f"the launcher starts {entry}", text)
+
+    # --- Login and session (M9)
+    qmp.type("jelly\n")
+    qmp.type("wrong\n")
+    expect("a wrong password is refused", "login: failed for 'jelly'")
+    qmp.type("jelly\n")
+    expect("the right password starts the session", "login: session of jelly started (uid 1000)")
+    expect("the desktop shell starts", "desktop: ready")
+    time.sleep(1.5)
+    shot = qmp.screenshot()
+    check("the taskbar is shown", shot.color(640, 790) == DARK_BACKGROUND, f"({shot.color(640, 790):06x})")
+
+    # --- Terminal from the launcher, running with the user's rights
+    launch("Terminal", "desktop: started /bin/terminal")
+    time.sleep(2.0)
+    qmp.type("touch /tmp/fromgui\n")
+    time.sleep(2.0)
+    console.send("ls -l /tmp")
+    output = console.read_until(PROMPT, timeout)
+    line = next((l for l in output.splitlines() if "fromgui" in l), "")
+    check("the terminal runs commands as the user", "1000" in line, f"(ls -l /tmp: {output!r})")
+
+    # --- guidemo (M8): focus, keyboard, mouse, themes, moving, closing
     console.send("guidemo &")
     expect("guidemo starts and connects to the display server", "guidemo: ready")
     time.sleep(1.0)
     shot = qmp.screenshot()
-    check("the new window has the focus", shot.color(300, 96) == TITLE_FOCUSED,
-          f"(title bar {shot.color(300, 96):06x})")
+    check("the new window has the focus", shot.color(300, 96) == TITLE_FOCUSED, f"(title bar {shot.color(300, 96):06x})")
     check("the terminal lost the focus", shot.color(400, 64) == TITLE_UNFOCUSED,
           f"(title bar {shot.color(400, 64):06x})")
-
     qmp.type("Jelly\n")
     expect("keyboard input reaches the text field", "guidemo: greeted 'Jelly'")
     qmp.click(DEMO_X + 60, DEMO_Y + 166)
@@ -325,24 +361,59 @@ def gui_steps(console, qmp, timeout):
     qmp.key("tab")
     qmp.key("spc")
     expect("Tab moves the focus, Space activates", "guidemo: large text on")
-
     qmp.drag(300, 96, 700, 300)
     time.sleep(1.0)
     shot = qmp.screenshot()
     check("dragging the title bar moves the window", shot.color(850, 296) == TITLE_FOCUSED,
           f"(at the new place {shot.color(850, 296):06x})")
-    qmp.click(915, 300)
+    qmp.click(914, 300)  # close button: frame right edge (933) - 12 - 7
     time.sleep(1.5)
     shot = qmp.screenshot()
     check("the close button closes the window", shot.color(850, 296) != TITLE_FOCUSED)
     check("the terminal gets the focus back", shot.color(400, 64) == TITLE_FOCUSED,
           f"(title bar {shot.color(400, 64):06x})")
 
-    qmp.type("touch /tmp/fromgui\n")
-    time.sleep(2.0)
-    console.send("ls /tmp")
-    output = console.read_until(PROMPT, timeout)
-    check("the terminal runs commands typed on the keyboard", "fromgui" in output, f"(ls /tmp: {output!r})")
+    # --- File manager and viewer
+    if launch("Files", "files: showing /home/jelly (1 items)"):
+        x, y = cascade(2)
+        time.sleep(1.0)
+        qmp.move(x + 120, y + 124)  # the first row: Welcome.txt
+        for _ in range(2):
+            qmp.button(True)
+            qmp.button(False)
+        expect("a double-click opens the text viewer", "viewer: /home/jelly/Welcome.txt")
+
+    # --- Settings: the theme changes in every program of the session
+    if launch("Settings", "settings: ready"):
+        x, y = cascade(4)
+        time.sleep(1.0)
+        qmp.click(x + 198, y + 71)  # "Dark mode"
+        expect("settings switch to the dark theme", "settings: theme dark")
+        time.sleep(2.0)
+        fx, fy = cascade(2)
+        shot = qmp.screenshot()
+        check("other programs follow the new theme", shot.color(fx + 5, fy + 200) == DARK_BACKGROUND,
+              f"(files background {shot.color(fx + 5, fy + 200):06x})")
+        frame_right = x + 560 + 1
+        qmp.click(frame_right - 12 - 14 - 8 - 7, y - 14)  # maximize button
+        time.sleep(1.5)
+        shot = qmp.screenshot()
+        check("maximize fills the screen above the taskbar", shot.color(640, 6) == TITLE_FOCUSED,
+              f"(top of the screen {shot.color(640, 6):06x})")
+
+    # --- Notifications from any program
+    console.send("notify Test Nachricht")
+    expect("notify shows a notification", "desktop: notification 'Test'")
+
+    # --- Log out: back to the login
+    qmp.click(*LAUNCHER)
+    expect("the launcher opens (log out)", "desktop: launcher open")
+    time.sleep(0.5)
+    qmp.click(60, MENU["Log out"])
+    expect("logging out ends the session", "login: session of jelly ended")
+    expect("the login appears again", "login: ready")
+    console.send("")
+    console.read_until(PROMPT, timeout)
     return failures
 
 

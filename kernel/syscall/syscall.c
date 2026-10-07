@@ -428,6 +428,9 @@ static const syscall_fn table[SYS_COUNT] = {
     [SYS_DISPLAY_ACQUIRE]  = sys_display_acquire,
     [SYS_INPUT_OPEN]       = sys_input_open,
     [SYS_INPUT_READ]       = sys_input_read,
+    [SYS_PROCESS_SPAWN_AS] = sys_process_spawn_as,
+    [SYS_CLOCK_REALTIME]   = sys_clock_realtime,
+    [SYS_SYSTEM_INFO]      = sys_system_info,
 };
 
 uint64_t syscall_dispatch(uint64_t number, const uint64_t args[6])

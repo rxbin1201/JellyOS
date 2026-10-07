@@ -37,6 +37,9 @@ status_t sys_unmount(const uint64_t *a);
 
 /* Program, pipe and power calls (process_syscalls.c) */
 status_t sys_process_spawn(const uint64_t *a);
+status_t sys_process_spawn_as(const uint64_t *a);
+status_t sys_clock_realtime(const uint64_t *a);
+status_t sys_system_info(const uint64_t *a);
 status_t sys_process_info(const uint64_t *a);
 status_t sys_process_kill(const uint64_t *a);
 status_t sys_pipe_create(const uint64_t *a);

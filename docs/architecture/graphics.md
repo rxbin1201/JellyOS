@@ -87,6 +87,12 @@ are its software forerunners.
 
 ## Window protocol
 
+Version 2 (Phase 10) adds window kinds, resizing, minimize and maximize,
+the window list for the taskbar, settings broadcasts, keyboard layouts and
+notifications. See [desktop.md](desktop.md) for the window manager and the
+toolkit additions.
+
+
 Transport: a channel from `SYS_SERVICE_CONNECT("display")`. Every message is
 a `wm_message_t`.
 
@@ -151,8 +157,9 @@ autostart=/bin/terminal # programs started with the server (repeatable)
 - **Event loop:** `gui_run` waits on the display connection and any watched
   handles (`gui_watch`). It repaints dirty windows once the previous frame
   was presented.
-- **Not yet:** table, menu, dialog, scroll view, icons, transparency
-  effects. They follow with the desktop in Phase 10.
+- **Phase 10** added table, menu, dialogs, scroll view, icons, timers and
+  resizable windows (see [desktop.md](desktop.md)). Not yet: transparency
+  effects.
 
 ## Applications
 

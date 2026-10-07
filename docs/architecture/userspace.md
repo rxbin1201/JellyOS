@@ -9,7 +9,7 @@ Phase 7 (milestone M6) boots into a command line:
 kernel ──spawn──▶ /init ──spawn──▶ /sbin/servicemanager ──spawn──▶ services
  (critical)                         reads /etc/services.conf        motd (oneshot)
                                                                      network: /sbin/networkd (DHCP)
-                                                                     display: /sbin/displayd ──▶ /bin/terminal
+                                                                     display: /sbin/displayd ──▶ /sbin/login ──▶ /bin/desktop (user session)
                                                                      shell: /bin/sh ──spawn──▶ /bin/ls, ...
 ```
 
@@ -41,11 +41,13 @@ the host's C library; GCC supplies only its freestanding headers
 | `time.h` | `time`, `clock`, `timespec_get` on the monotonic clock (there is no wall clock yet) |
 | `threads.h` | C11 `thrd_*` on JellyOS threads (64 KiB stacks), `mtx_*` on futexes |
 | `dirent.h` | `opendir`/`readdir`/`closedir` |
-| `process.h` | JellyOS: `process_spawn` (with `$PATH` search and explicit stdio handles), `process_wait`, `process_run`, `process_find` |
+| `process.h` | JellyOS: `process_spawn` (with `$PATH` search and explicit stdio handles), `process_wait`, `process_run`, `process_find`; root can start programs as another user (`as_user`, `uid`, `gid`) |
 | `sys/socket.h`, `netinet/in.h` | BSD sockets: `socket`, `bind`, `connect`, `listen`, `accept`, `send`/`recv`, `sendto`/`recvfrom`, `shutdown`, `setsockopt` (`SO_RCVTIMEO`, `SO_SNDTIMEO`, `SO_BROADCAST`, `SO_REUSEADDR`, `SO_JELLY_INTERFACE`), `getsockname`, `getpeername`. IPv4 only |
 | `arpa/inet.h`, `netdb.h` | `inet_aton`/`inet_ntoa`/`inet_pton`/`inet_ntop`; `gethostbyname` and `getaddrinfo` (numeric ports) through the kernel resolver |
 | `unistd.h` | `read`, `write`, `close` on any handle (files, pipes, console, sockets); `sleep`, `usleep`, `getcwd`, `chdir`, `unlink` |
 | `sys/types.h`, `sys/time.h` | `ssize_t` and friends, `struct timeval` |
+| `time.h` | Since Phase 10 wall-clock time (UTC) from the RTC: `time`, `gmtime_r`, `timegm`, `mktime`, `strftime` |
+| `pwd.h`, `sha256.h` | Accounts from `/etc/passwd` (`getpwnam`, `getpwuid`); SHA-256 and the password hashes |
 | `assert.h`, `limits.h` | as usual |
 
 **Descriptors:** a socket descriptor is the socket's handle. Handles always
@@ -160,8 +162,10 @@ Network tools in
 ## Display server and graphical programs
 
 `/sbin/displayd` (service `display`) owns the screen and the input devices,
-composites the windows and starts `/bin/terminal`. `/bin/guidemo` shows the
-GUI toolkit. See [graphics.md](graphics.md).
+composites and manages the windows and starts the graphical login. After
+logging in, the desktop session runs with the user's rights: taskbar,
+launcher, terminal, file manager, settings. See [graphics.md](graphics.md)
+and [desktop.md](desktop.md).
 
 ## Network service
 

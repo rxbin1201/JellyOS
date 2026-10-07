@@ -13,6 +13,9 @@ AddressSanitizer and UBSan, and tested on the development machine:
 [`tests/unit/canvas_test.c`](../../tests/unit/canvas_test.c) covers
 `graphics/core` (rectangles, blending, fills and clipping, rounded corners,
 blitting, UTF-8, text and the font).
+[`tests/unit/sha256_test.c`](../../tests/unit/sha256_test.c) checks libc's
+SHA-256 against the FIPS 180-4 test vectors, and the password hash of the
+default account against `tools/image_builder/mkpasswd.py`.
 
 ## Kernel self-tests (`make test`)
 
@@ -147,6 +150,10 @@ covers:
 
 `make test` attaches a VirtIO keyboard and tablet in both QEMU runs.
 
+[`tests/kernel/desktop_tests.c`](../../tests/kernel/desktop_tests.c)
+(Phase 10) checks the RTC wall clock (a plausible date that advances with
+the monotonic clock) and the live process count of `SYS_SYSTEM_INFO`.
+
 ## Integration test: the shell (milestone M6)
 
 After the kernel tests pass, `make test` boots a second time, normally this
@@ -183,23 +190,26 @@ Access to the real Internet is not part of `make test`, so the tests do not
 depend on the host's connectivity. Check it by hand with `make run`, then
 `nslookup example.com` and `http http://example.com/`.
 
-**Graphics (milestone M8).** QEMU also gets a QMP socket. The script starts
-`guidemo &` from the serial shell, follows its output (it prints every
-action) and drives the GUI with QMP `input-send-event` (keys as physical
-QEMU key codes for the German layout, absolute tablet coordinates). It
-checks with QMP screenshots:
+**Graphics and desktop (milestones M8 and M9).** QEMU also gets a QMP
+socket. The script drives the GUI with QMP `input-send-event` (keys as
+physical QEMU key codes for the German layout, absolute tablet coordinates),
+follows the programs' output on the console (they print their actions) and
+checks QMP screenshots:
 
-- focus routing: title bar colors of the new and the old window
-- typing into the text field, clicking buttons, a checkbox that switches to
-  the dark theme (checked on screen)
-- keyboard navigation (Tab, Space)
-- dragging a window by its title bar, closing it with the close button,
-  and the focus returning to the terminal
-- typing a command into the terminal (`touch /tmp/fromgui`), checked from
-  the serial shell
+- login: a wrong password is refused, the right one starts the session as
+  uid 1000, the taskbar appears
+- the launcher starts the terminal; a command typed into it creates a file
+  owned by uid 1000 (checked with `ls -l` on the serial shell)
+- guidemo (started from the serial shell): focus routing (title bar colors),
+  typing, buttons, a checkbox switching to the dark theme, Tab and Space,
+  dragging by the title bar, the close button, the focus returning
+- the file manager opens the viewer on a double-click
+- settings switch to the dark theme and the file manager follows; maximize
+  fills the screen above the taskbar
+- `notify` shows a notification; logging out returns to the login
 
-Window positions follow the compositor's cascade: the terminal is the
-first window, guidemo the second.
+Window positions follow the compositor's cascade (terminal, guidemo, files,
+viewer, settings in this order).
 
 Requirements on the host: `sgdisk` (gdisk) and `mtools`.
 

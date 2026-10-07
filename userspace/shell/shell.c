@@ -639,7 +639,9 @@ static void prompt(void)
     size_t length;
     if (STATUS_IS_ERROR(jelly_getcwd(cwd, sizeof(cwd), &length)))
         strcpy(cwd, "?");
-    printf("jelly:%s# ", cwd);
+    /* '#' for root, '$' for users (login sets USER for a session) */
+    const char *user = getenv("USER");
+    printf("jelly:%s%s ", cwd, !user || !strcmp(user, "root") ? "#" : "$");
     fflush(stdout);
 }
 

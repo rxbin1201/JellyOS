@@ -15,6 +15,8 @@ typedef struct {
     char *const   *envp;        /* NULL: the caller's environ */
     jelly_handle_t stdio[3];    /* stdin, stdout, stderr */
     jelly_handle_t extra[5];    /* further startup handles (slots 3..), JELLY_HANDLE_INVALID ends the list */
+    int            as_user;     /* root only: run with uid/gid below */
+    uint32_t       uid, gid;
 } process_options_t;
 
 /*

@@ -1,0 +1,11 @@
+Welcome to the JellyOS desktop!
+
+This is your home folder (/home/jelly). Everything here belongs to you.
+
+- The JellyOS button in the taskbar opens the launcher.
+- Files lets you browse, copy and delete files, also on the FAT volumes
+  under /volumes.
+- Settings changes the theme, the text size and the keyboard layout.
+- Terminal gives you the shell.
+
+The default account is "jelly" with the password "jelly".

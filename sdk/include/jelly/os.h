@@ -114,6 +114,11 @@ status_t jelly_display_acquire(uint32_t index, jelly_handle_t *framebuffer);
 status_t jelly_input_open(jelly_handle_t *input);
 status_t jelly_input_read(jelly_handle_t input, jelly_input_event_t *events, size_t count, size_t *read);
 
+/* Desktop (ABI version 6) */
+status_t jelly_spawn_as(const jelly_spawn_t *request, uint32_t uid, uint32_t gid, jelly_handle_t *process);
+status_t jelly_clock_realtime(uint64_t *ns);
+status_t jelly_system_info(jelly_system_info_t *info);
+
 /* Startup handle slot `index` of a libc program (JELLY_HANDLE_INVALID if absent).
    Provided by the libc entry code, not by libos. */
 jelly_handle_t jelly_startup_handle(unsigned index);

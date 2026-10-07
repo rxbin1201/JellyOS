@@ -72,7 +72,8 @@ int process_spawn(const char *path, char *const argv[], const process_options_t 
     for (unsigned i = 0; options && i < 5 && options->extra[i] != JELLY_HANDLE_INVALID; i++)
         request.handles[request.handle_count++] = options->extra[i];
 
-    status_t status = jelly_spawn(&request, process);
+    status_t status = options && options->as_user ? jelly_spawn_as(&request, options->uid, options->gid, process)
+                                                  : jelly_spawn(&request, process);
     return STATUS_IS_ERROR(status) ? __libc_fail(status) : 0;
 }
 

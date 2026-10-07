@@ -6,7 +6,8 @@
  * loop (gui_watch) moves it into the character grid. There is no line
  * discipline behind a pipe, so the terminal edits the input line itself
  * (echo, Backspace) and sends it on Enter. Ctrl-D ends the input; closing
- * the window ends the shell.
+ * the window ends the shell. The window is resizable: the visible grid
+ * follows its size (up to COLUMNS x MAX_ROWS characters).
  */
 
 #include <process.h>
@@ -20,8 +21,10 @@
 
 #include "graphics/gui/gui.h"
 
-#define COLUMNS     80
-#define ROWS        25
+#define COLUMNS     160        /* grid width; the window shows as many as fit */
+#define START_COLUMNS 80
+#define START_ROWS  25
+#define MAX_ROWS    100
 #define SCROLLBACK  500
 #define PADDING     6
 #define LINE_MAX    512
@@ -30,7 +33,7 @@ static gui_app_t *app;
 static gui_window_t *window;
 static widget_t *view;
 
-/* Grid of code points: SCROLLBACK lines, the last ROWS are the screen. */
+/* Grid of code points: SCROLLBACK lines; the last visible_rows() are the screen. */
 static uint32_t grid[SCROLLBACK][COLUMNS];
 static int cursor_x, cursor_y;          /* cursor_y indexes grid */
 static int scroll_offset;               /* lines scrolled back by the user */
@@ -50,6 +53,18 @@ static bool shell_exited;
 
 /* --- Grid --------------------------------------------------------------------------- */
 
+static int visible_columns(void)
+{
+    int n = (gui_widget_rect(view).w - 2 * PADDING) / TEXT_CELL_WIDTH;
+    return n < 1 ? START_COLUMNS : n > COLUMNS ? COLUMNS : n;
+}
+
+static int visible_rows(void)
+{
+    int n = (gui_widget_rect(view).h - 2 * PADDING) / TEXT_CELL_HEIGHT;
+    return n < 1 ? START_ROWS : n > MAX_ROWS ? MAX_ROWS : n;
+}
+
 static void scroll_grid(void)
 {
     memmove(grid[0], grid[1], sizeof(grid[0]) * (SCROLLBACK - 1));
@@ -68,7 +83,7 @@ static void new_line(void)
 
 static void put(uint32_t c)
 {
-    if (cursor_x == COLUMNS)
+    if (cursor_x >= visible_columns())
         new_line();
     grid[cursor_y][cursor_x++] = c;
 }
@@ -119,18 +134,19 @@ static void draw(widget_t *widget, canvas_t *canvas, rect_t area, void *user)
     color_t background = RGB(0x15, 0x13, 0x22), foreground = RGB(0xE6, 0xE3, 0xF2);
     canvas_fill(canvas, area, background);
 
-    int first = SCROLLBACK - ROWS - scroll_offset;
-    for (int row = 0; row < ROWS; row++) {
+    int rows = visible_rows(), columns = visible_columns();
+    int first = SCROLLBACK - rows - scroll_offset;
+    for (int row = 0; row < rows; row++) {
         char text[COLUMNS * 3 + 1];
         int n = 0;
-        for (int x = 0; x < COLUMNS; x++)
+        for (int x = 0; x < columns; x++)
             n += utf8_encode(grid[first + row][x] ? grid[first + row][x] : ' ', text + n);
         text[n] = '\0';
         canvas_text(canvas, area.x + PADDING, area.y + PADDING + row * TEXT_CELL_HEIGHT, text, foreground, 1);
     }
     /* cursor block */
     int screen_y = cursor_y - first;
-    if (scroll_offset == 0 && screen_y >= 0 && screen_y < ROWS && !shell_exited)
+    if (scroll_offset == 0 && screen_y >= 0 && screen_y < rows && !shell_exited)
         canvas_fill(canvas,
                     rect_make(area.x + PADDING + cursor_x * TEXT_CELL_WIDTH, area.y + PADDING + screen_y * TEXT_CELL_HEIGHT,
                               TEXT_CELL_WIDTH, TEXT_CELL_HEIGHT),
@@ -155,8 +171,8 @@ static bool key(widget_t *widget, const wm_event_t *e, void *user)
         scroll_offset += e->wheel * 3;
         if (scroll_offset < 0)
             scroll_offset = 0;
-        if (scroll_offset > SCROLLBACK - ROWS)
-            scroll_offset = SCROLLBACK - ROWS;
+        if (scroll_offset > SCROLLBACK - visible_rows())
+            scroll_offset = SCROLLBACK - visible_rows();
         gui_custom_redraw(view);
         return true;
     }
@@ -277,15 +293,17 @@ int main(void)
         fprintf(stderr, "terminal: no display server\n");
         return 1;
     }
-    window = gui_window_create(app, "Terminal", COLUMNS * TEXT_CELL_WIDTH + 2 * PADDING,
-                               ROWS * TEXT_CELL_HEIGHT + 2 * PADDING);
+    window = gui_window_create_ex(app, "Terminal", 0, 0, START_COLUMNS * TEXT_CELL_WIDTH + 2 * PADDING,
+                                  START_ROWS * TEXT_CELL_HEIGHT + 2 * PADDING, WM_WINDOW_RESIZABLE);
     if (!window)
         return 1;
     gui_window_set_theme(window, gui_theme_dark(1));
+    gui_window_keep_theme(window, true);
     for (int y = 0; y < SCROLLBACK; y++)
         for (int x = 0; x < COLUMNS; x++)
             grid[y][x] = ' ';
-    cursor_y = SCROLLBACK - ROWS;
+    /* The screen is the bottom of the grid; the cursor starts at the top of the first screen. */
+    cursor_y = SCROLLBACK - START_ROWS;
 
     gui_custom_t custom = { .draw = draw, .event = key, .min_width = 1, .min_height = 1 };
     view = gui_custom(&custom);

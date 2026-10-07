@@ -1,16 +1,26 @@
 /*
- * displayd: the display server (README section 35).
+ * displayd: the display server and window manager (README sections 35 and
+ * Phase 10).
  *
  * Owns display 0 and the input devices, keeps the windows of all clients
  * and composites them (graphics/compositor). Applications connect through
  * the named service "display" and speak graphics/window/protocol.h.
  *
- * Input routing:
- *   - keys go to the focused window, translated with the keyboard layout
- *   - the pointer goes to the window under it; while a button is held, the
- *     window that got the press keeps receiving the pointer (grab)
- *   - a press raises and focuses a window; dragging the title bar moves it;
- *     the close button sends WM_EVENT_CLOSE; Alt+Tab focuses the next window
+ * Window management:
+ *   - a press raises and focuses a window (panels never take the focus);
+ *     dragging the title bar moves it; the buttons minimize, maximize
+ *     (resizable windows) and close (WM_EVENT_CLOSE to the client)
+ *   - the grip in the bottom-right corner resizes: an outline follows the
+ *     pointer, and on release the client gets WM_EVENT_RESIZE and asks for a
+ *     surface of the new size (WM_RESIZE_WINDOW)
+ *   - maximized windows fill the work area (the screen minus reserved panels)
+ *   - Alt+Tab brings the next window to the front, restoring minimized ones
+ *   - subscribers (the desktop shell) get the window list after every change
+ *     and receive the notifications other clients send
+ *
+ * Input routing: keys go to the focused window, translated with the keyboard
+ * layout; the pointer goes to the window under it, and while a button is
+ * held, the window that got the press keeps the pointer (grab).
  *
  * /etc/display.conf: keymap=us|de, autostart=PROGRAM (repeatable).
  */
@@ -37,6 +47,7 @@
 typedef struct client {
     jelly_handle_t channel;
     bool           used;
+    bool           subscribed;   /* gets the window list and notifications */
 } client_t;
 
 typedef struct {
@@ -51,12 +62,15 @@ static compositor_t compositor;
 static client_t clients[MAX_CLIENTS];
 static window_record_t records[COMPOSITOR_MAX_WINDOWS];
 static jelly_handle_t input_queue, service_channel;
+static bool list_changed;
 
 /* Input state */
 static int32_t pointer_x, pointer_y;
 static uint32_t buttons, modifiers;
-static comp_window_t *grab, *hover, *drag;
+static comp_window_t *grab, *hover, *drag, *sizing;
 static int32_t drag_dx, drag_dy;
+static window_part_t pressed_part;
+static comp_window_t *pressed_window;
 
 static void log_message(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static void log_message(const char *format, ...)
@@ -68,6 +82,11 @@ static void log_message(const char *format, ...)
     printf("\n");
     fflush(stdout);
     va_end(args);
+}
+
+static bool is_normal(const comp_window_t *w)
+{
+    return !(w->flags & (WM_WINDOW_PANEL | WM_WINDOW_POPUP));
 }
 
 /* --- Records -------------------------------------------------------------------- */
@@ -84,7 +103,7 @@ static window_record_t *record_of(comp_window_t *w)
 static window_record_t *find_record(client_t *client, uint32_t id)
 {
     for (int i = 0; i < COMPOSITOR_MAX_WINDOWS; i++) {
-        if (records[i].window && records[i].client == client && records[i].window->id == id)
+        if (records[i].window && records[i].window->id == id && (!client || records[i].client == client))
             return &records[i];
     }
     return NULL;
@@ -111,11 +130,48 @@ static void send_simple_event(comp_window_t *w, uint32_t type)
     send_event(w, &e);
 }
 
-/* --- Focus ---------------------------------------------------------------------- */
+static void propose_size(comp_window_t *w, int32_t width, int32_t height)
+{
+    wm_event_t e = { .type = WM_EVENT_RESIZE, .x = width, .y = height };
+    send_event(w, &e);
+}
+
+/* --- Window list for subscribers ------------------------------------------------- */
+
+static void send_window_list(client_t *client)
+{
+    for (int i = 0; i < compositor.count; i++) {
+        comp_window_t *w = compositor.windows[i];
+        if (!is_normal(w))
+            continue;
+        wm_message_t m = { .type = WM_WINDOW_LIST, .window = w->id };
+        memcpy(m.title, w->title, WM_TITLE_MAX);
+        m.flags = (w->minimized ? WM_STATE_MINIMIZED : 0) | (w->maximized ? WM_STATE_MAXIMIZED : 0) |
+                  (w->focused ? WM_STATE_FOCUSED : 0);
+        send_to(client, &m);
+    }
+    wm_message_t end = { .type = WM_WINDOW_LIST_END };
+    send_to(client, &end);
+}
+
+static void publish_window_list(void)
+{
+    if (!list_changed)
+        return;
+    list_changed = false;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].used && clients[i].subscribed)
+            send_window_list(&clients[i]);
+    }
+}
+
+/* --- Focus and window states ---------------------------------------------------- */
 
 static void focus(comp_window_t *w)
 {
     comp_window_t *old = compositor_focused(&compositor);
+    if (w && (w->flags & WM_WINDOW_PANEL))
+        return; /* panels never take the focus */
     if (old == w)
         return;
     if (old)
@@ -125,18 +181,66 @@ static void focus(comp_window_t *w)
         compositor_raise(&compositor, w);
         send_simple_event(w, WM_EVENT_FOCUS_IN);
     }
+    list_changed = true;
 }
 
 static void focus_topmost(void)
 {
-    focus(compositor.count ? compositor.windows[compositor.count - 1] : NULL);
+    focus(compositor_topmost(&compositor));
+}
+
+static void set_minimized(comp_window_t *w, bool minimized)
+{
+    if (!is_normal(w) || w->minimized == minimized)
+        return;
+    compositor_set_minimized(&compositor, w, minimized);
+    list_changed = true;
+    if (minimized) {
+        if (grab == w)
+            grab = NULL;
+        if (drag == w)
+            drag = NULL;
+        focus_topmost();
+    } else {
+        focus(w);
+    }
+}
+
+static void activate(comp_window_t *w)
+{
+    set_minimized(w, false);
+    compositor_raise(&compositor, w);
+    focus(w);
+}
+
+static void set_maximized(comp_window_t *w, bool maximized)
+{
+    if (!(w->flags & WM_WINDOW_RESIZABLE) || w->maximized == maximized)
+        return;
+    if (maximized) {
+        rect_t area = compositor_work_area(&compositor);
+        w->restore = compositor_content_rect(w);
+        w->maximized = true;
+        compositor_move(&compositor, w, area.x + BORDER_WIDTH, area.y + TITLE_BAR_HEIGHT);
+        propose_size(w, area.w - 2 * BORDER_WIDTH, area.h - TITLE_BAR_HEIGHT - BORDER_WIDTH);
+    } else {
+        w->maximized = false;
+        compositor_move(&compositor, w, w->restore.x, w->restore.y);
+        propose_size(w, w->restore.w, w->restore.h);
+    }
+    list_changed = true;
 }
 
 static void focus_next(void)
 {
-    /* Alt+Tab: bring the bottom window to the top. */
-    if (compositor.count > 1)
-        focus(compositor.windows[0]);
+    /* Alt+Tab: bring the bottom normal window (also a minimized one) to the top. */
+    for (int i = 0; i < compositor.count; i++) {
+        comp_window_t *w = compositor.windows[i];
+        if (is_normal(w) && !w->focused) {
+            activate(w);
+            return;
+        }
+    }
 }
 
 /* --- Windows -------------------------------------------------------------------- */
@@ -151,12 +255,35 @@ static void destroy_window(window_record_t *r)
         hover = NULL;
     if (drag == w)
         drag = NULL;
+    if (sizing == w) {
+        sizing = NULL;
+        compositor_set_outline(&compositor, rect_make(0, 0, 0, 0));
+    }
+    if (pressed_window == w)
+        pressed_window = NULL;
     void *pixels = w->content.pixels;
     compositor_remove(&compositor, w);
     jelly_memory_unmap(pixels, r->mapping_size);
     memset(r, 0, sizeof(*r));
+    list_changed = true;
     if (was_focused)
         focus_topmost();
+}
+
+/* A new shared surface of width x height: mapped for us, the handle for the client. */
+static status_t make_surface(int32_t width, int32_t height, size_t *size, void **pixels, jelly_handle_t *memory)
+{
+    if (width <= 0 || height <= 0 || width > WM_WINDOW_MAX_SIZE || height > WM_WINDOW_MAX_SIZE)
+        return STATUS_INVALID_ARGUMENT;
+    *size = ((size_t)width * height * 4 + 4095) & ~(size_t)4095;
+    status_t status = jelly_shm_create(*size, memory);
+    if (!STATUS_IS_ERROR(status))
+        status = jelly_shm_map(*memory, JELLY_MEMORY_WRITE, pixels);
+    if (STATUS_IS_ERROR(status) && *memory) {
+        jelly_handle_close(*memory);
+        *memory = JELLY_HANDLE_INVALID;
+    }
+    return status;
 }
 
 static void create_window(client_t *client, const wm_message_t *request)
@@ -165,36 +292,26 @@ static void create_window(client_t *client, const wm_message_t *request)
     window_record_t *r = NULL;
     jelly_handle_t memory = JELLY_HANDLE_INVALID;
     void *pixels = NULL;
-    int32_t width = request->width, height = request->height;
+    size_t size = 0;
 
     for (int i = 0; i < COMPOSITOR_MAX_WINDOWS && !r; i++) {
         if (!records[i].window)
             r = &records[i];
     }
-    size_t size = ((size_t)width * height * 4 + 4095) & ~(size_t)4095;
-    status_t status = STATUS_SUCCESS;
-    if (width <= 0 || height <= 0 || width > WM_WINDOW_MAX_SIZE || height > WM_WINDOW_MAX_SIZE)
-        status = STATUS_INVALID_ARGUMENT;
-    else if (!r)
-        status = STATUS_LIMIT_EXCEEDED;
-    if (!STATUS_IS_ERROR(status))
-        status = jelly_shm_create(size, &memory);
-    if (!STATUS_IS_ERROR(status))
-        status = jelly_shm_map(memory, JELLY_MEMORY_WRITE, &pixels);
+    status_t status = r ? make_surface(request->width, request->height, &size, &pixels, &memory)
+                        : STATUS_LIMIT_EXCEEDED;
     if (STATUS_IS_ERROR(status)) {
-        if (memory)
-            jelly_handle_close(memory);
         reply.status = (int32_t)status;
         send_to(client, &reply);
         return;
     }
 
     canvas_t content;
-    canvas_init(&content, pixels, width, height, width);
+    canvas_init(&content, pixels, request->width, request->height, request->width);
     char title[WM_TITLE_MAX];
     memcpy(title, request->title, WM_TITLE_MAX);
     title[WM_TITLE_MAX - 1] = '\0';
-    comp_window_t *w = compositor_add(&compositor, content, title, request->flags, client);
+    comp_window_t *w = compositor_add(&compositor, content, title, request->flags, request->x, request->y, client);
     if (!w) {
         jelly_memory_unmap(pixels, size);
         jelly_handle_close(memory);
@@ -209,12 +326,59 @@ static void create_window(client_t *client, const wm_message_t *request)
     reply.window = w->id;
     reply.x = w->x;
     reply.y = w->y;
+    reply.width = request->width;
+    reply.height = request->height;
+    reply.stride = (uint32_t)request->width;
+    /* The surface memory moves to the client; our mapping keeps it alive for us. */
+    jelly_channel_send_handles(client->channel, &reply, sizeof(reply), &memory, 1);
+    list_changed = true;
+    focus(w);
+}
+
+static void resize_window(client_t *client, const wm_message_t *request)
+{
+    wm_message_t reply = { .type = WM_WINDOW_RESIZED, .window = request->window };
+    window_record_t *r = find_record(client, request->window);
+    jelly_handle_t memory = JELLY_HANDLE_INVALID;
+    void *pixels = NULL;
+    size_t size = 0;
+    int32_t width = request->width < MIN_WINDOW_WIDTH ? MIN_WINDOW_WIDTH : request->width;
+    int32_t height = request->height < 1 ? 1 : request->height;
+
+    status_t status = r ? make_surface(width, height, &size, &pixels, &memory) : STATUS_NOT_FOUND;
+    if (STATUS_IS_ERROR(status)) {
+        reply.status = (int32_t)status;
+        send_to(client, &reply);
+        return;
+    }
+    comp_window_t *w = r->window;
+    void *old = w->content.pixels;
+    canvas_t content;
+    canvas_init(&content, pixels, width, height, width);
+    compositor_set_content(&compositor, w, content);
+    jelly_memory_unmap(old, r->mapping_size);
+    r->mapping_size = size;
+    r->present_pending = false;
+
     reply.width = width;
     reply.height = height;
     reply.stride = (uint32_t)width;
-    /* The surface memory moves to the client; our mapping keeps it alive for us. */
     jelly_channel_send_handles(client->channel, &reply, sizeof(reply), &memory, 1);
-    focus(w);
+}
+
+static void broadcast_settings(void)
+{
+    for (int c = 0; c < MAX_CLIENTS; c++) {
+        if (!clients[c].used)
+            continue;
+        /* One event per client, for one of its windows (toolkits apply settings app-wide). */
+        for (int i = 0; i < COMPOSITOR_MAX_WINDOWS; i++) {
+            if (records[i].window && records[i].client == &clients[c]) {
+                send_simple_event(records[i].window, WM_EVENT_SETTINGS);
+                break;
+            }
+        }
+    }
 }
 
 static void handle_request(client_t *client, const wm_message_t *m)
@@ -231,6 +395,9 @@ static void handle_request(client_t *client, const wm_message_t *m)
     case WM_CREATE_WINDOW:
         create_window(client, m);
         break;
+    case WM_RESIZE_WINDOW:
+        resize_window(client, m);
+        break;
     case WM_PRESENT:
         if ((r = find_record(client, m->window))) {
             compositor_damage_content(&compositor, r->window, rect_make(m->x, m->y, m->width, m->height));
@@ -243,11 +410,47 @@ static void handle_request(client_t *client, const wm_message_t *m)
             memcpy(title, m->title, WM_TITLE_MAX);
             title[WM_TITLE_MAX - 1] = '\0';
             compositor_set_title(&compositor, r->window, title);
+            list_changed = true;
+        }
+        break;
+    case WM_SET_STATE:
+        if ((r = find_record(client, m->window))) {
+            set_maximized(r->window, (m->flags & WM_STATE_MAXIMIZED) != 0);
+            set_minimized(r->window, (m->flags & WM_STATE_MINIMIZED) != 0);
         }
         break;
     case WM_DESTROY_WINDOW:
         if ((r = find_record(client, m->window)))
             destroy_window(r);
+        break;
+    case WM_SUBSCRIBE_WINDOWS:
+        client->subscribed = true;
+        send_window_list(client);
+        break;
+    case WM_ACTIVATE_WINDOW:
+        if ((r = find_record(NULL, m->window)) && is_normal(r->window))
+            activate(r->window);
+        break;
+    case WM_MINIMIZE_WINDOW:
+        if ((r = find_record(NULL, m->window)))
+            set_minimized(r->window, true);
+        break;
+    case WM_SETTINGS_CHANGED:
+        broadcast_settings();
+        break;
+    case WM_SET_KEYMAP: {
+        char name[WM_TITLE_MAX];
+        memcpy(name, m->title, WM_TITLE_MAX);
+        name[WM_TITLE_MAX - 1] = '\0';
+        if (keymap_select(name))
+            log_message("keymap %s", name);
+        break;
+    }
+    case WM_NOTIFY:
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i].used && clients[i].subscribed)
+                send_to(&clients[i], m);
+        }
         break;
     }
 }
@@ -260,6 +463,7 @@ static void drop_client(client_t *client)
     }
     jelly_handle_close(client->channel);
     client->used = false;
+    client->subscribed = false;
 }
 
 static void serve_client(client_t *client)
@@ -270,12 +474,8 @@ static void serve_client(client_t *client)
         status_t status = jelly_channel_receive(client->channel, &m, sizeof(m), &size);
         if (status == STATUS_WOULD_BLOCK)
             return;
-        if (status == STATUS_BUFFER_TOO_SMALL) {
-            /* Not a protocol message: the client is broken. */
-            drop_client(client);
-            return;
-        }
         if (STATUS_IS_ERROR(status)) {
+            /* gone, or not speaking the protocol */
             drop_client(client);
             return;
         }
@@ -305,6 +505,7 @@ static void accept_clients(void)
                 continue;
             }
             slot->used = true;
+            slot->subscribed = false;
             slot->channel = handles[i];
         }
     }
@@ -326,6 +527,14 @@ static void pointer_event(comp_window_t *w, uint32_t type, uint32_t button, int3
     send_event(w, &e);
 }
 
+static rect_t sizing_rect(void)
+{
+    rect_t frame = compositor_frame_rect(sizing);
+    int32_t width = pointer_x - frame.x + 1, height = pointer_y - frame.y + 1;
+    int32_t min_w = MIN_WINDOW_WIDTH + 2 * BORDER_WIDTH, min_h = MIN_WINDOW_HEIGHT + TITLE_BAR_HEIGHT + BORDER_WIDTH;
+    return rect_make(frame.x, frame.y, width < min_w ? min_w : width, height < min_h ? min_h : height);
+}
+
 static void pointer_moved(void)
 {
     compositor_move_pointer(&compositor, pointer_x, pointer_y);
@@ -333,12 +542,15 @@ static void pointer_moved(void)
         compositor_move(&compositor, drag, pointer_x - drag_dx, pointer_y - drag_dy);
         return;
     }
+    if (sizing) {
+        compositor_set_outline(&compositor, sizing_rect());
+        return;
+    }
 
     window_part_t part;
     comp_window_t *under = compositor_hit(&compositor, pointer_x, pointer_y, &part);
     for (int i = 0; i < compositor.count; i++)
-        compositor_set_close_hover(&compositor, compositor.windows[i],
-                                   compositor.windows[i] == under && part == PART_CLOSE);
+        compositor_set_hover(&compositor, compositor.windows[i], compositor.windows[i] == under ? part : PART_NONE);
 
     comp_window_t *target = grab ? grab : (part == PART_CONTENT ? under : NULL);
     if (hover && hover != target)
@@ -355,25 +567,53 @@ static void button_event(uint32_t button, bool pressed)
         buttons |= bit;
         window_part_t part;
         comp_window_t *w = compositor_hit(&compositor, pointer_x, pointer_y, &part);
+        pressed_window = w;
+        pressed_part = part;
         if (!w) {
-            focus(NULL);
+            comp_window_t *focused = compositor_focused(&compositor);
+            if (focused && (focused->flags & WM_WINDOW_POPUP))
+                focus_topmost(); /* a click outside closes menus */
             return;
         }
-        focus(w);
-        if (part == PART_TITLE && button == JELLY_BUTTON_LEFT) {
+        /* Panels never take the focus: a click on the taskbar leaves an open menu to the taskbar. */
+        if (!(w->flags & WM_WINDOW_PANEL))
+            focus(w);
+        if (part == PART_TITLE && button == JELLY_BUTTON_LEFT && !w->maximized) {
             drag = w;
             drag_dx = pointer_x - w->x;
             drag_dy = pointer_y - w->y;
-        } else if (part == PART_CLOSE && button == JELLY_BUTTON_LEFT) {
-            send_simple_event(w, WM_EVENT_CLOSE);
+        } else if (part == PART_RESIZE && button == JELLY_BUTTON_LEFT) {
+            sizing = w;
+            compositor_set_outline(&compositor, sizing_rect());
         } else if (part == PART_CONTENT) {
             grab = w;
             pointer_event(w, WM_EVENT_MOUSE_DOWN, button, 0);
         }
     } else {
         buttons &= ~bit;
-        if (drag && button == JELLY_BUTTON_LEFT)
-            drag = NULL;
+        if (button == JELLY_BUTTON_LEFT) {
+            window_part_t part;
+            comp_window_t *w = compositor_hit(&compositor, pointer_x, pointer_y, &part);
+            /* Title bar buttons act on release over the same button. */
+            if (w && w == pressed_window && part == pressed_part) {
+                if (part == PART_CLOSE)
+                    send_simple_event(w, WM_EVENT_CLOSE);
+                else if (part == PART_MAXIMIZE)
+                    set_maximized(w, !w->maximized);
+                else if (part == PART_MINIMIZE)
+                    set_minimized(w, true);
+            }
+            if (drag)
+                drag = NULL;
+            if (sizing) {
+                rect_t r = sizing_rect();
+                comp_window_t *s = sizing;
+                sizing = NULL;
+                compositor_set_outline(&compositor, rect_make(0, 0, 0, 0));
+                propose_size(s, r.w - 2 * BORDER_WIDTH, r.h - TITLE_BAR_HEIGHT - BORDER_WIDTH);
+            }
+            pressed_window = NULL;
+        }
         if (grab) {
             comp_window_t *w = grab;
             if (!buttons)
@@ -541,7 +781,6 @@ int main(void)
 
     load_config();
     compositor_init(&compositor, &display);
-    compositor.status_text = "Alt+Tab: next window";
     pointer_x = compositor.pointer_x;
     pointer_y = compositor.pointer_y;
     compositor_render(&compositor);
@@ -572,6 +811,7 @@ int main(void)
                 serve_client(owners[i]);
         }
 
+        publish_window_list();
         compositor_render(&compositor);
         for (int i = 0; i < COMPOSITOR_MAX_WINDOWS; i++) {
             if (records[i].window && records[i].present_pending) {

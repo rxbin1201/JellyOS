@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Pack a directory tree into a JellyOS initramfs (cpio "newc" format).
 
-usage: mkinitramfs.py ROOT OUTPUT
+usage: mkinitramfs.py ROOT OUTPUT [OWNERS]
 
-Every entry belongs to root (uid 0, gid 0) and keeps its permission bits.
+Entries keep their permission bits and belong to root (uid 0, gid 0),
+unless the OWNERS file ("PATH UID GID" per line) assigns PATH and
+everything below it to someone else.
 Directories come before their contents; the archive ends with TRAILER!!!.
 The kernel unpacks it into the root ramfs (fs/initramfs/initramfs.c).
 """
@@ -20,13 +22,24 @@ def pad4(data: bytearray) -> None:
         data.append(0)
 
 
+OWNERS = []
+
+
+def owner_of(name: str):
+    for path, uid, gid in OWNERS:
+        if name == path or name.startswith(path + "/"):
+            return uid, gid
+    return 0, 0
+
+
 def entry(out: bytearray, name: str, mode: int, body: bytes, inode: int) -> None:
     encoded = name.encode() + b"\0"
+    uid, gid = owner_of(name)
     fields = [
         inode,          # c_ino
         mode,           # c_mode
-        0,              # c_uid
-        0,              # c_gid
+        uid,            # c_uid
+        gid,            # c_gid
         1,              # c_nlink
         0,              # c_mtime
         len(body),      # c_filesize
@@ -43,10 +56,15 @@ def entry(out: bytearray, name: str, mode: int, body: bytes, inode: int) -> None
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         print(__doc__.strip().splitlines()[2], file=sys.stderr)
         return 2
     root, output = sys.argv[1], sys.argv[2]
+    if len(sys.argv) == 4:
+        for line in open(sys.argv[3]):
+            words = line.split("#")[0].split()
+            if len(words) == 3:
+                OWNERS.append((words[0].strip("/"), int(words[1]), int(words[2])))
     out = bytearray()
     inode = 1
 

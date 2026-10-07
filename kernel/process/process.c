@@ -24,6 +24,12 @@ typedef struct {
 } mapping_t;
 
 static uint64_t next_pid = 1;
+static uint32_t live_processes;
+
+uint32_t process_live_count(void)
+{
+    return live_processes;
+}
 
 static process_t *process_of(object_t *object)
 {
@@ -67,6 +73,7 @@ static void finalize(process_t *p)
 
 static void process_destroy(object_t *object)
 {
+    live_processes--;
     process_t *p = process_of(object);
     finalize(p);
     kfree(p);
@@ -90,6 +97,7 @@ status_t process_create(const char *name, process_t **process)
 
     object_init(&p->object, OBJECT_PROCESS, &process_ops);
     p->pid = next_pid++;
+    live_processes++;
     copy_name(p->name, sizeof(p->name), name);
     p->credentials = (credentials_t){ UID_ROOT, GID_ROOT };
     p->limits = (process_limits_t){ DEFAULT_MAX_HANDLES, DEFAULT_MAX_THREADS, DEFAULT_MAX_MEMORY_PAGES };

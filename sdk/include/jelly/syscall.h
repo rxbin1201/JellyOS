@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define JELLY_SYSCALL_ABI_VERSION 5
+#define JELLY_SYSCALL_ABI_VERSION 6
 
 typedef uint32_t jelly_handle_t;
 #define JELLY_HANDLE_INVALID 0u
@@ -94,6 +94,10 @@ enum {
     SYS_DISPLAY_ACQUIRE  = 65, /* (uint32_t index, jelly_handle_t *framebuffer)               root only, exclusive */
     SYS_INPUT_OPEN       = 66, /* (jelly_handle_t *input)                                     root only */
     SYS_INPUT_READ       = 67, /* (handle, jelly_input_event_t *events, size_t count, size_t *read)  WOULD_BLOCK if empty */
+    /* ABI version 6: desktop */
+    SYS_PROCESS_SPAWN_AS = 68, /* (const jelly_spawn_t *request, uint32_t uid, uint32_t gid, jelly_handle_t *process)  root */
+    SYS_CLOCK_REALTIME   = 69, /* (uint64_t *ns)                      ns since 1970-01-01 UTC; NOT_SUPPORTED without RTC */
+    SYS_SYSTEM_INFO      = 70, /* (jelly_system_info_t *info) */
     SYS_COUNT
 };
 
@@ -305,6 +309,18 @@ typedef struct {
     uint32_t device;          /* source device number */
     uint32_t reserved;
 } jelly_input_event_t;
+
+/* --- Desktop (ABI version 6) ------------------------------------------------- */
+
+typedef struct {
+    char     version[32];     /* kernel version, e.g. "0.10.0" */
+    uint64_t uptime_ns;
+    uint64_t memory_total;    /* bytes of RAM */
+    uint64_t memory_free;
+    uint32_t processes;       /* live processes */
+    uint32_t abi_version;
+    uint64_t realtime_ns;     /* wall clock, 0 if unknown */
+} jelly_system_info_t;
 
 /* SYS_SYSTEM_POWER actions */
 #define JELLY_POWER_OFF    1

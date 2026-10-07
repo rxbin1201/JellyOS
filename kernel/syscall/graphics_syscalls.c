@@ -12,6 +12,11 @@
 #include "memory/heap.h"
 #include "process/process.h"
 #include "process/usercopy.h"
+#include "core/string.h"
+#include "core/version.h"
+#include "memory/pmm.h"
+#include "time/clock.h"
+#include "time/rtc.h"
 
 #include <jelly/syscall.h>
 
@@ -244,4 +249,29 @@ status_t sys_input_read(const uint64_t *a)
         return count ? STATUS_WOULD_BLOCK : put_user_u64(a[3], 0);
     status = copy_to_user(a[1], events, taken * sizeof(events[0]));
     return STATUS_IS_ERROR(status) ? status : put_user_u64(a[3], taken);
+}
+
+/* --- Desktop: time and system information (ABI 6) ---------------------------- */
+
+status_t sys_clock_realtime(const uint64_t *a)
+{
+    if (!rtc_available())
+        return STATUS_NOT_SUPPORTED;
+    return put_user_u64(a[0], clock_realtime_ns());
+}
+
+status_t sys_system_info(const uint64_t *a)
+{
+    jelly_system_info_t info;
+    pmm_stats_t memory;
+    memset(&info, 0, sizeof(info));
+    strcpy(info.version, KERNEL_VERSION_STRING);
+    pmm_get_stats(&memory);
+    info.uptime_ns = clock_monotonic_ns();
+    info.memory_total = memory.total_bytes;
+    info.memory_free = memory.free_bytes;
+    info.processes = process_live_count();
+    info.abi_version = JELLY_SYSCALL_ABI_VERSION;
+    info.realtime_ns = clock_realtime_ns();
+    return copy_to_user(a[0], &info, sizeof(info));
 }

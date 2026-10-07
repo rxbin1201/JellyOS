@@ -88,6 +88,8 @@ status_t   process_start_thread(process_t *process, uint64_t entry, uint64_t sp,
 status_t   process_copy_to(process_t *process, uint64_t address, const void *data, size_t size);
 
 process_t *process_current(void);
+/* Processes that exist (running or not yet destroyed). */
+uint32_t   process_live_count(void);
 
 /* Terminate: record the code, kill all threads. */
 void       process_exit(process_t *process, int32_t code, const char *reason);
