@@ -87,3 +87,15 @@ works on the graphical console and over the serial port.
 | Previous kernel | `previous kernel` (counted for rollback) |
 | Recovery entry | `recovery` |
 | Any other entry | `manual` |
+
+## Kernel command line options for hardware
+
+Set in `cmdline=` of an entry:
+
+| Option | Meaning |
+| --- | --- |
+| `disks=rw` | Disks built into the machine (NVMe, SATA) may be written; without it they are read-only |
+| `nodriver=<name>[,<name>...]` | Keep these drivers from starting (names as in the log: `e1000`, `rtl8168`, `intel-hda`, `intel-gpu`, ...) |
+| `igpu=native` / `igpu=WIDTHxHEIGHT[@HZ]` | Intel graphics: switch to the monitor's own or the given mode ([graphics.md](graphics.md)). The default entry has `igpu=native`; the entry `FirmwareGrafik` does not |
+| `fbconsole=0` | No kernel console on the screen |
+

@@ -198,6 +198,12 @@ covers:
 
 `make test` attaches a VirtIO keyboard and tablet in both QEMU runs.
 
+The kernel test `display_framebuffer_can_be_replaced` does what a graphics
+driver does after a mode switch (Phase 12, Intel graphics): it gives display 0
+another framebuffer and size, checks that the console repaints into it and
+that a display server would get the new memory, and puts the real screen
+back. The Intel driver itself cannot run in QEMU.
+
 [`tests/kernel/desktop_tests.c`](../../tests/kernel/desktop_tests.c)
 (Phase 10) checks the RTC wall clock (a plausible date that advances with
 the monotonic clock) and the live process count of `SYS_SYSTEM_INFO`.

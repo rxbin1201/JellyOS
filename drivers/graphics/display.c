@@ -5,6 +5,7 @@
 
 #include "drivers/graphics/display.h"
 
+#include "core/arch.h"
 #include "core/boot.h"
 #include "core/cmdline.h"
 #include "core/log.h"
@@ -64,6 +65,41 @@ void display_init_boot_framebuffer(void)
     char setting[8];
     if (!cmdline_value("fbconsole", setting, sizeof(setting)) || strcmp(setting, "0") != 0)
         fb_console_init(d);
+}
+
+status_t display_set_framebuffer(uint32_t index, uint64_t phys, uint32_t width, uint32_t height, uint32_t pitch)
+{
+    display_t *d = display_get(index);
+
+    if (!d)
+        return STATUS_NOT_FOUND;
+    if (d->acquired)
+        return STATUS_BUSY;
+    if (!width || !height || pitch < width * 4 || (phys & (PAGE_SIZE - 1)))
+        return STATUS_INVALID_ARGUMENT;
+    uint64_t size = align_up((uint64_t)pitch * height, PAGE_SIZE);
+    volatile uint32_t *pixels = (volatile uint32_t *)vmm_map_mmio(phys, size, VM_WRITE_COMBINING);
+    if (!pixels)
+        return STATUS_OUT_OF_MEMORY;
+
+    /*
+     * The console draws from interrupt handlers, too, with a text grid laid out for the old size: it stops
+     * drawing first, and fb_console_resize() switches it to the new size in one step.
+     */
+    if (index == 0)
+        fb_console_set_active(false);
+    uint64_t saved = arch_interrupts_save();
+    d->pixels = pixels;
+    d->phys = phys;
+    d->info.width = width;
+    d->info.height = height;
+    d->info.pitch = pitch;
+    d->info.size = size;
+    arch_interrupts_restore(saved);
+    if (index == 0)
+        fb_console_resize(d);
+    klog_info("display: %u is now %ux%u (framebuffer at 0x%lx, pitch %u)", index, width, height, phys, pitch);
+    return STATUS_SUCCESS;
 }
 
 static void release(void *context)

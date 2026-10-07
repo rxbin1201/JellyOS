@@ -167,6 +167,31 @@ void fb_console_set_active(bool on)
     arch_interrupts_restore(flags);
 }
 
+void fb_console_resize(display_t *d)
+{
+    if (display != d)
+        return; /* the console is off (fbconsole=0) or on another display */
+    uint32_t new_columns = d->info.width / FONT_WIDTH, new_rows = d->info.height / FONT_HEIGHT;
+    uint8_t *new_cells = kmalloc(new_columns * new_rows), *old;
+
+    if (!new_cells || !new_columns || !new_rows) {
+        kfree(new_cells);
+        return; /* the console stays off the screen: its grid does not fit the new size */
+    }
+    memset(new_cells, ' ', new_columns * new_rows);
+    uint64_t flags = arch_interrupts_save();
+    old = cells;
+    cells = new_cells;
+    columns = new_columns;
+    rows = new_rows;
+    cursor_x = cursor_y = 0;
+    active = true;
+    redraw();
+    arch_interrupts_restore(flags);
+    kfree(old);
+    klog_replay(console_write); /* fill the new screen with what was logged so far */
+}
+
 void fb_console_init(display_t *d)
 {
     columns = d->info.width / FONT_WIDTH;

@@ -30,6 +30,12 @@ void       display_init_boot_framebuffer(void);
 display_t *display_get(uint32_t index);
 uint32_t   display_count(void);
 
+/*
+ * A graphics driver switched modes: display `index` now has this framebuffer (32 bits per pixel, the pixel
+ * format stays). BUSY once a display server owns the display. The kernel console moves to the new screen.
+ */
+status_t   display_set_framebuffer(uint32_t index, uint64_t phys, uint32_t width, uint32_t height, uint32_t pitch);
+
 /* Give the framebuffer to a display server: a memory object to map (shared memory handle). */
 status_t   display_acquire(uint32_t index, object_t **memory);
 
@@ -46,6 +52,8 @@ void       early_fb_init(const boot_info_t *info);
 
 /* Framebuffer console (drivers/graphics/fb_console.c) */
 void       fb_console_init(display_t *display);
+/* The display's size or framebuffer changed (the console was set inactive before): new text grid, repaint, active. */
+void       fb_console_resize(display_t *display);
 /* The display was acquired (false) or released (true): stop or resume drawing. */
 void       fb_console_set_active(bool active);
 

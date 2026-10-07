@@ -12,7 +12,10 @@
 #include "drivers/graphics/display.h"
 #include "input/input.h"
 #include "ipc/ipc.h"
+#include "core/log.h"
 #include "memory/heap.h"
+#include "memory/layout.h"
+#include "memory/pmm.h"
 
 #include <jelly/input.h>
 #include <jelly/syscall.h>
@@ -158,4 +161,51 @@ KTEST(display_acquire_is_exclusive)
     object_release(memory);
     KEXPECT(!d->acquired);
     KEXPECT(display_acquire(99, &again) == STATUS_NOT_FOUND);
+}
+
+/*
+ * What a graphics driver does after switching modes: display 0 gets another
+ * framebuffer and size, and the kernel console moves there. Here the "new
+ * screen" is plain memory, and the real one is put back afterwards.
+ */
+KTEST(display_framebuffer_can_be_replaced)
+{
+    display_t *d = display_get(0);
+    object_t *memory;
+    uint64_t phys;
+
+    if (!d)
+        return;
+    uint64_t old_phys = d->phys;
+    uint32_t old_width = d->info.width, old_height = d->info.height, old_pitch = d->info.pitch;
+    const uint32_t width = 1000, height = 500, pitch = 4032; /* a pitch wider than the picture, as hardware has it */
+    size_t pages = (size_t)(align_up((uint64_t)pitch * height, PAGE_SIZE) / PAGE_SIZE);
+    KASSERT(pmm_alloc_pages(pages, &phys) == STATUS_SUCCESS);
+    volatile uint32_t *memory_view = phys_to_virt(phys);
+
+    KEXPECT(display_set_framebuffer(99, phys, width, height, pitch) == STATUS_NOT_FOUND);
+    KEXPECT(display_set_framebuffer(0, phys, width, height, width * 4 - 4) == STATUS_INVALID_ARGUMENT);
+    KEXPECT(display_set_framebuffer(0, phys + 1, width, height, pitch) == STATUS_INVALID_ARGUMENT);
+
+    KASSERT(display_set_framebuffer(0, phys, width, height, pitch) == STATUS_SUCCESS);
+    KEXPECT(d->info.width == width && d->info.height == height && d->info.pitch == pitch && d->phys == phys);
+    KEXPECT(d->info.size >= (uint64_t)pitch * height);
+    /* The console repainted the new screen: its background fills the corners, and a message draws glyphs. */
+    uint32_t background = memory_view[(height - 1) * (pitch / 4) + width - 1];
+    KEXPECT(memory_view[0] == background || memory_view[1] == background);
+    klog_info("ktest: this line is drawn into the replaced framebuffer");
+    bool drawn = false;
+    for (uint32_t i = 0; i < (pitch / 4) * 64 && !drawn; i++)
+        drawn = memory_view[i] != background;
+    KEXPECT(drawn);
+
+    /* A display server gets the new memory; while it has it, the framebuffer cannot be replaced. */
+    KASSERT(display_acquire(0, &memory) == STATUS_SUCCESS);
+    KEXPECT(shm_size(memory) == d->info.size);
+    KEXPECT(display_set_framebuffer(0, old_phys, old_width, old_height, old_pitch) == STATUS_BUSY);
+    object_release(memory);
+
+    KASSERT(display_set_framebuffer(0, old_phys, old_width, old_height, old_pitch) == STATUS_SUCCESS);
+    KEXPECT(d->info.width == old_width && d->info.height == old_height && d->phys == old_phys);
+    pmm_free_pages(phys, pages);
 }

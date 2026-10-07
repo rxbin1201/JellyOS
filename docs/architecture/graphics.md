@@ -175,3 +175,46 @@ The shell can start them from the console without waiting: `guidemo &`.
 
 `make run` adds a VirtIO keyboard and tablet. The QEMU window shows the
 desktop; the serial console stays on the terminal.
+
+## Intel graphics driver (Phase 12)
+
+[`drivers/graphics/intel_gpu.c`](../../drivers/graphics/intel_gpu.c) handles the
+display part of Intel's integrated graphics of generation 9 (Skylake to
+Comet Lake, HD/UHD Graphics 5xx/6xx). It was ported from the previous
+JellyOS implementation and exists for one purpose so far: showing the
+monitor's own resolution where the firmware only offers a small mode.
+
+Without an option it changes nothing and reports what it finds (`dmesg igpu`):
+the pipe that shows the boot framebuffer, the port and kind of connection,
+the timings, the DisplayPort link the firmware trained, and the detailed
+timings from the monitor's EDID (read over the AUX channel for DisplayPort,
+over GMBUS for HDMI).
+
+With `igpu=native` or `igpu=WIDTHxHEIGHT[@HZ]` on the kernel command line (the
+default boot entry has `igpu=native`; the entry `FirmwareGrafik` leaves the
+screen as the firmware set it up) it allocates a framebuffer of that
+size, enters it into the global graphics translation table and switches:
+
+| Situation | What happens |
+| --- | --- |
+| The firmware already drives the monitor at that timing and scales a smaller picture up | The pipe scaler is turned off and the plane gets the full size; the pipe keeps running |
+| DisplayPort, another timing | Pipe off, new timings and M/N values, pipe on; the link stays as the firmware trained it. Only modes that this link and the display clock can carry |
+| HDMI, another timing | Pipe, port and PLL off, PLL reprogrammed for the pixel clock (up to 300 MHz), on again |
+
+If the pipe does not come up, the firmware's mode is restored. On success
+the driver calls `display_set_framebuffer()`: display 0 gets the new memory
+and size, the kernel console lays its text grid out again, and the display
+server later acquires the new framebuffer like the old one.
+
+`igpu=native` takes the largest mode the monitor names and, at that size,
+the highest refresh rate the connection carries. Two modes count as the same
+only if size, totals and pixel clock agree.
+
+QEMU has no such device; the driver runs on real hardware only. On a Core
+i5-8400T (UHD Graphics 630) with a 3440x1440 monitor it switches to 100 Hz
+over DisplayPort (a real mode switch on the firmware's link) and stays at the
+firmware's 50 Hz over HDMI, where 300 MHz pixel clock is the limit and only
+the scaler is turned off. Not yet:
+DisplayPort link training, changing the display clock, several screens, hot
+plug, the hardware cursor, acceleration.
+

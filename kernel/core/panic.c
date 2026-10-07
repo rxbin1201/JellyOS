@@ -16,6 +16,12 @@ static void panic_common(const struct arch_interrupt_frame *frame, const char *r
 
     /* A panic inside the panic handler must not recurse. */
     if (panicking++) {
+        /* Possibly the screen console is what failed: say the rest on the serial port only. */
+        kconsole_set_mirror(NULL);
+        if (panicking == 2) {
+            klog_raw("\n*** panic while handling a panic: %s ***\n", reason);
+            arch_dump_state(frame);
+        }
         kconsole_write("\n*** nested panic, halting ***\n", 31);
         arch_halt();
     }
