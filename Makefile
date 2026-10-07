@@ -231,6 +231,15 @@ hw_disks = -drive file=$(NVME_DISK),if=none,id=nvmedisk,format=raw -device nvme,
            -drive file=$(SATA_DISK),if=none,id=satadisk,format=raw -device ide-hd,drive=satadisk,bus=ide.1
 # An exFAT volume written by tools/image_builder/mkexfat.py, as a second VirtIO disk without a partition table
 EXFAT_DISK      := $(BUILD)/test-exfat.img
+# USB sticks: one on a root port, one behind a hub (with the tablet as its neighbour there)
+USB_DISK1       := $(BUILD)/test-usb1.img
+USB_DISK2       := $(BUILD)/test-usb2.img
+usb_sticks = -drive file=$(USB_DISK1),if=none,id=stick1,format=raw -device usb-storage,bus=xhci.0,drive=stick1,id=usbstick1 \
+             -device usb-hub,bus=xhci.0,port=4,id=usbhub \
+             -drive file=$(USB_DISK2),if=none,id=stick2,format=raw \
+             -device usb-storage,bus=xhci.0,port=4.2,drive=stick2,id=usbstick2
+# Keyboard on a root port, tablet behind the hub: the GUI test needs both paths
+usb_input_hub = -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 $(usb_sticks) -device usb-tablet,bus=xhci.0,port=4.1
 HOST_CHECK_PATH := ::/jellyos/written.txt
 HOST_CHECK_TEXT := Written by the JellyOS FAT32 driver.
 
@@ -461,10 +470,12 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	@sh tools/image_builder/mkdisk.sh $(NVME_DISK) 64 $(TEST_DISK_FILES) JELLYNVME
 	@sh tools/image_builder/mkdisk.sh $(SATA_DISK) 64 $(TEST_DISK_FILES) JELLYSATA
 	@python3 tools/image_builder/mkexfat.py $(EXFAT_DISK)
+	@sh tools/image_builder/mkdisk.sh $(USB_DISK1) 64 $(TEST_DISK_FILES) JELLYUSB1
+	@sh tools/image_builder/mkdisk.sh $(USB_DISK2) 64 $(TEST_DISK_FILES) JELLYUSB2
 	@timeout $(TEST_TIMEOUT) $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(TEST_ESP),$(TEST_VARS)) -display none \
 	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -device edu -device e1000e \
 	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(virtio_input) $(usb_input) \
-	    $(call audio_hw,none) $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk); \
+	    $(call audio_hw,none) $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk) $(usb_sticks); \
 	status=$$?; \
 	if [ $$status -ne 1 ]; then echo "make test: FAILED (QEMU exit status $$status)"; exit 1; fi
 	@# The host (mtools) must read what the kernel's FAT32 driver wrote.
@@ -486,13 +497,13 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) --qmp $(BUILD)/qmp.sock \
 	    --wav $(AUDIO_TEST_WAV) -- \
 	    $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(SHELL_TEST_ESP),$(SHELL_TEST_VARS)) -display none \
-	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(usb_input) $(audio_test_hw) \
+	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(usb_input_hub) $(audio_test_hw) \
 	    $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk) \
 	    -qmp unix:$(BUILD)/qmp.sock,server,nowait || { echo "make test: FAILED (shell test)"; exit 1; }
 	@if mtype -i $(TEST_DISK)@@1M ::/motd.txt | grep -q "Welcome to JellyOS"; then \
 	    echo "make test: host reads the file the shell copied"; \
 	else echo "make test: FAILED (host cannot read ::/motd.txt)"; exit 1; fi
-	@for d in $(NVME_DISK) $(SATA_DISK); do \
+	@for d in $(NVME_DISK) $(SATA_DISK) $(USB_DISK1) $(USB_DISK2); do \
 	    if mtype -i $$d@@1M ::/from-jelly.txt | grep -q "Welcome to JellyOS"; then \
 	        echo "make test: host reads the file written to $$d"; \
 	    else echo "make test: FAILED (host cannot read ::/from-jelly.txt on $$d)"; exit 1; fi; done

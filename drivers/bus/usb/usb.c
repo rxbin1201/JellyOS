@@ -6,10 +6,12 @@
 
 #include "drivers/core/module.h"
 
+#include "core/arch.h"
 #include "core/format.h"
 #include "core/log.h"
 #include "core/string.h"
 #include "memory/heap.h"
+#include "scheduler/wait.h"
 
 static bus_t usb_bus = { .name = "usb" };
 
@@ -34,6 +36,65 @@ status_t usb_control(usb_device_t *device, uint8_t request_type, uint8_t request
 status_t usb_submit(usb_device_t *device, uint8_t endpoint_address, usb_transfer_t *transfer)
 {
     return device->host->submit(device, endpoint_address, transfer);
+}
+
+/* --- Bulk transfers ---------------------------------------------------------------- */
+
+typedef struct {
+    wait_queue_t queue;
+    bool         done;
+    status_t     status;
+    uint32_t     transferred;
+} bulk_wait_t;
+
+static void bulk_complete(usb_transfer_t *transfer, status_t status, uint32_t transferred)
+{
+    bulk_wait_t *wait = transfer->context;
+    wait->status = status;
+    wait->transferred = transferred;
+    wait->done = true;
+    wait_queue_wake_all(&wait->queue, STATUS_SUCCESS);
+}
+
+status_t usb_bulk(usb_device_t *device, uint8_t endpoint_address, void *buffer, uint64_t buffer_phys, uint32_t length,
+                  uint32_t *transferred, uint64_t timeout_ns)
+{
+    bulk_wait_t wait = { .done = false };
+    usb_transfer_t transfer = {
+        .buffer = buffer,
+        .buffer_phys = buffer_phys,
+        .length = length,
+        .complete = bulk_complete,
+        .context = &wait,
+    };
+
+    wait_queue_init(&wait.queue);
+    status_t status = device->host->submit(device, endpoint_address, &transfer);
+    if (STATUS_IS_ERROR(status))
+        return status;
+
+    uint64_t deadline = wait_deadline(timeout_ns);
+    uint64_t flags = arch_interrupts_save();
+    while (!wait.done && status == STATUS_SUCCESS)
+        status = wait_queue_block_uninterruptible(&wait.queue, deadline);
+    arch_interrupts_restore(flags);
+
+    if (!wait.done) {
+        /* Take the transfer back; afterwards the controller no longer knows this stack frame. */
+        device->host->reset_endpoint(device, endpoint_address);
+        if (!wait.done)
+            return STATUS_TIMEOUT;
+    }
+    if (transferred)
+        *transferred = wait.transferred;
+    return wait.status;
+}
+
+status_t usb_clear_halt(usb_device_t *device, uint8_t endpoint_address)
+{
+    device->host->reset_endpoint(device, endpoint_address);
+    return usb_control(device, USB_TYPE_STANDARD | USB_RECIP_ENDPOINT, USB_REQUEST_CLEAR_FEATURE,
+                       USB_FEATURE_ENDPOINT_HALT, endpoint_address, NULL, 0, NULL);
 }
 
 const uint8_t *usb_find_descriptor(const uint8_t *data, size_t size, const uint8_t *from, uint8_t type)
@@ -112,6 +173,11 @@ status_t usb_device_attach(usb_device_t *device)
     const usb_endpoint_descriptor_t *endpoints[USB_MAX_INTERFACES * USB_MAX_ENDPOINTS];
     uint32_t got = 0, endpoint_count = 0;
 
+    if (device->hub)
+        format(device->path, sizeof(device->path), "%s.%u", device->hub->path, device->port);
+    else
+        format(device->path, sizeof(device->path), "%u", device->port);
+
     /* The first 8 bytes fit into any packet size and hold the real one. */
     status_t status = get_descriptor(device, USB_DESCRIPTOR_DEVICE, 0, 0, &device->descriptor, 8, &got);
     if (STATUS_IS_ERROR(status) || got < 8)
@@ -160,14 +226,14 @@ status_t usb_device_attach(usb_device_t *device)
         return status;
     }
 
-    klog_info("usb: port %u: %s (%04x:%04x, %s speed, %u interface%s)", device->port, device->product,
+    klog_info("usb: port %s: %s (%04x:%04x, %s speed, %u interface%s)", device->path, device->product,
               device->descriptor.vendor, device->descriptor.product, usb_speed_name(device->speed),
               device->interface_count, device->interface_count == 1 ? "" : "s");
 
     for (uint32_t i = 0; i < device->interface_count; i++) {
         usb_interface_t *interface = &device->interfaces[i];
         device_t *d = &interface->device;
-        format(d->name, sizeof(d->name), "usb%u.%u", device->port, interface->descriptor->number);
+        format(d->name, sizeof(d->name), "usb%s:%u", device->path, interface->descriptor->number);
         d->id = (device_id_t){
             .vendor = device->descriptor.vendor,
             .device = device->descriptor.product,
@@ -205,4 +271,6 @@ EXPORT_SYMBOL(usb_device_attach);
 EXPORT_SYMBOL(usb_device_detach);
 EXPORT_SYMBOL(usb_control);
 EXPORT_SYMBOL(usb_submit);
+EXPORT_SYMBOL(usb_bulk);
+EXPORT_SYMBOL(usb_clear_halt);
 EXPORT_SYMBOL(usb_find_descriptor);

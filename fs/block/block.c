@@ -4,6 +4,7 @@
 
 #include "core/cmdline.h"
 #include "core/export.h"
+#include "core/format.h"
 #include "core/log.h"
 #include "core/string.h"
 #include "memory/heap.h"
@@ -43,6 +44,39 @@ status_t block_register(block_device_t *device)
         return STATUS_SUCCESS;
     vfs_automount(device);
     return STATUS_SUCCESS;
+}
+
+bool block_unregister(block_device_t *disk)
+{
+    char path[64];
+    bool busy = false;
+
+    /* Unmount first; only if everything let go are the devices removed. */
+    list_for_each(node, &devices) {
+        block_device_t *d = container_of(node, block_device_t, node);
+        if (d != disk && d->parent != disk)
+            continue;
+        format(path, sizeof(path), "/volumes/%s", d->name);
+        status_t status = vfs_unmount(path);
+        if (status == STATUS_SUCCESS)
+            vfs_unlink(path, NULL); /* the mount point */
+        else if (status != STATUS_NOT_FOUND)
+            busy = true;
+    }
+    if (busy)
+        return false;
+
+    for (list_node_t *node = devices.head.next; node != &devices.head;) {
+        block_device_t *d = container_of(node, block_device_t, node);
+        node = node->next;
+        if (d != disk && d->parent != disk)
+            continue;
+        list_remove(&d->node);
+        klog_info("block %s: removed", d->name);
+        if (d != disk)
+            kfree(d);
+    }
+    return true;
 }
 
 status_t block_read(block_device_t *device, uint64_t lba, uint32_t count, void *buffer)

@@ -41,7 +41,8 @@ import time
 
 HOST_TEXT = "Hello from the host, served over TCP to JellyOS."
 
-PROMPT = re.compile(rb"jelly:[^\r\n#]*# $")
+# Kernel messages may follow the prompt: USB devices behind hubs are found while the shell already runs.
+PROMPT = re.compile(rb"jelly:[^\r\n#]*# (?:\[ *[0-9.]+\] [^\n]*\n)*$")
 ANSI = re.compile(rb"\x1b\[[0-9;?=]*[A-Za-z]")
 
 # (input, strings that must appear in the output until the next prompt)
@@ -96,12 +97,23 @@ def disk_steps():
         ("cat /volumes/virtio1/docs/nested/deep.txt", ["deep inside exFAT"]),
         ("cp /etc/motd /volumes/virtio1/x.txt; echo code $?", ["code 1"]),
     ]
-    for volume in ("nvme0n1p1", "ahci1p1"):
+    steps += [
+        # USB: a stick on a root port and one behind a hub
+        ("dmesg usb: usb-storage", ["usb: hub", "usb-storage:", "64 MiB"], 10),
+    ]
+    for volume in ("nvme0n1p1", "ahci1p1", "usb0p1", "usb1p1"):
         steps += [
             (f"cat /volumes/{volume}/hello.txt", ["Hello from the JellyOS test disk!"]),
             (f"cp /etc/motd /volumes/{volume}/from-jelly.txt; sync; cat /volumes/{volume}/from-jelly.txt",
              ["Welcome to JellyOS"]),
         ]
+    steps += [
+        # Pull the stick behind the hub out while the system runs: its volume disappears, the other one stays.
+        "unplug usbstick2",
+        ("ls /volumes; dmesg removed", ["block usb1p1: removed", "block usb1: removed", "usb0p1"]),
+        ("ls /volumes/usb1p1", ["No such file or directory"]),
+        ("cat /volumes/usb0p1/hello.txt", ["Hello from the JellyOS test disk!"]),
+    ]
     return steps
 
 
@@ -600,6 +612,12 @@ def main():
         for step in steps:
             if step == "gui":
                 failures += gui_steps(console, qmp, timeout)
+                continue
+            if isinstance(step, str) and step.startswith("unplug "):
+                if qmp:
+                    qmp.command("device_del", id=step.split()[1])
+                    time.sleep(3.0)
+                    print(f"shell test: ok    {step} (QMP)")
                 continue
             inputs, expected = step[0], step[1]
             attempts = step[2] if len(step) > 2 else 1

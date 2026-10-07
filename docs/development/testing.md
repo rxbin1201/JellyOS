@@ -118,6 +118,17 @@ write changes exactly its sectors, and reads a file from the mounted FAT32
 partition of each disk. The integration test copies a file onto both disks
 from the shell; the host reads it back with `mtype`.
 
+**USB hubs and mass storage (Phase 12).** Both QEMU runs have a USB stick
+on a root port (SuperSpeed) and one behind a hub (full speed); in the
+integration run the tablet sits behind the hub as well, so every GUI step
+goes through the hub driver. The kernel test `usb_storage_disks` waits for
+both sticks and runs the same raw and file tests as for NVMe and AHCI. The
+integration test copies a file onto both sticks (the host reads them back),
+then removes the stick behind the hub through QMP while the system runs:
+its volume must be unmounted and gone, the other stick must still work.
+Removing a whole hub with a mounted stick and a tablet behind it, and
+plugging a hub and a mouse back in, was checked by hand.
+
 **exFAT (Phase 12).** `tools/image_builder/mkexfat.py` writes a 16 MiB exFAT
 volume from the specification, independently of the driver: contiguous and
 fragmented files, a root directory in scattered clusters, nested

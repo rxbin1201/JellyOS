@@ -6,7 +6,7 @@
 ## Layers (README section 25)
 
 ```text
-VirtIO block, NVMe, AHCI (USB later)   drivers/storage, drivers/bus/virtio
+VirtIO block, NVMe, AHCI, USB storage   drivers/storage, drivers/bus/virtio
             │  block_ops_t
             ▼
       Block Device API                  fs/block
@@ -74,6 +74,23 @@ disk: command list, received-FIS area and one command table. It uses
 IDENTIFY DEVICE, READ/WRITE DMA EXT and FLUSH CACHE EXT in command slot 0,
 with a 64 KiB bounce buffer. Disks are named `ahci<n>` in port order.
 ATAPI devices are skipped.
+
+### USB mass storage driver
+
+`drivers/storage/usb_storage.c` (Phase 12) binds to USB interfaces of class
+08 with the SCSI command set and the bulk-only transport: sticks, card
+readers, external disks. Each command is a command block wrapper, the data
+and a status wrapper on two bulk endpoints; the driver uses INQUIRY, TEST
+UNIT READY, REQUEST SENSE, READ CAPACITY, READ/WRITE (10- and 16-byte forms)
+and SYNCHRONIZE CACHE, clears stalled endpoints and resets the transport
+when the device gets confused. Disks are named `usb<n>` in the order they
+are found and are writable.
+
+**Removal:** when a USB disk is pulled out, `block_unregister()` unmounts
+the file systems on it and removes the disk and its partitions. If files
+on it are still open, the devices stay registered as dead ones (every
+access fails) until the next start. Pull a stick only after `sync`:
+written data may still be on its way.
 
 ### Internal disks are read-only by default
 

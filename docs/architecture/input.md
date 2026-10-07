@@ -42,18 +42,30 @@ xHCI host controller driver ─▶ USB core ─▶ bus "usb" ─▶ class driver
   the controller from the firmware, sets up the command ring, the event ring
   and the device context array, and uses MSI-X or MSI. A thread per
   controller watches the root hub ports: reset, Enable Slot, Address Device,
-  then the USB core takes over. Commands and control transfers block until
-  their event arrives (a stalled endpoint is reset); interrupt transfers
-  complete in the interrupt handler. Unplugging disables the slot and
-  unbinds the class drivers.
+  then the USB core takes over. Devices behind hubs get their slot the same
+  way; the slot's route string (one digit per hub port) and, for low and
+  full speed devices behind a high speed hub, the translating hub tell the
+  controller how to reach them. Commands, control and bulk transfers block
+  until their event arrives (a stalled endpoint is reset, a transfer that
+  times out is taken back with Stop Endpoint); interrupt transfers complete
+  in the interrupt handler. When a device disappears its pending transfers
+  end with an error, the slot is disabled and the class drivers are unbound.
 - **USB core** (`usb.c`): reads the device and configuration descriptors,
   opens all endpoints (Configure Endpoint before SET_CONFIGURATION) and
-  registers every interface as a device on the bus `usb`. Class drivers are
-  ordinary drivers of the device model matching the interface class; the
-  device model gained `device_unregister()` for devices that leave.
-- **Not yet:** external hubs (devices must be on root ports), bulk and
-  isochronous transfers (mass storage, audio), suspend. They belong to
-  Phase 12.
+  registers every interface as a device on the bus `usb` (named
+  `usb<path>:<interface>`, the path being the root port and the hub ports,
+  e.g. `usb8.2:0`). Class drivers are ordinary drivers of the device model
+  matching the interface class; the device model gained
+  `device_unregister()` for devices that leave.
+- **Hubs** (`hub.c`, Phase 12): a class driver with one thread per hub. It
+  powers the ports, follows the hub's status-change endpoint (and looks at
+  the ports every two seconds, as not every hub reports reliably), resets a
+  port with a new device to learn its speed and asks the host controller
+  driver for a child device. USB 2 hubs and the SuperSpeed half of USB 3
+  hubs are handled; hubs can be stacked five deep. Pulling a hub removes
+  everything behind it.
+- **Mass storage** is described in [storage.md](storage.md).
+- **Not yet:** isochronous transfers (audio, webcams), suspend.
 
 ## HID
 

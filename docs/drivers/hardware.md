@@ -33,7 +33,7 @@ it have only been tested in QEMU.
 | SATA disks (AHCI) | PARTIALLY_SUPPORTED | 48-bit LBA disks with 512-byte sectors; no ATAPI, NCQ or hot plug. A SATA disk is detected on the ThinkCentre |
 | SATA in Intel RAID (RST) mode | EXPERIMENTAL | Treated like AHCI; untested. RAID volumes are not assembled |
 | SATA in IDE mode | UNSUPPORTED | Switch the controller to AHCI in the firmware setup |
-| USB mass storage | UNSUPPORTED | Phase 12 |
+| USB mass storage (sticks, card readers, external disks) | PARTIALLY_SUPPORTED | SCSI over bulk-only transport, first unit, 512-byte blocks; no UAS. QEMU only so far |
 | SD card readers | UNSUPPORTED | |
 
 Disks built into the machine are **read-only** unless the kernel command
@@ -46,7 +46,7 @@ are listed as block devices but not mounted. `dmesg` shows what was found.
 | Device | Status | Notes |
 | --- | --- | --- |
 | USB keyboards and mice (HID) | SUPPORTED | On root ports of an xHCI controller. Works on the ThinkCentre, including a wireless mouse receiver |
-| USB hubs | UNSUPPORTED | Devices behind a hub (also hubs inside monitors, docks, keyboards) are not seen. Phase 12 |
+| USB hubs | PARTIALLY_SUPPORTED | USB 2 and USB 3 hubs, stacked up to five deep, hot plug. Tested with QEMU's full-speed hub only: high-speed hubs with slower devices behind them and SuperSpeed hubs are untested |
 | USB gamepads (HID) | EXPERIMENTAL | Tested with synthetic reports only |
 | PS/2 keyboard and mouse | PARTIALLY_SUPPORTED | QEMU only so far |
 | VirtIO input | PARTIALLY_SUPPORTED | QEMU's virtual keyboard and tablet |

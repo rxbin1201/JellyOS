@@ -15,8 +15,10 @@
  * until their event arrives. Interrupt transfers are queued from any
  * context; their completion runs in the interrupt handler.
  *
- * Not yet: external hubs (devices must sit on root ports), bulk and
- * isochronous transfers, streams, power management.
+ * Devices behind hubs get a slot like any other; the hub driver (hub.c)
+ * asks for them, and the slot's route string tells the controller the way.
+ *
+ * Not yet: isochronous transfers, streams, power management.
  */
 
 #include "drivers/bus/pci/pci.h"
@@ -105,6 +107,7 @@ typedef struct {
 #define TRB_CONFIGURE_ENDPOINT 12
 #define TRB_EVALUATE_CONTEXT   13
 #define TRB_RESET_ENDPOINT     14
+#define TRB_STOP_ENDPOINT      15
 #define TRB_SET_TR_DEQUEUE     16
 #define TRB_TRANSFER_EVENT     32
 #define TRB_COMMAND_COMPLETION 33
@@ -143,6 +146,9 @@ typedef struct {
     struct xhci    *hc;
     uint8_t         id;
     bool            gone;
+    /* The way to the device: root hub port, then one hub port per route digit */
+    uint32_t        route, root_port;
+    uint8_t         tt_slot, tt_port;   /* low/full speed behind a high speed hub: the hub translating for it */
     dma_buffer_t    output, input;      /* device context, input context */
     dma_buffer_t    control_data;       /* data stage of control transfers */
     xhci_ring_t     rings[ENDPOINTS];
@@ -291,7 +297,7 @@ static void transfer_event(xhci_t *hc, const xhci_trb_t *event)
     }
     usb_transfer_t *transfer = slot->pending[endpoint];
     if (!transfer)
-        return;
+        return; /* cancelled, or the "stopped" notice of a Stop Endpoint command */
     slot->pending[endpoint] = NULL;
     if (code == CODE_SUCCESS || code == CODE_SHORT_PACKET)
         transfer->complete(transfer, STATUS_SUCCESS, residual <= transfer->length ? transfer->length - residual : 0);
@@ -545,11 +551,79 @@ static status_t xhci_submit(usb_device_t *usb, uint8_t endpoint_address, usb_tra
     return status;
 }
 
+/* Forget the endpoint's pending transfer and make the endpoint usable again, whether it was running or halted. */
+static status_t xhci_reset_endpoint(usb_device_t *usb, uint8_t endpoint_address)
+{
+    xhci_slot_t *slot = usb->host_data;
+    xhci_t *hc = slot->hc;
+    uint32_t dci = endpoint_dci(endpoint_address);
+
+    if (dci < 2 || !slot->rings[dci].trbs)
+        return STATUS_NOT_FOUND;
+    mutex_lock(&hc->lock);
+    uint64_t flags = arch_interrupts_save();
+    slot->pending[dci] = NULL;
+    arch_interrupts_restore(flags);
+    if (!slot->gone) {
+        uint32_t target = (uint32_t)slot->id << 24 | dci << 16;
+        /* One of the two applies (running: stop; halted: reset); the other fails harmlessly. */
+        command(hc, 0, TRB_TYPE(TRB_STOP_ENDPOINT) | target, NULL);
+        command(hc, 0, TRB_TYPE(TRB_RESET_ENDPOINT) | target, NULL);
+        command(hc, ring_enqueue_address(&slot->rings[dci]) | slot->rings[dci].cycle,
+                TRB_TYPE(TRB_SET_TR_DEQUEUE) | target, NULL);
+    }
+    mutex_unlock(&hc->lock);
+    return STATUS_SUCCESS;
+}
+
+static status_t xhci_hub_configure(usb_device_t *usb, uint32_t ports, uint32_t think_time)
+{
+    xhci_slot_t *slot = usb->host_data;
+    xhci_t *hc = slot->hc;
+
+    mutex_lock(&hc->lock);
+    uint32_t *control = input_context(slot, 0), *slot_context = input_context(slot, 1);
+    control[0] = 0;
+    control[1] = 1; /* the slot context only */
+    memcpy(slot_context, output_context(slot, 0), hc->context_size);
+    slot_context[0] |= 1u << 26; /* a hub */
+    slot_context[1] = (slot_context[1] & 0x00FFFFFF) | ports << 24;
+    if (usb->speed == USB_SPEED_HIGH)
+        slot_context[2] = (slot_context[2] & ~(3u << 16)) | (think_time & 3) << 16;
+    status_t status = command(hc, slot->input.phys, TRB_TYPE(TRB_CONFIGURE_ENDPOINT) | (uint32_t)slot->id << 24, NULL);
+    mutex_unlock(&hc->lock);
+    return status;
+}
+
+static status_t device_create(xhci_t *hc, xhci_slot_t *parent, uint32_t port, uint32_t speed, xhci_slot_t **result);
+static void device_destroy(xhci_slot_t *slot);
+
+static status_t xhci_child_attach(usb_device_t *hub, uint32_t port, uint8_t speed, usb_device_t **child)
+{
+    xhci_slot_t *parent = hub->host_data, *slot;
+
+    if (parent->gone)
+        return STATUS_NOT_FOUND;
+    status_t status = device_create(parent->hc, parent, port, speed, &slot);
+    if (!STATUS_IS_ERROR(status))
+        *child = &slot->usb;
+    return status;
+}
+
+static void xhci_child_detach(usb_device_t *child)
+{
+    device_destroy(child->host_data);
+}
+
 static const usb_host_ops_t xhci_ops = {
     .control = xhci_control,
     .set_max_packet0 = xhci_set_max_packet0,
     .configure = xhci_configure,
     .submit = xhci_submit,
+    .reset_endpoint = xhci_reset_endpoint,
+    .hub_configure = xhci_hub_configure,
+    .child_attach = xhci_child_attach,
+    .child_detach = xhci_child_detach,
 };
 
 /* --- Root hub ports -------------------------------------------------------------- */
@@ -575,34 +649,123 @@ static void slot_free(xhci_slot_t *slot)
     kfree(slot);
 }
 
-static void port_disconnect(xhci_t *hc, uint32_t port)
+/* The device is gone: end its transfers, give the slot back, unbind the drivers (a hub's children first). */
+static void device_destroy(xhci_slot_t *slot)
 {
-    xhci_slot_t *slot = hc->port_slots[port];
+    xhci_t *hc = slot->hc;
     uint64_t *dcbaa = hc->dcbaa.virt;
+    usb_transfer_t *dead[ENDPOINTS];
 
-    klog_info("usb: port %u: %s disconnected", port, slot->usb.product[0] ? slot->usb.product : "device");
+    if (slot->usb.path[0])
+        klog_info("usb: port %s: %s disconnected", slot->usb.path, slot->usb.product);
     mutex_lock(&hc->lock);
     slot->gone = true;
-    command(hc, 0, TRB_TYPE(TRB_DISABLE_SLOT) | (uint32_t)slot->id << 24, NULL);
+    if (slot->id)
+        command(hc, 0, TRB_TYPE(TRB_DISABLE_SLOT) | (uint32_t)slot->id << 24, NULL);
     uint64_t flags = arch_interrupts_save();
-    hc->slots[slot->id] = NULL;
-    dcbaa[slot->id] = 0;
+    if (slot->id) {
+        hc->slots[slot->id] = NULL;
+        dcbaa[slot->id] = 0;
+    }
+    memcpy(dead, slot->pending, sizeof(dead));
+    memset(slot->pending, 0, sizeof(slot->pending));
     arch_interrupts_restore(flags);
     mutex_unlock(&hc->lock);
 
-    /* The transfers are dead; now the class drivers can let go. */
+    /* Whoever waits for a transfer learns that it will never come. */
+    for (uint32_t i = 0; i < ENDPOINTS; i++) {
+        if (dead[i])
+            dead[i]->complete(dead[i], STATUS_NOT_FOUND, 0);
+    }
     usb_device_detach(&slot->usb);
-    hc->port_slots[port] = NULL;
     slot_free(slot);
 }
 
-static void port_connect(xhci_t *hc, uint32_t port)
+/*
+ * A device was detected and reset on a root port (parent NULL) or on a
+ * hub's port: enable a slot, set the address and let the USB core
+ * enumerate it.
+ */
+static status_t device_create(xhci_t *hc, xhci_slot_t *parent, uint32_t port, uint32_t speed, xhci_slot_t **result)
 {
     static const uint16_t default_packet[] = { [USB_SPEED_FULL] = 8, [USB_SPEED_LOW] = 8, [USB_SPEED_HIGH] = 64,
                                                [USB_SPEED_SUPER] = 512 };
     uint64_t *dcbaa = hc->dcbaa.virt;
     uint32_t id = 0;
 
+    if (speed < USB_SPEED_FULL || speed > USB_SPEED_SUPER || port == 0 || port > 255 ||
+        (parent && (parent->usb.depth >= USB_MAX_DEPTH || port > 15)))
+        return STATUS_NOT_SUPPORTED;
+    xhci_slot_t *slot = kcalloc(1, sizeof(*slot));
+    if (!slot)
+        return STATUS_OUT_OF_MEMORY;
+    slot->hc = hc;
+    slot->usb.host = &xhci_ops;
+    slot->usb.host_data = slot;
+    slot->usb.controller = hc->device;
+    slot->usb.port = (uint8_t)port;
+    slot->usb.speed = (uint8_t)speed;
+    if (parent) {
+        slot->usb.hub = &parent->usb;
+        slot->usb.depth = (uint8_t)(parent->usb.depth + 1);
+        slot->root_port = parent->root_port;
+        slot->route = parent->route | port << (4 * parent->usb.depth);
+        if (speed == USB_SPEED_LOW || speed == USB_SPEED_FULL) {
+            if (parent->usb.speed == USB_SPEED_HIGH) {
+                slot->tt_slot = parent->id;
+                slot->tt_port = (uint8_t)port;
+            } else {
+                slot->tt_slot = parent->tt_slot;
+                slot->tt_port = parent->tt_port;
+            }
+        }
+    } else {
+        slot->root_port = port;
+    }
+
+    mutex_lock(&hc->lock);
+    status_t status = command(hc, 0, TRB_TYPE(TRB_ENABLE_SLOT), &id);
+    if (!STATUS_IS_ERROR(status) && (id == 0 || id > hc->max_slots))
+        status = STATUS_LIMIT_EXCEEDED;
+    if (!STATUS_IS_ERROR(status))
+        slot->id = (uint8_t)id;
+    if (!STATUS_IS_ERROR(status))
+        status = dma_alloc(hc->device, PAGE_SIZE, hc->dma_limit, &slot->output);
+    if (!STATUS_IS_ERROR(status))
+        status = dma_alloc(hc->device, PAGE_SIZE, hc->dma_limit, &slot->input);
+    if (!STATUS_IS_ERROR(status))
+        status = dma_alloc(hc->device, PAGE_SIZE, hc->dma_limit, &slot->control_data);
+    if (!STATUS_IS_ERROR(status))
+        status = ring_alloc(hc, &slot->rings[1]);
+    if (!STATUS_IS_ERROR(status)) {
+        uint32_t *control = input_context(slot, 0), *slot_context = input_context(slot, 1);
+        control[1] = 3; /* slot and endpoint 0 */
+        slot_context[0] = slot->route | (speed << 20) | (1u << 27); /* one context entry */
+        slot_context[1] = slot->root_port << 16;
+        slot_context[2] = slot->tt_slot | (uint32_t)slot->tt_port << 8;
+        fill_endpoint(slot, 1, 4, default_packet[speed], 0);
+
+        uint64_t flags = arch_interrupts_save();
+        dcbaa[id] = slot->output.phys;
+        hc->slots[id] = slot;
+        arch_interrupts_restore(flags);
+        status = command(hc, slot->input.phys, TRB_TYPE(TRB_ADDRESS_DEVICE) | id << 24, NULL);
+    }
+    mutex_unlock(&hc->lock);
+
+    if (!STATUS_IS_ERROR(status))
+        status = usb_device_attach(&slot->usb);
+    if (STATUS_IS_ERROR(status)) {
+        slot->usb.path[0] = '\0'; /* nothing was announced: leave quietly */
+        device_destroy(slot);
+        return status;
+    }
+    *result = slot;
+    return STATUS_SUCCESS;
+}
+
+static void port_connect(xhci_t *hc, uint32_t port)
+{
     /* USB 3 ports enable themselves; USB 2 ports need a reset. */
     if (!(port_read(hc, port) & PORT_ENABLED)) {
         port_write(hc, port, PORT_RESET);
@@ -615,61 +778,19 @@ static void port_connect(xhci_t *hc, uint32_t port)
         }
     }
     thread_sleep(20000000); /* reset recovery */
-    uint32_t speed = PORT_SPEED(port_read(hc, port));
-    if (speed < USB_SPEED_FULL || speed > USB_SPEED_SUPER) {
-        klog_warn("usb: port %u: unsupported speed %u", port, speed);
-        return;
-    }
 
-    xhci_slot_t *slot = kcalloc(1, sizeof(*slot));
-    if (!slot)
-        return;
-    slot->hc = hc;
-    mutex_lock(&hc->lock);
-    status_t status = command(hc, 0, TRB_TYPE(TRB_ENABLE_SLOT), &id);
-    if (!STATUS_IS_ERROR(status) && (id == 0 || id > hc->max_slots))
-        status = STATUS_DEVICE_ERROR;
+    status_t status = device_create(hc, NULL, port, PORT_SPEED(port_read(hc, port)), &hc->port_slots[port]);
     if (STATUS_IS_ERROR(status)) {
-        mutex_unlock(&hc->lock);
-        klog_warn("usb: port %u: no device slot (%s)", port, status_name(status));
-        kfree(slot);
-        return;
-    }
-    slot->id = (uint8_t)id;
-    status = dma_alloc(hc->device, PAGE_SIZE, hc->dma_limit, &slot->output);
-    if (!STATUS_IS_ERROR(status))
-        status = dma_alloc(hc->device, PAGE_SIZE, hc->dma_limit, &slot->input);
-    if (!STATUS_IS_ERROR(status))
-        status = dma_alloc(hc->device, PAGE_SIZE, hc->dma_limit, &slot->control_data);
-    if (!STATUS_IS_ERROR(status))
-        status = ring_alloc(hc, &slot->rings[1]);
-    if (!STATUS_IS_ERROR(status)) {
-        uint32_t *control = input_context(slot, 0), *slot_context = input_context(slot, 1);
-        control[1] = 3; /* slot and endpoint 0 */
-        slot_context[0] = (speed << 20) | (1u << 27); /* one context entry */
-        slot_context[1] = port << 16;                 /* root hub port */
-        fill_endpoint(slot, 1, 4, default_packet[speed], 0);
-
-        uint64_t flags = arch_interrupts_save();
-        dcbaa[id] = slot->output.phys;
-        hc->slots[id] = slot;
-        arch_interrupts_restore(flags);
-        status = command(hc, slot->input.phys, TRB_TYPE(TRB_ADDRESS_DEVICE) | id << 24, NULL);
-    }
-    mutex_unlock(&hc->lock);
-
-    slot->usb.host = &xhci_ops;
-    slot->usb.host_data = slot;
-    slot->usb.controller = hc->device;
-    slot->usb.port = (uint8_t)port;
-    slot->usb.speed = (uint8_t)speed;
-    hc->port_slots[port] = slot;
-    if (!STATUS_IS_ERROR(status))
-        status = usb_device_attach(&slot->usb);
-    if (STATUS_IS_ERROR(status)) {
+        hc->port_slots[port] = NULL;
         klog_warn("usb: port %u: cannot set up the device: %s", port, status_name(status));
-        port_disconnect(hc, port);
     }
+}
+
+static void port_disconnect(xhci_t *hc, uint32_t port)
+{
+    xhci_slot_t *slot = hc->port_slots[port];
+    hc->port_slots[port] = NULL;
+    device_destroy(slot);
 }
 
 static void port_check(xhci_t *hc, uint32_t port)

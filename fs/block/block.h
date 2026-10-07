@@ -66,6 +66,14 @@ bool block_internal_disks_writable(void);
 /* Register a disk or partition. Disks are scanned for partitions, then offered to file systems. */
 status_t block_register(block_device_t *device);
 
+/*
+ * The disk is gone (USB): unmount the file systems on it and on its
+ * partitions and forget the devices; the partitions are freed. Returns
+ * false if a file system is still in use: then everything stays registered,
+ * the driver must keep the disk's block_device_t and fail all I/O.
+ */
+bool     block_unregister(block_device_t *disk);
+
 status_t block_read(block_device_t *device, uint64_t lba, uint32_t count, void *buffer);
 status_t block_write(block_device_t *device, uint64_t lba, uint32_t count, const void *buffer);
 status_t block_flush(block_device_t *device);

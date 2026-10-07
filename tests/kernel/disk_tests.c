@@ -15,6 +15,7 @@
 #include "fs/block/block.h"
 #include "fs/vfs/vfs.h"
 #include "memory/heap.h"
+#include "scheduler/thread.h"
 
 #define SCRATCH_LBA   100
 #define SCRATCH_COUNT 300 /* 150 KiB: several commands, and transfers with a PRP list on NVMe */
@@ -111,4 +112,22 @@ KTEST(ahci_disk)
     block_device_t *boot = block_find("ahci0");
     KASSERT(boot != NULL);
     KEXPECT(block_read(boot, 0, 1, sector) == STATUS_SUCCESS && sector[510] == 0x55 && sector[511] == 0xAA);
+}
+
+/*
+ * USB sticks: one directly on a root port, one behind a hub. They are
+ * found by the controller's and the hub's threads, so the test waits for
+ * them; the order of the names depends on who is faster.
+ */
+KTEST(usb_storage_disks)
+{
+    if (!block_find("nvme0n1")) { /* the machine of `make test` has the sticks whenever it has the NVMe disk */
+        klog_info("ktest: no USB sticks, skipped");
+        return;
+    }
+    for (int i = 0; i < 100 && !(block_find("usb0p1") && block_find("usb1p1")); i++)
+        thread_sleep(100000000);
+    KASSERT(block_find("usb0") && block_find("usb1"));
+    KEXPECT(exercise_disk("usb0", 0x21));
+    KEXPECT(exercise_disk("usb1", 0x42));
 }

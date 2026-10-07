@@ -152,7 +152,7 @@ static void usb_hid_remove(device_t *device)
 {
     usb_hid_t *hid = device->driver_data;
 
-    /* The controller has dropped the pending transfer; nothing calls report_complete any more. */
+    /* The pending transfer ended with an error when the device went away; nothing calls report_complete any more. */
     hid->stopped = true;
     hid_release_all(&hid->state, emit, hid); /* no key stays stuck */
     dma_free(&hid->buffer);
