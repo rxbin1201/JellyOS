@@ -449,4 +449,13 @@ through functions of the driver), which is what makes it testable: a unit
 test runs it on a small image built by hand
 ([`tests/unit/atom_test.c`](../../tests/unit/atom_test.c)).
 
-Not yet: HDMI modes, hot plug, several screens, acceleration.
+**Hot plug.** As in the Intel driver, a thread reads the monitor's link
+status over the AUX channel once a second. No answer: the monitor is gone.
+When it answers again, or reports the link lost while staying connected (it
+was switched off and on), the link is trained again, at the rate it had or
+the fastest the monitor takes. The EDID is read again; another monitor gets
+its own list of modes and, if the mode on the screen is not among them, its
+best one.
+
+Not yet: HDMI modes, a monitor on another connector than the one the
+firmware lit, several screens, acceleration.

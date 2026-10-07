@@ -64,7 +64,15 @@
  * patterns and signal levels), then the mode as above. If training fails,
  * the old rate is brought back.
  *
- * Not yet: HDMI modes, hot plug, several screens, any kind of acceleration.
+ * A thread looks at the connection once a second (hot plug): it reads the
+ * monitor's link status over the AUX channel. No answer means the monitor
+ * is gone. When it is back, or reports that it lost the link (it was
+ * switched off and on), the link is trained again. A monitor that comes
+ * back is asked for its EDID again; another monitor gets its own list of
+ * modes and, if the mode on the screen is not among them, its best one.
+ *
+ * Not yet: HDMI modes, a monitor on another connector than the one the
+ * firmware lit, several screens, any kind of acceleration.
  */
 
 #include "drivers/acpi/acpi.h"
@@ -264,6 +272,8 @@ typedef struct {
     uint32_t          sink_khz;                /* the fastest link the monitor takes */
     atom_t            atom;                    /* the video BIOS's programs */
     bool              atom_ready;              /* the transmitter can be switched through them */
+    bool              connected;
+    int               edid_blocks;
     uint32_t          atom_bad_register;       /* a register beyond the BAR a table asked for (0: none) */
 } amdgpu_t;
 
@@ -381,7 +391,7 @@ static void read_monitor(amdgpu_t *g)
         klog_info("amdgpu: DisplayPort link as trained: %u lane%s at %u.%02u Gbit/s; modes up to %u kHz pixel clock",
                   g->lanes, g->lanes == 1 ? "" : "s", g->link_khz / 100000, g->link_khz / 1000 % 100, g->limit_khz);
     }
-    int blocks = dp_edid_read(&aux, g->edid);
+    int blocks = g->edid_blocks = dp_edid_read(&aux, g->edid);
     if (!blocks) {
         klog_warn("amdgpu: the monitor's data (EDID) cannot be read");
         return;
@@ -939,13 +949,13 @@ static status_t amdgpu_set_mode(display_t *display, uint32_t mode, uint32_t *pit
  * The list of modes for the display layer: the monitor's modes that the link carries and that fit into the
  * framebuffers, with the one on the screen among them. Entry i there is g->modes[i] here.
  */
-static void publish_modes(amdgpu_t *g, display_t *d, bool switchable)
+static void publish_modes(amdgpu_t *g, display_t *d, bool switchable, bool keep_current)
 {
     jelly_display_mode_t list[MAX_MODES];
     uint32_t kept = 0, current = DISPLAY_NO_MODE;
     bool known = g->current.khz && g->current.ha == d->info.width && g->current.va == d->info.height;
 
-    if (known)
+    if (known && keep_current) /* the firmware's mode works with the firmware's monitor, whatever its EDID says */
         g->mode_count = display_timing_add(g->modes, g->mode_count, MAX_MODES, &g->current);
     for (uint32_t i = 0; i < g->mode_count && switchable; i++) {
         const display_timing_t *t = &g->modes[i];
@@ -968,6 +978,128 @@ static void publish_modes(amdgpu_t *g, display_t *d, bool switchable)
     }
     if (kept)
         display_set_modes(0, list, kept, current);
+}
+
+/* --- Hot plug --------------------------------------------------------------------------- */
+
+/* The link at `rate` or, if that cannot be trained, at a slower rate; the picture as it was. True if a link is up. */
+static bool link_restore(amdgpu_t *g, uint32_t rate)
+{
+    static const uint32_t rates[] = { 540000, 270000, 162000 };
+    bool ok = false;
+
+    pipe_stop(g);
+    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]) && !ok; i++) {
+        if (rates[i] <= rate)
+            ok = link_bring_up(g, rates[i]);
+    }
+    if (ok)
+        g->limit_khz = link_limit(g, g->link_khz);
+    pipe_start(g, &g->current);
+    return ok;
+}
+
+static bool mode_listed(const amdgpu_t *g, const display_timing_t *t)
+{
+    for (uint32_t i = 0; i < g->mode_count; i++) {
+        if (display_timing_same(&g->modes[i], t))
+            return true;
+    }
+    return false;
+}
+
+static void hotplug_thread(void *argument)
+{
+    static uint8_t edid[256];
+    amdgpu_t *g = argument;
+    display_t *d = display_get(0);
+    aux_engine_t where = { g, g->aux_engine };
+    dp_aux_t aux = { &where, aux_once };
+    uint32_t absent = 0, edid_tries = 0, retrains = 0, pause = 0;
+    bool watch_link = false, first = true, was_present = false, was_link_ok = false;
+
+    for (;;) {
+        bool lost = false, back = false, new_monitor = false, switch_mode = false;
+        uint8_t status[6], caps[16];
+
+        sleep_ms(1000);
+        display_lock(d);
+        bool present = dp_dpcd_read(&aux, DPCD_LANE_STATUS, status, 6) == 6;
+        bool link_ok = present && dp_link_good(status, g->lanes);
+        if (first || present != was_present || link_ok != was_link_ok) {
+            /* What the watcher sees, whenever it changes. */
+            klog_info("amdgpu: watching the monitor: %s, link %s (AUX status 0x%x)", present ? "there" : "not there",
+                      link_ok ? "good" : "not good", rd(g, AUX_SW_STATUS((uint32_t)g->aux_engine)));
+            was_present = present;
+            was_link_ok = link_ok;
+        }
+        if (first) {
+            /* A monitor that calls a link bad on which it shows a picture is not asked again. */
+            first = false;
+            watch_link = link_ok;
+            if (present && !link_ok)
+                klog_info("amdgpu: the monitor reports lane status %02x %02x for a working link: the link is not watched",
+                          status[0], status[1]);
+        }
+
+        if (!present) {
+            if (g->connected && ++absent >= 2) {
+                g->connected = false;
+                lost = true;
+            }
+        } else if (!g->connected) {
+            absent = 0;
+            int blocks = dp_edid_read(&aux, edid);
+            if (blocks || ++edid_tries >= 5) { /* a monitor that just woke up may need a moment for its EDID */
+                uint32_t rate = g->link_khz;
+                edid_tries = 0;
+                if (dp_dpcd_read(&aux, DPCD_REVISION, caps, 16) == 16 && caps[1]) {
+                    g->sink_khz = (uint32_t)(caps[1] > 0x14 ? 0x14 : caps[1]) * 27000;
+                    if (rate > g->sink_khz)
+                        rate = g->sink_khz; /* this monitor does not take the rate the last one had */
+                }
+                if (blocks && (blocks != g->edid_blocks || memcmp(edid, g->edid, (size_t)blocks * 128) != 0)) {
+                    memcpy(g->edid, edid, sizeof(edid));
+                    g->edid_blocks = blocks;
+                    g->mode_count = edid_collect_timings(g->edid, blocks, g->modes, 0, MAX_MODES);
+                    new_monitor = true;
+                }
+                if (g->atom_ready) {
+                    link_restore(g, rate);
+                    watch_link = true;
+                    retrains = pause = 0;
+                }
+                g->connected = true;
+                back = true;
+                switch_mode = new_monitor && g->mode_count && !mode_listed(g, &g->current);
+            }
+        } else {
+            absent = 0;
+            if (link_ok) {
+                retrains = pause = 0;
+            } else if (watch_link && pause) {
+                pause--;
+            } else if (watch_link && g->atom_ready) {
+                klog_info("amdgpu: the monitor lost the DisplayPort link: training it again");
+                link_restore(g, g->link_khz);
+                if (++retrains >= 3)
+                    pause = 10; /* it does not hold: try again every ten seconds only */
+            }
+        }
+        display_unlock(d);
+
+        if (lost)
+            display_set_connected(0, false);
+        if (back) {
+            display_set_connected(0, true);
+            if (new_monitor)
+                publish_modes(g, d, true, false);
+            if (switch_mode) {
+                klog_info("amdgpu: another monitor: switching to its best mode");
+                display_set_mode(0, 0);
+            }
+        }
+    }
 }
 
 static display_ops_t amdgpu_ops; /* filled with what works on this machine */
@@ -1181,8 +1313,19 @@ static status_t amdgpu_probe(device_t *device)
                   !g->displayport ? "not a DisplayPort connection" : "the link or the pixel clock is not known");
     status = display_set_driver(0, &amdgpu_ops, g, amdgpu_ops.flip ? g->aperture + g->framebuffers[1] : 0);
     if (!STATUS_IS_ERROR(status))
-        publish_modes(g, d, switchable);
+        publish_modes(g, d, switchable, true);
     (void)refresh;
+    /* From now on the connection is watched (DisplayPort with a monitor that answers on the AUX channel). */
+    if (switchable && g->aux_engine >= 0) {
+        thread_t *watcher;
+        g->connected = true;
+        if (STATUS_IS_ERROR(thread_create_kernel("amdgpu-hotplug", hotplug_thread, g, THREAD_PRIORITY_KERNEL, &watcher))) {
+            klog_warn("amdgpu: no thread to watch the connection");
+        } else {
+            thread_start(watcher);
+            object_release(&watcher->object);
+        }
+    }
     /* amdgpu=native: the monitor's best mode (the first of the list) right away, if it is not the firmware's. */
     if (native && switchable && g->mode_count && !display_timing_same(&g->modes[0], &g->current)) {
         const display_timing_t *best = &g->modes[0];
