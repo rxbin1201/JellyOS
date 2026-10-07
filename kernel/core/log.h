@@ -31,4 +31,15 @@ void klog_set_console_level(klog_level_t level);
 /* Write raw text to the console, bypassing levels and the buffer (panic path). */
 void klog_raw(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/*
+ * Console output: the early (serial) console plus an optional mirror such as
+ * the framebuffer console. Callers keep interrupts disabled around a line.
+ */
+void kconsole_write(const char *text, size_t length);
+void kconsole_set_mirror(void (*write)(const char *text, size_t length));
+/* Only the mirror (for drivers that write the serial port themselves). */
+void kconsole_mirror_char(char c);
+/* Feed the log buffer's contents to `write` (a new console catching up). */
+void klog_replay(void (*write)(const char *text, size_t length));
+
 #endif

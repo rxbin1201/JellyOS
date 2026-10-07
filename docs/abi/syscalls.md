@@ -1,6 +1,6 @@
 # JellyOS System Call ABI
 
-**ABI version:** 4 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25.
+**ABI version:** 5 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67).
 **Headers:** [`sdk/include/jelly/syscall.h`](../../sdk/include/jelly/syscall.h) (numbers, rights, flags), [`sdk/include/jelly/status.h`](../../sdk/include/jelly/status.h) (errors), [`sdk/include/jelly/os.h`](../../sdk/include/jelly/os.h) (libos wrappers)
 
 ## Calling convention (x86_64)
@@ -181,6 +181,36 @@ used with `SYS_FILE_READ`/`SYS_FILE_WRITE`. Handles always fit a positive
 
 New status codes: `CONNECTION_REFUSED` (21), `CONNECTION_RESET` (22),
 `NOT_CONNECTED` (23), `ADDRESS_IN_USE` (24), `UNREACHABLE` (25).
+
+### Graphics and input (version 5)
+
+See [graphics.md](../architecture/graphics.md).
+
+| # | Name | Arguments | Output | Rights / notes |
+|---|---|---|---|---|
+| 59 | `SYS_OBJECT_WAIT_MANY` | `const jelly_handle_t *handles, count, timeout_ns, uint32_t *index` | index of a signaled object | Every handle needs `WAIT`; at most 64. `TIMEOUT` |
+| 60 | `SYS_CHANNEL_SEND_HANDLES` | `handle, data, size, const jelly_handle_t *handles, count` | | Needs `WRITE`. Up to 8 handles, **moved** with their rights: they are closed for the sender on success. Not the channel's own endpoints |
+| 61 | `SYS_CHANNEL_RECEIVE_HANDLES` | `handle, buffer, size, size_t *actual, jelly_handle_t handles[8], uint32_t *count` | message, new handles | Needs `READ`. `BUFFER_TOO_SMALL` reports the size and keeps the message. `SYS_CHANNEL_RECEIVE` closes attached handles |
+| 62 | `SYS_SERVICE_REGISTER` | `name, length, channel` | | Root only. The registry takes over the channel end (closed for the caller). `ALREADY_EXISTS` while the previous server lives |
+| 63 | `SYS_SERVICE_CONNECT` | `name, length, jelly_handle_t *channel` | channel to the server | The server receives the other end in a `connect` message. `NOT_FOUND` |
+| 64 | `SYS_DISPLAY_INFO` | `index, jelly_display_info_t *info` | size, pitch, pixel format, flags | `NOT_FOUND` after the last display |
+| 65 | `SYS_DISPLAY_ACQUIRE` | `index, jelly_handle_t *framebuffer` | memory handle (`MAP`, `WRITE`) | Root only. Exclusive (`BUSY`); map it with `SYS_SHM_MAP` (write-combining). The kernel console resumes when the object is released |
+| 66 | `SYS_INPUT_OPEN` | `jelly_handle_t *input` | input queue (`READ`, `WAIT`) | Root only. Each queue receives every event (512 buffered, oldest dropped) |
+| 67 | `SYS_INPUT_READ` | `handle, jelly_input_event_t *events, count, size_t *read` | events | `WOULD_BLOCK` when empty |
+
+```c
+typedef struct {
+    uint64_t time_ns;
+    uint32_t type;          /* JELLY_INPUT_KEY_DOWN, KEY_UP, MOUSE_MOVE, MOUSE_BUTTON, MOUSE_WHEEL */
+    uint32_t code;          /* JELLY_KEY_* (<jelly/input.h>, evdev numbering), JELLY_BUTTON_* */
+    int32_t  value;         /* key: 1 press, 2 repeat; button: 1/0; wheel: steps */
+    int32_t  dx, dy;        /* relative motion */
+    int32_t  x, y;          /* 0..65535 with JELLY_INPUT_ABSOLUTE */
+    uint32_t flags;
+    uint32_t device;
+    uint32_t reserved;
+} jelly_input_event_t;
+```
 
 ```c
 typedef struct {

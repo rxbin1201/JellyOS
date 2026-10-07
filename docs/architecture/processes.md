@@ -124,8 +124,11 @@ One mechanism per problem:
 
 | Socket | Network communication | TCP streams, UDP and ICMP datagrams; see [networking.md](networking.md) |
 
-Not yet available: passing handles through channels, and waiting on several
-objects at once.
+Since ABI version 5, channel messages can carry up to 8 handles (moved with
+their rights), one call can wait for up to 64 objects
+(`SYS_OBJECT_WAIT_MANY`, implemented with observers on each object), and
+named services let clients find servers (`SYS_SERVICE_REGISTER`/`CONNECT`).
+See [graphics.md](graphics.md), where the display server uses all three.
 
 ## Isolation and security (README section 41)
 

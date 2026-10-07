@@ -19,8 +19,9 @@
  * Control protocol (text messages on the control channel, one reply each):
  *     list | status NAME | start NAME | stop NAME | restart NAME
  *
- * There is no wait-for-any system call yet, so the manager polls its
- * processes and channels every POLL_NS.
+ * The manager sleeps in SYS_OBJECT_WAIT_MANY on all running service
+ * processes and control channels, until the next pending restart at the
+ * latest; it never polls.
  */
 
 #include <ctype.h>
@@ -36,7 +37,6 @@
 #define MAX_SERVICES     32
 #define MAX_DEPENDS      8
 #define MAX_ARGS         16
-#define POLL_NS          20000000ULL      /* 20 ms */
 #define BACKOFF_MIN_NS   250000000ULL     /* 250 ms, doubled per quick failure */
 #define BACKOFF_MAX_NS   8000000000ULL
 #define STABLE_NS        10000000000ULL   /* running this long resets the failure count */
@@ -564,6 +564,29 @@ int main(int argc, char **argv)
         supervise(now);
         serve_control();
         fflush(stdout);
-        jelly_thread_sleep(POLL_NS);
+
+        /* Wake up for an exit, a control request or the next restart. */
+        jelly_handle_t handles[JELLY_WAIT_MANY_MAX];
+        uint32_t count = 0, index;
+        uint64_t timeout = JELLY_WAIT_FOREVER;
+        now = jelly_clock_ns();
+        for (int i = 0; i < service_count; i++) {
+            service_t *s = &services[i];
+            if (s->state == STATE_RUNNING && count < JELLY_WAIT_MANY_MAX)
+                handles[count++] = s->process;
+            if (s->channel != JELLY_HANDLE_INVALID && count < JELLY_WAIT_MANY_MAX)
+                handles[count++] = s->channel;
+            if (s->state == STATE_WAITING && s->wanted) {
+                uint64_t delay = s->restart_at_ns > now ? s->restart_at_ns - now : 0;
+                if (delay < timeout)
+                    timeout = delay;
+            }
+        }
+        if (count)
+            jelly_wait_many(handles, count, timeout, &index);
+        else if (timeout != JELLY_WAIT_FOREVER)
+            jelly_thread_sleep(timeout);
+        else
+            jelly_thread_sleep(1000000000ULL); /* nothing to supervise */
     }
 }

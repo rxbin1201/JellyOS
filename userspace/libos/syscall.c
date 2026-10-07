@@ -363,3 +363,52 @@ status_t jelly_net_resolve(const char *name, uint32_t *address)
 {
     return (status_t)SYSCALL3(SYS_NET_RESOLVE, name, length_of(name), address);
 }
+
+/* --- Graphics and input (ABI version 5) ---------------------------------------------- */
+
+status_t jelly_wait_many(const jelly_handle_t *handles, uint32_t count, uint64_t timeout_ns, uint32_t *index)
+{
+    return (status_t)SYSCALL4(SYS_OBJECT_WAIT_MANY, handles, count, timeout_ns, index);
+}
+
+status_t jelly_channel_send_handles(jelly_handle_t channel, const void *data, size_t size,
+                                    const jelly_handle_t *handles, uint32_t count)
+{
+    return (status_t)SYSCALL5(SYS_CHANNEL_SEND_HANDLES, channel, data, size, handles, count);
+}
+
+status_t jelly_channel_receive_handles(jelly_handle_t channel, void *buffer, size_t size, size_t *actual,
+                                       jelly_handle_t handles[JELLY_CHANNEL_MAX_HANDLES], uint32_t *count)
+{
+    return (status_t)SYSCALL6(SYS_CHANNEL_RECEIVE_HANDLES, channel, buffer, size, actual, handles, count);
+}
+
+status_t jelly_service_register(const char *name, jelly_handle_t channel)
+{
+    return (status_t)SYSCALL3(SYS_SERVICE_REGISTER, name, length_of(name), channel);
+}
+
+status_t jelly_service_connect(const char *name, jelly_handle_t *channel)
+{
+    return (status_t)SYSCALL3(SYS_SERVICE_CONNECT, name, length_of(name), channel);
+}
+
+status_t jelly_display_info(uint32_t index, jelly_display_info_t *info)
+{
+    return (status_t)SYSCALL2(SYS_DISPLAY_INFO, index, info);
+}
+
+status_t jelly_display_acquire(uint32_t index, jelly_handle_t *framebuffer)
+{
+    return (status_t)SYSCALL2(SYS_DISPLAY_ACQUIRE, index, framebuffer);
+}
+
+status_t jelly_input_open(jelly_handle_t *input)
+{
+    return (status_t)SYSCALL1(SYS_INPUT_OPEN, input);
+}
+
+status_t jelly_input_read(jelly_handle_t input, jelly_input_event_t *events, size_t count, size_t *read)
+{
+    return (status_t)SYSCALL4(SYS_INPUT_READ, input, events, count, read);
+}

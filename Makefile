@@ -3,7 +3,8 @@
 #   make        build boot manager, kernel and initramfs (userspace) into build/esp
 #   make run    boot in QEMU + OVMF (serial on stdio), KVM=1 for hardware virtualization
 #   make debug  like run, but wait for GDB on :1234
-#   make test   kernel self-tests, then the shell integration test, in QEMU (exit status = result)
+#   make test   host unit tests, kernel self-tests, then the integration test in QEMU (exit status = result)
+#   make unit   host unit tests only (tests/unit)
 #   make clean  remove build output
 
 BUILD   := build
@@ -45,9 +46,11 @@ BOOT_LDFLAGS := -nostdlib -shared -Bsymbolic -znocombreloc -z noexecstack \
 # --- Kernel (ELF64, higher half) ---------------------------------------------
 
 KERNEL_OBJ_DIR := $(BUILD)/kernel
-# Built-in drivers live in drivers/, storage layers and file systems in fs/, the network stack in net/. Kernel tests (tests/kernel) are linked
+# Built-in drivers live in drivers/, storage layers and file systems in fs/, the network stack in net/,
+# the input manager in input/. Kernel tests (tests/kernel) are linked
 # into the kernel and run with selftest=1.
-KERNEL_SRCS    := $(shell find kernel drivers fs net tests/kernel -name '*.c' -o -name '*.S')
+KERNEL_SRCS    := $(shell find kernel drivers fs net input tests/kernel -name '*.c' -o -name '*.S') \
+                  graphics/core/font8x16.c
 KERNEL_OBJS    := $(patsubst %,$(BUILD)/%.o,$(KERNEL_SRCS))
 KERNEL_LDS     := kernel/arch/x86_64/linker.ld
 KERNEL_ELF     := $(BUILD)/kernel.elf
@@ -95,11 +98,27 @@ USER_LDFLAGS := -nostdlib -static -no-pie -z max-page-size=0x1000 -z noexecstack
 # Compiler support routines (__popcountdi2, 128-bit division, ...)
 LIBGCC       := $(shell $(CC) -print-libgcc-file-name)
 
+# Graphics libraries (README sections 33-36): core drawing, display, window client, compositor, GUI toolkit.
+# Built for userspace into their own object tree; the kernel only takes the font.
+GRAPHICS_SRCS := $(wildcard graphics/*/*.c)
+GRAPHICS_OBJS := $(patsubst %,$(BUILD)/ugraphics/%.o,$(GRAPHICS_SRCS))
+GRAPHICS_A    := $(BUILD)/userspace/libgraphics.a
+
 # Programs of the initramfs: <name>:<install path>:<sources>
 PROGRAM_DIR  := $(BUILD)/userspace/programs
 COREUTILS    := cat cp echo false ls mkdir mv rm sleep touch true
 NETTOOLS     := http ifconfig nc nslookup ping
-PROGRAMS     := init:/init:userspace/init/init.c                 servicemanager:/sbin/servicemanager:userspace/services/servicemanager/servicemanager.c                 networkd:/sbin/networkd:userspace/services/network/networkd.c                 sh:/bin/sh:userspace/shell/shell.c                 $(foreach u,$(NETTOOLS),$(u):/bin/$(u):userspace/applications/network/$(u).c)                 $(foreach u,$(COREUTILS),$(u):/bin/$(u):userspace/applications/coreutils/$(u).c)
+PROGRAMS     := init:/init:userspace/init/init.c \
+                servicemanager:/sbin/servicemanager:userspace/services/servicemanager/servicemanager.c \
+                networkd:/sbin/networkd:userspace/services/network/networkd.c \
+                displayd:/sbin/displayd:userspace/services/display/displayd.c \
+                sh:/bin/sh:userspace/shell/shell.c \
+                guidemo:/bin/guidemo:userspace/applications/guidemo/guidemo.c \
+                terminal:/bin/terminal:userspace/applications/terminal/terminal.c \
+                $(foreach u,$(NETTOOLS),$(u):/bin/$(u):userspace/applications/network/$(u).c) \
+                $(foreach u,$(COREUTILS),$(u):/bin/$(u):userspace/applications/coreutils/$(u).c)
+# Further sources of programs made of several files: PROGRAM_EXTRA_<name>
+PROGRAM_EXTRA_displayd := userspace/services/display/keymap.c
 program_name   = $(word 1,$(subst :, ,$(1)))
 program_path   = $(word 2,$(subst :, ,$(1)))
 program_source = $(word 3,$(subst :, ,$(1)))
@@ -143,12 +162,14 @@ endif
 
 # $(call qemu_disks,<esp dir>,<vars file>)
 qemu_disks  = -drive if=pflash,format=raw,file=$(2) -drive format=raw,file=fat:rw:$(1)
+# VirtIO keyboard and tablet (absolute pointer) for the display server
+virtio_input = -device virtio-keyboard-pci -device virtio-tablet-pci
 # $(call virtio_disk,<image>,<id>)
 virtio_disk = -drive file=$(1),if=none,id=$(2),format=raw -device virtio-blk-pci,drive=$(2)
 # $(call virtio_nic,<id>): VirtIO NIC on QEMU's user network (NAT; gateway and host 10.0.2.2, DNS 10.0.2.3)
 virtio_nic  = -netdev user,id=$(1) -device virtio-net-pci,netdev=$(1)
 
-QEMU_FLAGS := $(QEMU_BASE) $(call qemu_disks,$(ESP),$(VARS_COPY))
+QEMU_FLAGS := $(QEMU_BASE) $(call qemu_disks,$(ESP),$(VARS_COPY)) $(virtio_input)
 
 # make run NET=0: without a network card
 ifneq ($(NET),0)
@@ -179,7 +200,7 @@ SHELL_TEST_VARS := $(BUILD)/OVMF_VARS_shell.fd
 
 # --- Targets -----------------------------------------------------------------
 
-.PHONY: all run debug test modules programs reset-vars clean
+.PHONY: all run debug test unit modules programs reset-vars clean
 
 all: $(BOOT_EFI) $(BOOT_CFG) $(KERNEL_ESP) $(INITRAMFS_ESP)
 
@@ -216,6 +237,15 @@ $(BUILD)/net/%.o: net/%
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
+$(BUILD)/input/%.o: input/%
+	@mkdir -p $(@D)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+# The font is shared: the kernel console gets its own copy built with kernel flags.
+$(BUILD)/graphics/core/font8x16.c.o: graphics/core/font8x16.c
+	@mkdir -p $(@D)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
 $(BUILD)/tests/%.o: tests/%
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
@@ -229,6 +259,14 @@ $(BUILD)/tests/userspace/%.o: tests/userspace/%
 	@mkdir -p $(@D)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
+$(BUILD)/ugraphics/%.o: %
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+$(GRAPHICS_A): $(GRAPHICS_OBJS)
+	@rm -f $@
+	ar rcs $@ $^
+
 $(USERTEST_ELF): $(BUILD)/tests/userspace/usertest.c.o $(LIBOS_OBJS) $(USER_LDS)
 	$(LD) $(USER_LDFLAGS) $(BUILD)/tests/userspace/usertest.c.o $(LIBOS_OBJS) -o $@
 
@@ -240,11 +278,15 @@ $(LIBC_A): $(LIBC_OBJS)
 	@rm -f $@
 	ar rcs $@ $^
 
+program_objects = $(BUILD)/$(call program_source,$(1)).o \
+                  $(patsubst %,$(BUILD)/%.o,$(PROGRAM_EXTRA_$(call program_name,$(1))))
+
 define program_rule
-$(PROGRAM_DIR)/$(call program_name,$(1)).elf: $(BUILD)/$(call program_source,$(1)).o $(LIBC_CRT0) $(LIBC_A) $(LIBOS_A) $(USER_LDS)
+$(PROGRAM_DIR)/$(call program_name,$(1)).elf: $(call program_objects,$(1)) $(LIBC_CRT0) $(LIBC_A) $(LIBOS_A) \
+        $(GRAPHICS_A) $(USER_LDS)
 	@mkdir -p $$(@D)
-	$(LD) $(USER_LDFLAGS) $(LIBC_CRT0) $(BUILD)/$(call program_source,$(1)).o \
-	      --start-group $(LIBC_A) $(LIBOS_A) --end-group $(LIBGCC) -o $$@
+	$(LD) $(USER_LDFLAGS) $(LIBC_CRT0) $(call program_objects,$(1)) \
+	      --start-group $(GRAPHICS_A) $(LIBC_A) $(LIBOS_A) --end-group $(LIBGCC) -o $$@
 endef
 $(foreach p,$(PROGRAMS),$(eval $(call program_rule,$(p))))
 
@@ -319,7 +361,19 @@ debug: all $(VARS_COPY)
 
 # QEMU's isa-debug-exit turns the kernel's verdict into the exit status: 1 = passed.
 # The test drivers are passed as boot modules; edu and e1000e are their devices.
-test: all $(TEST_MODULES) $(INITRAMFS)
+# Host unit tests: code without OS dependencies, built with the host compiler and sanitizers.
+UNIT_TESTS := $(BUILD)/unit/canvas_test
+
+$(BUILD)/unit/canvas_test: tests/unit/canvas_test.c graphics/core/canvas.c graphics/core/canvas.h \
+                           graphics/core/font8x16.c
+	@mkdir -p $(@D)
+	$(CC) -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -I. \
+	    tests/unit/canvas_test.c graphics/core/canvas.c graphics/core/font8x16.c -o $@
+
+unit: $(UNIT_TESTS)
+	@for t in $(UNIT_TESTS); do $$t || { echo "make unit: FAILED ($$t)"; exit 1; }; done
+
+test: unit all $(TEST_MODULES) $(INITRAMFS)
 	@rm -rf $(TEST_ESP)
 	@mkdir -p $(TEST_ESP)/EFI/BOOT $(TEST_ESP)/boot/kernels $(TEST_ESP)/boot/modules
 	@cp $(BOOT_EFI) $(TEST_ESP)/EFI/BOOT/
@@ -336,14 +390,15 @@ test: all $(TEST_MODULES) $(INITRAMFS)
 	@sh tools/image_builder/mkdisk.sh $(TEST_DISK) 64 $(TEST_DISK_FILES) JELLYTEST
 	@timeout $(TEST_TIMEOUT) $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(TEST_ESP),$(TEST_VARS)) -display none \
 	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -device edu -device e1000e \
-	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0); \
+	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(virtio_input); \
 	status=$$?; \
 	if [ $$status -ne 1 ]; then echo "make test: FAILED (QEMU exit status $$status)"; exit 1; fi
 	@# The host (mtools) must read what the kernel's FAT32 driver wrote.
 	@if [ "$$(mtype -i $(TEST_DISK)@@1M $(HOST_CHECK_PATH))" = "$(HOST_CHECK_TEXT)" ]; then \
 	    echo "make test: host reads the file written by JellyOS"; \
 	else echo "make test: FAILED (host cannot read $(HOST_CHECK_PATH) correctly)"; exit 1; fi
-	@# Milestone M6: boot normally into the shell and drive it through the serial console.
+	@# Milestones M6-M8: boot normally into the shell and the desktop; drive the serial console and the
+	@# GUI (QMP input events and screenshots).
 	@rm -rf $(SHELL_TEST_ESP)
 	@mkdir -p $(SHELL_TEST_ESP)/EFI/BOOT $(SHELL_TEST_ESP)/boot/kernels $(SHELL_TEST_ESP)/boot/initrd
 	@cp $(BOOT_EFI) $(SHELL_TEST_ESP)/EFI/BOOT/
@@ -353,9 +408,11 @@ test: all $(TEST_MODULES) $(INITRAMFS)
 	    > $(SHELL_TEST_ESP)/boot/boot.cfg
 	@printf 'initrd=/boot/initrd/current.img\ncmdline="loglevel=info"\n' >> $(SHELL_TEST_ESP)/boot/boot.cfg
 	@cp $(OVMF_VARS) $(SHELL_TEST_VARS)
-	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) -- \
+	@rm -f $(BUILD)/qmp.sock
+	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) --qmp $(BUILD)/qmp.sock -- \
 	    $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(SHELL_TEST_ESP),$(SHELL_TEST_VARS)) -display none \
-	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) || { echo "make test: FAILED (shell test)"; exit 1; }
+	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(virtio_input) \
+	    -qmp unix:$(BUILD)/qmp.sock,server,nowait || { echo "make test: FAILED (shell test)"; exit 1; }
 	@if mtype -i $(TEST_DISK)@@1M ::/motd.txt | grep -q "Welcome to JellyOS"; then \
 	    echo "make test: host reads the file the shell copied"; \
 	else echo "make test: FAILED (host cannot read ::/motd.txt)"; exit 1; fi
@@ -368,5 +425,6 @@ reset-vars:
 clean:
 	rm -rf $(BUILD)
 
--include $(BOOT_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(LIBOS_OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(LIBC_CRT0:.o=.d) \n         $(foreach p,$(PROGRAMS) $(SPAWNTEST),$(BUILD)/$(call program_source,$(p)).d) $(BUILD)/tests/userspace/usertest.c.d \
+-include $(BOOT_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(LIBOS_OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(LIBC_CRT0:.o=.d) \n         $(foreach p,$(PROGRAMS) $(SPAWNTEST),$(BUILD)/$(call program_source,$(p)).d) \
+         $(BUILD)/userspace/services/display/keymap.c.d $(GRAPHICS_OBJS:.o=.d) $(BUILD)/tests/userspace/usertest.c.d \
          $(patsubst %,$(BUILD)/%.d,$(TEST_MODULE_SRCS))

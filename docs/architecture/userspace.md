@@ -9,6 +9,7 @@ Phase 7 (milestone M6) boots into a command line:
 kernel ──spawn──▶ /init ──spawn──▶ /sbin/servicemanager ──spawn──▶ services
  (critical)                         reads /etc/services.conf        motd (oneshot)
                                                                      network: /sbin/networkd (DHCP)
+                                                                     display: /sbin/displayd ──▶ /bin/terminal
                                                                      shell: /bin/sh ──spawn──▶ /bin/ls, ...
 ```
 
@@ -104,14 +105,14 @@ essential=yes               # started in safe mode
 |---|---|
 | Start | In dependency order. A `simple` dependency must be running, a `oneshot` dependency must have finished with code 0 |
 | Dependencies | Unknown names and cycles are found at load time; such services are marked failed |
-| Failure detection | Exited processes are noticed within 20 ms |
+| Failure detection | An exiting process wakes the manager at once |
 | Restart | By policy, with a delay of 250 ms that doubles per quick failure (at most 8 s). After 5 failures within 10 s of running time the service is marked failed. Dependents of a failed service are not started |
 | Stop | `SYS_PROCESS_KILL` with exit code 143; the service is not restarted |
 | Safe mode | Only `essential` services and their dependencies |
 | Logging | `servicemanager: ...` lines on the console |
 
-There is no system call yet that waits for any of several objects, so the
-manager polls its processes and control channels every 20 ms.
+The manager sleeps in `SYS_OBJECT_WAIT_MANY` on all running service
+processes and control channels, at most until the next pending restart.
 
 **Control protocol:** services with `control=yes` (the shell) receive one end
 of a channel as startup handle 3. Requests are text messages, and each gets
@@ -127,12 +128,14 @@ one text reply:
 
 `/bin/sh` ([`userspace/shell/shell.c`](../../userspace/shell/shell.c)) runs
 interactively on the console (prompt `jelly:<cwd># `), runs a script
-(`sh FILE`), or runs one line (`sh -c LINE`).
+(`sh FILE`), or runs one line (`sh -c LINE`). `sh -i` is interactive even
+on a pipe (the graphical terminal uses it).
 
 | Syntax | Meaning |
 |---|---|
 | `a \| b \| c` | Pipeline (up to 8 commands). The shell waits for all of them; the last one's exit code counts |
 | `a ; b` | Command list |
+| `a &` | Start without waiting (prints the process number); for graphical programs from the console |
 | `< f`, `> f`, `>> f`, `2> f` | Redirect stdin, stdout (truncate / append), stderr |
 | `'...'`, `"..."`, `\x` | Quoting; variables are expanded inside `"..."` but not inside `'...'` |
 | `$NAME`, `${NAME}`, `$?` | Environment variables, exit code of the last command |
@@ -153,6 +156,12 @@ Network tools in
 [`userspace/applications/network/`](../../userspace/applications/network/):
 `ifconfig`, `ping`, `nslookup`, `http` and `nc`. They are described in
 [networking.md](networking.md).
+
+## Display server and graphical programs
+
+`/sbin/displayd` (service `display`) owns the screen and the input devices,
+composites the windows and starts `/bin/terminal`. `/bin/guidemo` shows the
+GUI toolkit. See [graphics.md](graphics.md).
 
 ## Network service
 

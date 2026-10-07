@@ -56,6 +56,16 @@ status_t sys_socket_info(const uint64_t *a);
 status_t sys_net_interface_info(const uint64_t *a);
 status_t sys_net_configure(const uint64_t *a);
 status_t sys_net_resolve(const uint64_t *a);
+/* Graphics and input, ABI 5 (graphics_syscalls.c) */
+status_t sys_object_wait_many(const uint64_t *a);
+status_t sys_channel_send_handles(const uint64_t *a);
+status_t sys_channel_receive_handles(const uint64_t *a);
+status_t sys_service_register(const uint64_t *a);
+status_t sys_service_connect(const uint64_t *a);
+status_t sys_display_info(const uint64_t *a);
+status_t sys_display_acquire(const uint64_t *a);
+status_t sys_input_open(const uint64_t *a);
+status_t sys_input_read(const uint64_t *a);
 /* SYS_FILE_READ / WRITE on a socket handle */
 status_t syscall_socket_file_io(uint64_t handle, bool write, uint64_t buffer, uint64_t size, uint64_t *done);
 

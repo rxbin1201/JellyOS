@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define JELLY_SYSCALL_ABI_VERSION 4
+#define JELLY_SYSCALL_ABI_VERSION 5
 
 typedef uint32_t jelly_handle_t;
 #define JELLY_HANDLE_INVALID 0u
@@ -84,6 +84,16 @@ enum {
     SYS_NET_INTERFACE_INFO = 56, /* (uint32_t index, jelly_netif_info_t *info)                NOT_FOUND past the last */
     SYS_NET_CONFIGURE    = 57, /* (uint32_t index, const jelly_netif_config_t *config)      root only */
     SYS_NET_RESOLVE      = 58, /* (name, length, uint32_t *address)                          address in network order */
+    /* ABI version 5: graphics and input */
+    SYS_OBJECT_WAIT_MANY = 59, /* (const jelly_handle_t *handles, uint32_t count, uint64_t timeout_ns, uint32_t *index) */
+    SYS_CHANNEL_SEND_HANDLES = 60, /* (handle, data, size, const jelly_handle_t *handles, uint32_t count)  moves them */
+    SYS_CHANNEL_RECEIVE_HANDLES = 61, /* (handle, buffer, size, size_t *actual, jelly_handle_t *handles, uint32_t *count) */
+    SYS_SERVICE_REGISTER = 62, /* (name, length, channel handle)                             root only */
+    SYS_SERVICE_CONNECT  = 63, /* (name, length, jelly_handle_t *channel) */
+    SYS_DISPLAY_INFO     = 64, /* (uint32_t index, jelly_display_info_t *info)                NOT_FOUND past the last */
+    SYS_DISPLAY_ACQUIRE  = 65, /* (uint32_t index, jelly_handle_t *framebuffer)               root only, exclusive */
+    SYS_INPUT_OPEN       = 66, /* (jelly_handle_t *input)                                     root only */
+    SYS_INPUT_READ       = 67, /* (handle, jelly_input_event_t *events, size_t count, size_t *read)  WOULD_BLOCK if empty */
     SYS_COUNT
 };
 
@@ -253,6 +263,48 @@ typedef struct {
     uint32_t gateway;                  /* 0: none */
     uint32_t dns;                      /* 0: none */
 } jelly_netif_config_t;
+
+/* --- Graphics and input (ABI version 5) -------------------------------------- */
+
+#define JELLY_WAIT_MANY_MAX       64
+#define JELLY_CHANNEL_MAX_HANDLES 8
+#define JELLY_SERVICE_NAME_MAX    63
+
+#define JELLY_DISPLAY_ACQUIRED    (1u << 0) /* a display server owns it */
+
+typedef struct {
+    uint32_t index;
+    uint32_t flags;           /* JELLY_DISPLAY_* */
+    uint32_t width, height;   /* pixels */
+    uint32_t pitch;           /* bytes per line */
+    uint32_t bpp;             /* 32 */
+    uint8_t  red_shift, red_size;
+    uint8_t  green_shift, green_size;
+    uint8_t  blue_shift, blue_size;
+    uint8_t  reserved[2];
+    uint64_t size;            /* bytes of the framebuffer mapping */
+} jelly_display_info_t;
+
+/* Standardized input events (README section 37). Key codes: <jelly/input.h>. */
+#define JELLY_INPUT_KEY_DOWN     1 /* code = key, value = 1 (press) or 2 (repeat) */
+#define JELLY_INPUT_KEY_UP       2
+#define JELLY_INPUT_MOUSE_MOVE   3 /* dx, dy relative; with JELLY_INPUT_ABSOLUTE also x, y in 0..65535 */
+#define JELLY_INPUT_MOUSE_BUTTON 4 /* code = JELLY_BUTTON_*, value = 1 pressed / 0 released */
+#define JELLY_INPUT_MOUSE_WHEEL  5 /* value = steps, positive away from the user */
+
+#define JELLY_INPUT_ABSOLUTE     (1u << 0)
+
+typedef struct {
+    uint64_t time_ns;
+    uint32_t type;
+    uint32_t code;
+    int32_t  value;
+    int32_t  dx, dy;
+    int32_t  x, y;
+    uint32_t flags;
+    uint32_t device;          /* source device number */
+    uint32_t reserved;
+} jelly_input_event_t;
 
 /* SYS_SYSTEM_POWER actions */
 #define JELLY_POWER_OFF    1

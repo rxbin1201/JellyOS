@@ -1,5 +1,19 @@
 # Testing JellyOS
 
+`make test` runs, in this order:
+
+1. the host unit tests (`make unit`)
+2. the kernel self-tests in QEMU
+3. the integration test in QEMU (shell, network, GUI)
+
+## Host unit tests (`make unit`)
+
+Code without OS dependencies is also compiled with the host compiler,
+AddressSanitizer and UBSan, and tested on the development machine:
+[`tests/unit/canvas_test.c`](../../tests/unit/canvas_test.c) covers
+`graphics/core` (rectangles, blending, fills and clipping, rounded corners,
+blitting, UTF-8, text and the font).
+
 ## Kernel self-tests (`make test`)
 
 Kernel tests live in [`tests/kernel/`](../../tests/kernel/) and are linked
@@ -117,6 +131,22 @@ buffered file I/O with seeking.
 - the VirtIO NIC: static configuration, ARP and ping to the user network's
   gateway 10.0.2.2, and a TCP reset from a closed host port
 
+### Graphics and input tests (Phase 9)
+
+[`tests/kernel/graphics_tests.c`](../../tests/kernel/graphics_tests.c)
+covers:
+
+- `object_wait_many` (index, timeouts, auto-reset events, no observers left
+  behind)
+- objects in channel messages (references, rights, refused self-transfer,
+  release of unread messages)
+- named services (connect, the `connect` message with the server end,
+  duplicate registration, disappearing servers)
+- input queues (event fields, overflow drops the oldest)
+- display acquisition (geometry, exclusive ownership, release)
+
+`make test` attaches a VirtIO keyboard and tablet in both QEMU runs.
+
 ## Integration test: the shell (milestone M6)
 
 After the kernel tests pass, `make test` boots a second time, normally this
@@ -152,6 +182,24 @@ through QEMU's user network. The steps check:
 Access to the real Internet is not part of `make test`, so the tests do not
 depend on the host's connectivity. Check it by hand with `make run`, then
 `nslookup example.com` and `http http://example.com/`.
+
+**Graphics (milestone M8).** QEMU also gets a QMP socket. The script starts
+`guidemo &` from the serial shell, follows its output (it prints every
+action) and drives the GUI with QMP `input-send-event` (keys as physical
+QEMU key codes for the German layout, absolute tablet coordinates). It
+checks with QMP screenshots:
+
+- focus routing: title bar colors of the new and the old window
+- typing into the text field, clicking buttons, a checkbox that switches to
+  the dark theme (checked on screen)
+- keyboard navigation (Tab, Space)
+- dragging a window by its title bar, closing it with the close button,
+  and the focus returning to the terminal
+- typing a command into the terminal (`touch /tmp/fromgui`), checked from
+  the serial shell
+
+Window positions follow the compositor's cascade: the terminal is the
+first window, guidemo the second.
 
 Requirements on the host: `sgdisk` (gdisk) and `mtools`.
 

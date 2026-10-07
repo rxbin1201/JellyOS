@@ -2,13 +2,14 @@
  * sh: the JellyOS command shell.
  *
  *   sh                 interactive on stdin (prompt only when stdin is the console)
+ *   sh -i              interactive even when stdin is a pipe (graphical terminal)
  *   sh FILE            run the commands in FILE
  *   sh -c COMMAND      run one command line
  *
  * Syntax: words separated by blanks, '...' and "..." quoting, \ escapes,
  * $NAME, ${NAME} and $? expansion (not inside '...'), # comments,
- * redirections < FILE, > FILE, >> FILE, 2> FILE, pipelines a | b | c and
- * command lists a ; b.
+ * redirections < FILE, > FILE, >> FILE, 2> FILE, pipelines a | b | c,
+ * command lists a ; b and background commands a & (not waited for).
  *
  * Builtins: cd, pwd, exit, help, env, export, unset, svc, sync, poweroff,
  * reboot, status. Everything else is started from $PATH; the shell waits for
@@ -105,7 +106,9 @@ static int expand_variable(const char **p, word_store_t *store)
     return value ? store_text(store, value) : 0;
 }
 
-typedef enum { TOKEN_WORD, TOKEN_PIPE, TOKEN_SEMICOLON, TOKEN_IN, TOKEN_OUT, TOKEN_APPEND, TOKEN_ERR, TOKEN_END } token_t;
+typedef enum {
+    TOKEN_WORD, TOKEN_PIPE, TOKEN_SEMICOLON, TOKEN_BACKGROUND, TOKEN_IN, TOKEN_OUT, TOKEN_APPEND, TOKEN_ERR, TOKEN_END
+} token_t;
 
 /* Read the next token from *p; words go into the store (NUL terminated). */
 static token_t next_token(const char **p, word_store_t *store, char **word, int *error)
@@ -120,6 +123,7 @@ static token_t next_token(const char **p, word_store_t *store, char **word, int 
     switch (*s) {
     case '|': *p = s + 1; return TOKEN_PIPE;
     case ';': *p = s + 1; return TOKEN_SEMICOLON;
+    case '&': *p = s + 1; return TOKEN_BACKGROUND;
     case '<': *p = s + 1; return TOKEN_IN;
     case '>':
         if (s[1] == '>') {
@@ -137,7 +141,7 @@ static token_t next_token(const char **p, word_store_t *store, char **word, int 
     }
 
     *word = store->buffer + store->used;
-    while (*s && !strchr(" \t\n|;<>", *s)) {
+    while (*s && !strchr(" \t\n|;&<>", *s)) {
         if (*s == '\'') {
             s++;
             while (*s && *s != '\'') {
@@ -195,12 +199,14 @@ overflow:
 }
 
 /*
- * Parse one pipeline from *p (up to ';' or the end of the line).
+ * Parse one pipeline from *p (up to ';', '&' or the end of the line).
  * Returns the number of commands, 0 for an empty pipeline, -1 on a syntax error.
+ * *background is set for a pipeline ended by '&'.
  */
-static int parse_pipeline(const char **p, word_store_t *store, command_t *commands)
+static int parse_pipeline(const char **p, word_store_t *store, command_t *commands, int *background)
 {
     int count = 0, error = 0;
+    *background = 0;
     command_t *c = &commands[0];
     memset(commands, 0, sizeof(command_t) * MAX_COMMANDS);
 
@@ -235,7 +241,9 @@ static int parse_pipeline(const char **p, word_store_t *store, command_t *comman
             continue;
         }
 
-        /* PIPE, SEMICOLON or END finish the current command. */
+        /* PIPE, SEMICOLON, BACKGROUND or END finish the current command. */
+        if (token == TOKEN_BACKGROUND)
+            *background = 1;
         if (c->argc == 0) {
             if (token == TOKEN_PIPE || count > 0) {
                 fprintf(stderr, "sh: syntax error near '|'\n");
@@ -492,7 +500,7 @@ static int run_builtin(const builtin_t *builtin, command_t *c)
     return status;
 }
 
-static int run_pipeline(command_t *commands, int count)
+static int run_pipeline(command_t *commands, int count, int background)
 {
     jelly_handle_t processes[MAX_COMMANDS];
     jelly_handle_t previous_read = JELLY_HANDLE_INVALID;
@@ -574,6 +582,16 @@ static int run_pipeline(command_t *commands, int count)
         }
     }
 
+    if (background) {
+        /* Not waited for: report the last process and let them run. */
+        jelly_process_info_t info;
+        if (started && !STATUS_IS_ERROR(jelly_process_info(processes[started - 1], &info)))
+            printf("[process %lu] %s\n", (unsigned long)info.pid, commands[started - 1].argv[0]);
+        for (int i = 0; i < started; i++)
+            jelly_handle_close(processes[i]);
+        return status;
+    }
+
     /* Wait for every started command; the last one's code counts. */
     for (int i = 0; i < started; i++) {
         int code;
@@ -593,20 +611,21 @@ static void run_line(const char *line)
     const char *p = line;
 
     for (;;) {
+        int background;
         store.used = 0;
-        int count = parse_pipeline(&p, &store, commands);
+        int count = parse_pipeline(&p, &store, commands, &background);
         if (count < 0) {
             last_status = 2;
             return;
         }
         if (count > 0) {
-            last_status = run_pipeline(commands, count);
+            last_status = run_pipeline(commands, count, background);
             if (interactive && last_status != 0 && !should_exit)
                 printf("[exit %d]\n", last_status);
         }
         if (should_exit)
             return;
-        /* parse_pipeline stopped after a ';' or at the end of the line. */
+        /* parse_pipeline stopped after a ';', a '&' or at the end of the line. */
         while (*p == ' ' || *p == '\t')
             p++;
         if (!*p || *p == '#' || *p == '\n')
@@ -645,6 +664,12 @@ static int run_stream(FILE *input)
 
 int main(int argc, char **argv)
 {
+    int force_interactive = 0;
+    if (argc > 1 && !strcmp(argv[1], "-i")) {
+        force_interactive = 1;
+        argv++;
+        argc--;
+    }
     if (argc > 2 && !strcmp(argv[1], "-c")) {
         run_line(argv[2]);
         return should_exit ? exit_code : last_status;
@@ -661,8 +686,8 @@ int main(int argc, char **argv)
     }
 
     jelly_stat_t stat;
-    interactive = !STATUS_IS_ERROR(jelly_fstat(jelly_startup_handle(JELLY_STDIN), &stat)) &&
-                  stat.type == JELLY_FILE_TYPE_DEVICE;
+    interactive = force_interactive || (!STATUS_IS_ERROR(jelly_fstat(jelly_startup_handle(JELLY_STDIN), &stat)) &&
+                                        stat.type == JELLY_FILE_TYPE_DEVICE);
     if (interactive)
         printf("JellyOS shell. Type 'help' for the builtins.\n");
     return run_stream(stdin);

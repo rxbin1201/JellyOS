@@ -7,7 +7,8 @@
  * discards it and Ctrl-D on an empty line reports end of input. Readers get
  * at most one completed line per read.
  *
- * This is the console until keyboard and display drivers exist (Phases 9/11).
+ * Everything written here is mirrored to the framebuffer console (if one is
+ * active), so the console is visible on the screen as well.
  */
 
 #include "drivers/core/module.h"
@@ -43,6 +44,7 @@ static void put_raw(char c)
     while (!(arch_io_read8(COM1 + UART_LINE_STATUS) & LINE_STATUS_THRE))
         ;
     arch_io_write8(COM1 + UART_DATA, (uint8_t)c);
+    kconsole_mirror_char(c); /* the screen shows the console too */
 }
 
 static void put_char(char c)

@@ -21,6 +21,46 @@ static const char *const level_names[] = {
 static char ring[LOG_RING_SIZE];
 static size_t ring_head; /* total bytes ever written; position = head % size */
 static klog_level_t console_level = KLOG_INFO;
+static void (*console_mirror)(const char *text, size_t length);
+
+void kconsole_set_mirror(void (*write)(const char *text, size_t length))
+{
+    console_mirror = write;
+}
+
+void kconsole_write(const char *text, size_t length)
+{
+    char chunk[128];
+    for (size_t done = 0; done < length;) {
+        size_t n = length - done < sizeof(chunk) - 1 ? length - done : sizeof(chunk) - 1;
+        for (size_t i = 0; i < n; i++)
+            chunk[i] = text[done + i];
+        chunk[n] = '\0';
+        arch_early_console_write(chunk);
+        done += n;
+    }
+    if (console_mirror)
+        console_mirror(text, length);
+}
+
+void kconsole_mirror_char(char c)
+{
+    if (console_mirror)
+        console_mirror(&c, 1);
+}
+
+void klog_replay(void (*write)(const char *text, size_t length))
+{
+    uint64_t flags = arch_interrupts_save();
+    size_t start = ring_head > LOG_RING_SIZE ? ring_head - LOG_RING_SIZE : 0;
+    for (size_t i = start; i < ring_head;) {
+        size_t position = i % LOG_RING_SIZE;
+        size_t n = LOG_RING_SIZE - position < ring_head - i ? LOG_RING_SIZE - position : ring_head - i;
+        write(ring + position, n);
+        i += n;
+    }
+    arch_interrupts_restore(flags);
+}
 
 static void ring_append(const char *s, size_t length)
 {
@@ -57,7 +97,7 @@ void klog(klog_level_t level, const char *fmt, ...)
     uint64_t flags = arch_interrupts_save();
     ring_append(line, length);
     if (level >= console_level)
-        arch_early_console_write(line);
+        kconsole_write(line, length);
     arch_interrupts_restore(flags);
 }
 
@@ -67,9 +107,9 @@ void klog_raw(const char *fmt, ...)
     va_list args;
 
     va_start(args, fmt);
-    format_v(line, sizeof(line), fmt, args);
+    size_t length = format_v(line, sizeof(line), fmt, args);
     va_end(args);
-    arch_early_console_write(line);
+    kconsole_write(line, length < sizeof(line) ? length : sizeof(line) - 1);
 }
 
 EXPORT_SYMBOL(klog);

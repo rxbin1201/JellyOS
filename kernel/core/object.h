@@ -27,6 +27,7 @@ typedef enum {
     OBJECT_SHARED_MEMORY = 5,
     OBJECT_FILE          = 6,
     OBJECT_SOCKET        = 7,
+    OBJECT_INPUT         = 8,
 } object_type_t;
 
 struct object;
@@ -42,6 +43,7 @@ typedef struct object {
     uint32_t            refs;
     const object_ops_t *ops;
     wait_queue_t        waiters;
+    list_t              observers; /* object_wait_many() callers watching several objects */
 } object_t;
 
 void     object_init(object_t *object, object_type_t type, const object_ops_t *ops);
@@ -53,6 +55,10 @@ void     object_notify(object_t *object);
 
 /* Wait until signaled. timeout 0 polls, WAIT_FOREVER blocks indefinitely. */
 status_t object_wait(object_t *object, uint64_t timeout_ns);
+
+/* Wait until one of `count` objects (at most OBJECT_WAIT_MANY_MAX) is signaled; *index tells which. */
+#define OBJECT_WAIT_MANY_MAX 64
+status_t object_wait_many(object_t *const *objects, uint32_t count, uint64_t timeout_ns, uint32_t *index);
 
 const char *object_type_name(object_type_t type);
 

@@ -16,7 +16,7 @@ static void panic_common(const struct arch_interrupt_frame *frame, const char *r
 
     /* A panic inside the panic handler must not recurse. */
     if (panicking++) {
-        arch_early_console_write("\n*** nested panic, halting ***\n");
+        kconsole_write("\n*** nested panic, halting ***\n", 31);
         arch_halt();
     }
 

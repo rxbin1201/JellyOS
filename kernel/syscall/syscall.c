@@ -419,6 +419,15 @@ static const syscall_fn table[SYS_COUNT] = {
     [SYS_NET_INTERFACE_INFO] = sys_net_interface_info,
     [SYS_NET_CONFIGURE]    = sys_net_configure,
     [SYS_NET_RESOLVE]      = sys_net_resolve,
+    [SYS_OBJECT_WAIT_MANY] = sys_object_wait_many,
+    [SYS_CHANNEL_SEND_HANDLES] = sys_channel_send_handles,
+    [SYS_CHANNEL_RECEIVE_HANDLES] = sys_channel_receive_handles,
+    [SYS_SERVICE_REGISTER] = sys_service_register,
+    [SYS_SERVICE_CONNECT]  = sys_service_connect,
+    [SYS_DISPLAY_INFO]     = sys_display_info,
+    [SYS_DISPLAY_ACQUIRE]  = sys_display_acquire,
+    [SYS_INPUT_OPEN]       = sys_input_open,
+    [SYS_INPUT_READ]       = sys_input_read,
 };
 
 uint64_t syscall_dispatch(uint64_t number, const uint64_t args[6])

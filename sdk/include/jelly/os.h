@@ -100,6 +100,20 @@ status_t jelly_net_interface_info(uint32_t index, jelly_netif_info_t *info);
 status_t jelly_net_configure(uint32_t index, const jelly_netif_config_t *config);
 status_t jelly_net_resolve(const char *name, uint32_t *address);
 
+/* Graphics and input (ABI version 5) */
+status_t jelly_wait_many(const jelly_handle_t *handles, uint32_t count, uint64_t timeout_ns, uint32_t *index);
+/* The handles are moved into the message: they are closed for the sender. */
+status_t jelly_channel_send_handles(jelly_handle_t channel, const void *data, size_t size,
+                                    const jelly_handle_t *handles, uint32_t count);
+status_t jelly_channel_receive_handles(jelly_handle_t channel, void *buffer, size_t size, size_t *actual,
+                                       jelly_handle_t handles[JELLY_CHANNEL_MAX_HANDLES], uint32_t *count);
+status_t jelly_service_register(const char *name, jelly_handle_t channel);
+status_t jelly_service_connect(const char *name, jelly_handle_t *channel);
+status_t jelly_display_info(uint32_t index, jelly_display_info_t *info);
+status_t jelly_display_acquire(uint32_t index, jelly_handle_t *framebuffer);
+status_t jelly_input_open(jelly_handle_t *input);
+status_t jelly_input_read(jelly_handle_t input, jelly_input_event_t *events, size_t count, size_t *read);
+
 /* Startup handle slot `index` of a libc program (JELLY_HANDLE_INVALID if absent).
    Provided by the libc entry code, not by libos. */
 jelly_handle_t jelly_startup_handle(unsigned index);
