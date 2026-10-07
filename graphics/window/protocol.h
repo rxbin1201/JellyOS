@@ -85,6 +85,9 @@ enum {
     WM_EVENT_SETTINGS,     /* desktop settings changed: reload them */
     WM_EVENT_WINDOWS,      /* client library: the window list changed (wm_window_list()) */
     WM_EVENT_NOTIFICATION, /* desktop shell: wm_last_notification() has title and text */
+    /* Gamepads (to the window with the keyboard focus): key = device, button = number or axis, x = value */
+    WM_EVENT_GAMEPAD_BUTTON, /* button = 0-based number, x = 1 pressed / 0 released */
+    WM_EVENT_GAMEPAD_AXIS,   /* button = JELLY_AXIS_*, x = -32768..32767 */
 };
 
 #define WM_MOD_SHIFT (1u << 0)

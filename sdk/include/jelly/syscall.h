@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define JELLY_SYSCALL_ABI_VERSION 6
+#define JELLY_SYSCALL_ABI_VERSION 7
 
 typedef uint32_t jelly_handle_t;
 #define JELLY_HANDLE_INVALID 0u
@@ -98,6 +98,12 @@ enum {
     SYS_PROCESS_SPAWN_AS = 68, /* (const jelly_spawn_t *request, uint32_t uid, uint32_t gid, jelly_handle_t *process)  root */
     SYS_CLOCK_REALTIME   = 69, /* (uint64_t *ns)                      ns since 1970-01-01 UTC; NOT_SUPPORTED without RTC */
     SYS_SYSTEM_INFO      = 70, /* (jelly_system_info_t *info) */
+    /* ABI version 7: audio (and gamepad input events) */
+    SYS_AUDIO_INFO       = 71, /* (uint32_t index, jelly_audio_info_t *info)                 NOT_FOUND past the last */
+    SYS_AUDIO_OPEN       = 72, /* (uint32_t index, jelly_handle_t *device)                   root only, exclusive */
+    SYS_AUDIO_WRITE      = 73, /* (handle, const int16_t *frames, size_t count, size_t *done)   never blocks */
+    SYS_AUDIO_READ       = 74, /* (handle, int16_t *frames, size_t count, size_t *done)         never blocks */
+    SYS_AUDIO_CONTROL    = 75, /* (handle, uint32_t command, uint64_t value, uint64_t *result) */
     SYS_COUNT
 };
 
@@ -295,6 +301,18 @@ typedef struct {
 #define JELLY_INPUT_MOUSE_MOVE   3 /* dx, dy relative; with JELLY_INPUT_ABSOLUTE also x, y in 0..65535 */
 #define JELLY_INPUT_MOUSE_BUTTON 4 /* code = JELLY_BUTTON_*, value = 1 pressed / 0 released */
 #define JELLY_INPUT_MOUSE_WHEEL  5 /* value = steps, positive away from the user */
+/* ABI version 7: gamepads */
+#define JELLY_INPUT_GAMEPAD_BUTTON 6 /* code = button number (0-based), value = 1 pressed / 0 released */
+#define JELLY_INPUT_GAMEPAD_AXIS   7 /* code = JELLY_AXIS_*, value = -32768..32767 (hat: -1, 0, 1 scaled the same) */
+
+#define JELLY_AXIS_LEFT_X    0
+#define JELLY_AXIS_LEFT_Y    1
+#define JELLY_AXIS_RIGHT_X   2
+#define JELLY_AXIS_RIGHT_Y   3
+#define JELLY_AXIS_TRIGGER_L 4
+#define JELLY_AXIS_TRIGGER_R 5
+#define JELLY_AXIS_HAT_X     6
+#define JELLY_AXIS_HAT_Y     7
 
 #define JELLY_INPUT_ABSOLUTE     (1u << 0)
 
@@ -309,6 +327,41 @@ typedef struct {
     uint32_t device;          /* source device number */
     uint32_t reserved;
 } jelly_input_event_t;
+
+/* --- Audio (ABI version 7) --------------------------------------------------- */
+
+/*
+ * An audio device plays and records interleaved signed 16-bit little-endian
+ * frames at the rate and channel count it reports (JellyOS drivers use
+ * 48000 Hz stereo). The audio server owns the device; applications talk to
+ * the server.
+ */
+#define JELLY_AUDIO_PLAYBACK (1u << 0)
+#define JELLY_AUDIO_CAPTURE  (1u << 1)
+
+typedef struct {
+    uint32_t index;
+    uint32_t flags;            /* JELLY_AUDIO_* directions the device supports */
+    uint32_t rate;             /* frames per second */
+    uint32_t channels;
+    uint32_t period;           /* frames the hardware takes or delivers at a time */
+    uint32_t buffer;           /* frames the kernel buffers per direction */
+    char     name[32];
+    uint64_t played_frames;    /* frames sent to the hardware so far */
+    uint64_t captured_frames;
+    uint64_t underruns;        /* periods played (partly) as silence for lack of data */
+    uint64_t overruns;         /* times recorded frames were dropped because nobody read them */
+} jelly_audio_info_t;
+
+/*
+ * SYS_AUDIO_CONTROL commands. The device handle is signaled (JELLY_RIGHT_WAIT)
+ * while playback is enabled and at most two periods are queued, or while
+ * recorded frames of at least one period are waiting.
+ */
+#define JELLY_AUDIO_PLAYBACK_ENABLE 1 /* value 1 starts the output (silence while nothing is queued), 0 stops and empties it */
+#define JELLY_AUDIO_CAPTURE_ENABLE  2 /* value 1 starts recording, 0 stops it and empties the buffer */
+#define JELLY_AUDIO_PLAYBACK_QUEUED 3 /* result: frames queued and not yet played */
+#define JELLY_AUDIO_CAPTURE_QUEUED  4 /* result: recorded frames waiting to be read */
 
 /* --- Desktop (ABI version 6) ------------------------------------------------- */
 

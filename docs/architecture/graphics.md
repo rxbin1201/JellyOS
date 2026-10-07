@@ -2,6 +2,7 @@
 
 **Code:** [`graphics/`](../../graphics/) (libraries), [`drivers/graphics/`](../../drivers/graphics/) (displays, framebuffer console), [`input/`](../../input/) (input manager), [`drivers/input/`](../../drivers/input/), [`userspace/services/display/`](../../userspace/services/display/) (display server), [`userspace/applications/`](../../userspace/applications/) (`guidemo`, `terminal`)
 **ABI:** [../abi/syscalls.md](../abi/syscalls.md) (version 5)
+**Input devices (PS/2, USB HID, gamepads) and key repeat:** [input.md](input.md)
 
 Phase 9 (milestone M8): graphical applications run. The order follows
 README section 33: UEFI GOP framebuffer, drawing, display abstraction,
@@ -60,7 +61,7 @@ driver; everything is drawn in software.
   `virtio-keyboard-pci`, `virtio-mouse-pci` and `virtio-tablet-pci`. It
   translates evdev events in its MSI-X interrupt handler: keys and buttons
   directly, relative and absolute axes collected until `EV_SYN`.
-- PS/2, USB HID and gamepads follow in Phase 11 behind the same interface.
+- PS/2, USB HID and gamepads came in Phase 11 behind the same interface: [input.md](input.md).
 
 ### IPC additions
 

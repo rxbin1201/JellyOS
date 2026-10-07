@@ -669,6 +669,32 @@ static void key_event(uint32_t key, bool down, bool repeat)
     send_event(w, &e);
 }
 
+/*
+ * Key repeat is made here, the same for every keyboard: USB keyboards never
+ * repeat by themselves, PS/2 keyboards do (their repeats are ignored).
+ */
+#define REPEAT_DELAY_NS    400000000ull
+#define REPEAT_INTERVAL_NS 33000000ull
+
+static uint32_t repeat_key;
+static uint64_t repeat_at;
+
+static void gamepad_event(const jelly_input_event_t *e)
+{
+    comp_window_t *w = compositor_focused(&compositor);
+    if (!w)
+        return;
+    wm_event_t event = {
+        .type = e->type == JELLY_INPUT_GAMEPAD_BUTTON ? WM_EVENT_GAMEPAD_BUTTON : WM_EVENT_GAMEPAD_AXIS,
+        .key = e->device,
+        .button = e->code,
+        .x = e->value,
+        .modifiers = modifiers,
+        .buttons = buttons,
+    };
+    send_event(w, &event);
+}
+
 static void handle_input(void)
 {
     jelly_input_event_t events[32];
@@ -703,10 +729,22 @@ static void handle_input(void)
                 break;
             }
             case JELLY_INPUT_KEY_DOWN:
-                key_event(e->code, true, e->value == 2);
+                if (e->value == 2)
+                    break; /* the keyboard's own repeat */
+                key_event(e->code, true, false);
+                if (!modifier_of(e->code)) {
+                    repeat_key = e->code;
+                    repeat_at = jelly_clock_ns() + REPEAT_DELAY_NS;
+                }
                 break;
             case JELLY_INPUT_KEY_UP:
+                if (e->code == repeat_key)
+                    repeat_key = 0;
                 key_event(e->code, false, false);
+                break;
+            case JELLY_INPUT_GAMEPAD_BUTTON:
+            case JELLY_INPUT_GAMEPAD_AXIS:
+                gamepad_event(e);
                 break;
             }
         }
@@ -801,10 +839,17 @@ int main(void)
                 owners[count++] = &clients[i];
             }
         }
-        jelly_wait_many(handles, count, JELLY_WAIT_FOREVER, &index);
+        uint64_t timeout = JELLY_WAIT_FOREVER, now = jelly_clock_ns();
+        if (repeat_key)
+            timeout = repeat_at > now ? repeat_at - now : 0;
+        jelly_wait_many(handles, count, timeout, &index);
 
         /* Serve everything that is ready, not only what woke us. */
         handle_input();
+        if (repeat_key && jelly_clock_ns() >= repeat_at) { /* after handle_input(): the key may be up by now */
+            key_event(repeat_key, true, true);
+            repeat_at = jelly_clock_ns() + REPEAT_INTERVAL_NS;
+        }
         accept_clients();
         for (uint32_t i = 2; i < count; i++) {
             if (owners[i]->used)

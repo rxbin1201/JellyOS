@@ -2,7 +2,8 @@
  * settings: desktop settings and system information (Phase 10).
  *
  * Sections: Appearance (dark mode, large text), Keyboard (layout), Network
- * (interfaces), System (version, uptime, memory, time). Changes are saved
+ * (interfaces), System (version, uptime, memory, time), Sound (system
+ * volume, kept by the audio server). Changes of the first two are saved
  * to ~/.config/desktop.conf and announced with WM_SETTINGS_CHANGED, so
  * every program applies them at once.
  */
@@ -12,7 +13,9 @@
 #include <time.h>
 
 #include <jelly/os.h>
+#include <process.h>
 
+#include "audio/client/audio.h"
 #include "graphics/gui/gui.h"
 
 static gui_app_t *app;
@@ -173,9 +176,85 @@ static void show_system(void)
     }
 }
 
+/* --- Sound ---------------------------------------------------------------------- */
+
+static widget_t *volume_label;
+static uint32_t volume_percent;
+static bool volume_muted;
+
+static void show_volume(void)
+{
+    char line[64];
+    snprintf(line, sizeof(line), "Volume: %u%%%s", volume_percent, volume_muted ? " (muted)" : "");
+    gui_label_set_text(volume_label, line);
+}
+
+static void apply_volume(void)
+{
+    audio_set_master(volume_percent, volume_muted);
+    show_volume();
+    say("volume %u%s", volume_percent, volume_muted ? " muted" : "");
+}
+
+static void volume_down(widget_t *button, void *user)
+{
+    (void)button;
+    (void)user;
+    volume_percent = volume_percent >= 10 ? volume_percent - 10 : 0;
+    apply_volume();
+}
+
+static void volume_up(widget_t *button, void *user)
+{
+    (void)button;
+    (void)user;
+    volume_percent = volume_percent <= 90 ? volume_percent + 10 : 100;
+    apply_volume();
+}
+
+static void toggle_mute(widget_t *box, void *user)
+{
+    (void)user;
+    volume_muted = gui_checkbox_checked(box);
+    apply_volume();
+}
+
+static void test_sound(widget_t *button, void *user)
+{
+    char *argv[] = { "/bin/play", "/usr/share/sounds/chime.wav", NULL };
+    jelly_handle_t process;
+    (void)button;
+    (void)user;
+    if (process_spawn(argv[0], argv, NULL, &process) == 0)
+        jelly_handle_close(process);
+}
+
+static void show_sound(void)
+{
+    audio_info_t info;
+    char line[96];
+
+    gui_add(content, heading("Sound"));
+    if (STATUS_IS_ERROR(audio_get_master(&volume_percent, &volume_muted)) || STATUS_IS_ERROR(audio_get_info(&info))) {
+        gui_add(content, dim("No sound card found."));
+        return;
+    }
+    snprintf(line, sizeof(line), "%s, %u Hz", info.name, info.rate);
+    gui_add(content, dim(line));
+    volume_label = gui_label("");
+    gui_add(content, volume_label);
+    show_volume();
+    widget_t *row = gui_hbox(8);
+    gui_add(row, gui_button("Quieter", volume_down, NULL));
+    gui_add(row, gui_button("Louder", volume_up, NULL));
+    gui_add(row, gui_button("Test sound", test_sound, NULL));
+    gui_add(content, row);
+    gui_add(content, gui_checkbox("Mute", volume_muted, toggle_mute, NULL));
+}
+
 /* --- Sections ------------------------------------------------------------------- */
 
-static void (*const pages[])(void) = { show_appearance, show_keyboard, show_network, show_system };
+static void (*const pages[])(void) = { show_appearance, show_keyboard, show_network, show_system, show_sound };
 
 static void section_chosen(widget_t *list, void *user)
 {
@@ -206,6 +285,7 @@ int main(void)
     gui_list_add(sections, "Keyboard");
     gui_list_add(sections, "Network");
     gui_list_add(sections, "System");
+    gui_list_add(sections, "Sound");
     gui_set_min_size(sections, 150, 0);
     gui_add(root, sections);
     content = gui_vbox(10);

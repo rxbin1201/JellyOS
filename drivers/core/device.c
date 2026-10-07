@@ -180,6 +180,16 @@ status_t device_register(device_t *device, bus_t *bus, device_t *parent)
     return STATUS_SUCCESS;
 }
 
+void device_unregister(device_t *device)
+{
+    if (device->driver)
+        detach(device);
+    list_remove(&device->sibling_node);
+    if (device->bus)
+        list_remove(&device->bus_node);
+    klog_debug("device %s: removed", device->name);
+}
+
 status_t driver_register(driver_t *driver)
 {
     bus_t *bus = bus_find(driver->bus_name);
@@ -316,4 +326,6 @@ void device_tree_dump(void)
 
 EXPORT_SYMBOL(driver_register);
 EXPORT_SYMBOL(driver_unregister);
+EXPORT_SYMBOL(device_register);
+EXPORT_SYMBOL(device_unregister);
 EXPORT_SYMBOL(device_find);

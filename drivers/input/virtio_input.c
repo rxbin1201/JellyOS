@@ -1,7 +1,7 @@
 /*
  * VirtIO input devices (keyboard, mouse, tablet): QEMU's virtual input
- * hardware and the first input source of JellyOS. PS/2, USB HID and
- * gamepads follow in Phase 11 behind the same input manager.
+ * hardware and the first input source of JellyOS. PS/2 (ps2.c) and USB HID
+ * (usb_hid.c) sit behind the same input manager.
  *
  * The device sends Linux evdev events (type, code, value) on queue 0. The
  * driver translates them in its interrupt handler into the standardized

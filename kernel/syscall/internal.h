@@ -69,6 +69,12 @@ status_t sys_display_info(const uint64_t *a);
 status_t sys_display_acquire(const uint64_t *a);
 status_t sys_input_open(const uint64_t *a);
 status_t sys_input_read(const uint64_t *a);
+/* Audio devices, ABI 7 (audio_syscalls.c) */
+status_t sys_audio_info(const uint64_t *a);
+status_t sys_audio_open(const uint64_t *a);
+status_t sys_audio_write(const uint64_t *a);
+status_t sys_audio_read(const uint64_t *a);
+status_t sys_audio_control(const uint64_t *a);
 /* SYS_FILE_READ / WRITE on a socket handle */
 status_t syscall_socket_file_io(uint64_t handle, bool write, uint64_t buffer, uint64_t size, uint64_t *done);
 

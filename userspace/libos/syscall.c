@@ -429,3 +429,30 @@ status_t jelly_system_info(jelly_system_info_t *info)
 {
     return (status_t)SYSCALL1(SYS_SYSTEM_INFO, info);
 }
+
+/* --- Audio devices (ABI version 7) ------------------------------------------------------ */
+
+status_t jelly_audio_info(uint32_t index, jelly_audio_info_t *info)
+{
+    return (status_t)SYSCALL2(SYS_AUDIO_INFO, index, info);
+}
+
+status_t jelly_audio_open(uint32_t index, jelly_handle_t *device)
+{
+    return (status_t)SYSCALL2(SYS_AUDIO_OPEN, index, device);
+}
+
+status_t jelly_audio_write(jelly_handle_t device, const int16_t *frames, size_t count, size_t *written)
+{
+    return (status_t)SYSCALL4(SYS_AUDIO_WRITE, device, frames, count, written);
+}
+
+status_t jelly_audio_read(jelly_handle_t device, int16_t *frames, size_t count, size_t *read)
+{
+    return (status_t)SYSCALL4(SYS_AUDIO_READ, device, frames, count, read);
+}
+
+status_t jelly_audio_control(jelly_handle_t device, uint32_t command, uint64_t value, uint64_t *result)
+{
+    return (status_t)SYSCALL4(SYS_AUDIO_CONTROL, device, command, value, result);
+}

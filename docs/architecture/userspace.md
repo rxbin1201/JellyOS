@@ -167,6 +167,14 @@ logging in, the desktop session runs with the user's rights: taskbar,
 launcher, terminal, file manager, settings. See [graphics.md](graphics.md)
 and [desktop.md](desktop.md).
 
+## Audio service
+
+`/sbin/audiod` (service `audio`) owns the sound card and mixes the streams of
+all programs; `play`, `record`, `tone` and `volume` are its command-line
+clients. See [audio.md](audio.md). Programs link `libaudio.a` (audio API and
+mixer) like `libgraphics.a`. libc gained `getopt()` (`<unistd.h>`) and a small
+`<math.h>` (sin, cos, sqrt, fabs, floor) in Phase 11.
+
 ## Network service
 
 `/sbin/networkd` (service `network`) configures the Ethernet interfaces by

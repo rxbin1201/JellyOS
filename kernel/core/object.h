@@ -28,6 +28,7 @@ typedef enum {
     OBJECT_FILE          = 6,
     OBJECT_SOCKET        = 7,
     OBJECT_INPUT         = 8,
+    OBJECT_AUDIO         = 9,
 } object_type_t;
 
 struct object;

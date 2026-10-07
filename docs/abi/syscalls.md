@@ -1,6 +1,6 @@
 # JellyOS System Call ABI
 
-**ABI version:** 6 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67); version 6 adds the desktop calls (68–70).
+**ABI version:** 7 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67); version 6 adds the desktop calls (68–70); version 7 adds audio devices (71–75) and the gamepad input events.
 **Headers:** [`sdk/include/jelly/syscall.h`](../../sdk/include/jelly/syscall.h) (numbers, rights, flags), [`sdk/include/jelly/status.h`](../../sdk/include/jelly/status.h) (errors), [`sdk/include/jelly/os.h`](../../sdk/include/jelly/os.h) (libos wrappers)
 
 ## Calling convention (x86_64)
@@ -208,10 +208,29 @@ See [desktop.md](../architecture/desktop.md).
 | 69 | `SYS_CLOCK_REALTIME` | `uint64_t *ns` | nanoseconds since 1970-01-01 UTC | From the CMOS RTC read at boot plus the monotonic clock. `NOT_SUPPORTED` without an RTC |
 | 70 | `SYS_SYSTEM_INFO` | `jelly_system_info_t *info` | version, uptime, memory total/free, live processes, ABI version, wall-clock time | |
 
+### Audio (version 7)
+
+See [audio.md](../architecture/audio.md). These calls are for the audio
+server; applications use the audio API (`audio/client/audio.h`). Frames are
+interleaved signed 16-bit samples in the device's format.
+
+| # | Name | Arguments | Output | Rights / notes |
+|---|---|---|---|---|
+| 71 | `SYS_AUDIO_INFO` | `index, jelly_audio_info_t *info` | name, directions, rate, channels, period, buffer size, frame and underrun/overrun counters | `NOT_FOUND` after the last device |
+| 72 | `SYS_AUDIO_OPEN` | `index, jelly_handle_t *device` | device handle (`READ`, `WRITE`, `WAIT`) | Root only. Exclusive (`BUSY`). Signaled while playback runs with at most two periods queued, or a period of recorded frames waits. Closing stops the device |
+| 73 | `SYS_AUDIO_WRITE` | `handle, const int16_t *frames, count, size_t *written` | frames queued | Needs `WRITE`. Never blocks: takes what fits |
+| 74 | `SYS_AUDIO_READ` | `handle, int16_t *frames, count, size_t *read` | recorded frames | Needs `READ`. Never blocks: 0 frames if none wait |
+| 75 | `SYS_AUDIO_CONTROL` | `handle, command, value, uint64_t *result` | | Needs `WRITE`. `JELLY_AUDIO_PLAYBACK_ENABLE` / `CAPTURE_ENABLE` (value 1 or 0; disabling empties the buffer), `PLAYBACK_QUEUED` / `CAPTURE_QUEUED` (frames, in `*result`) |
+
+Version 7 also adds two input event types (`SYS_INPUT_READ`):
+`JELLY_INPUT_GAMEPAD_BUTTON` (`code` = 0-based button, `value` = 1/0) and
+`JELLY_INPUT_GAMEPAD_AXIS` (`code` = `JELLY_AXIS_*`, `value` =
+-32768..32767). See [input.md](../architecture/input.md).
+
 ```c
 typedef struct {
     uint64_t time_ns;
-    uint32_t type;          /* JELLY_INPUT_KEY_DOWN, KEY_UP, MOUSE_MOVE, MOUSE_BUTTON, MOUSE_WHEEL */
+    uint32_t type;          /* JELLY_INPUT_KEY_DOWN, KEY_UP, MOUSE_MOVE, MOUSE_BUTTON, MOUSE_WHEEL, GAMEPAD_BUTTON, GAMEPAD_AXIS */
     uint32_t code;          /* JELLY_KEY_* (<jelly/input.h>, evdev numbering), JELLY_BUTTON_* */
     int32_t  value;         /* key: 1 press, 2 repeat; button: 1/0; wheel: steps */
     int32_t  dx, dy;        /* relative motion */

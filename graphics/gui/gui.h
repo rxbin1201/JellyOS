@@ -100,6 +100,9 @@ const gui_theme_t *gui_window_theme(gui_window_t *window);
 void          gui_window_on_close(gui_window_t *window, gui_callback_t callback, void *user);
 /* Keys the focused widget did not use (shortcuts); return true if handled. */
 void          gui_window_on_key(gui_window_t *window, bool (*fn)(gui_window_t *, const wm_event_t *, void *), void *user);
+/* WM_EVENT_GAMEPAD_BUTTON and WM_EVENT_GAMEPAD_AXIS while the window has the focus */
+void          gui_window_on_gamepad(gui_window_t *window, void (*fn)(gui_window_t *, const wm_event_t *, void *),
+                                    void *user);
 /* Mark the window for repainting (widgets do this themselves when they change). */
 void          gui_window_invalidate(gui_window_t *window);
 void          gui_window_focus(gui_window_t *window, widget_t *widget);

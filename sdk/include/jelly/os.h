@@ -127,4 +127,11 @@ jelly_handle_t jelly_startup_handle(unsigned index);
 uint64_t jelly_syscall(uint64_t number, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                        uint64_t a5);
 
+/* --- Audio devices (ABI version 7); applications use the audio server instead: audio/client/audio.h --- */
+status_t jelly_audio_info(uint32_t index, jelly_audio_info_t *info);
+status_t jelly_audio_open(uint32_t index, jelly_handle_t *device);
+status_t jelly_audio_write(jelly_handle_t device, const int16_t *frames, size_t count, size_t *written);
+status_t jelly_audio_read(jelly_handle_t device, int16_t *frames, size_t count, size_t *read);
+status_t jelly_audio_control(jelly_handle_t device, uint32_t command, uint64_t value, uint64_t *result);
+
 #endif

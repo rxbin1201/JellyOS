@@ -124,6 +124,7 @@ const char *object_type_name(object_type_t type)
     case OBJECT_FILE:          return "file";
     case OBJECT_SOCKET:        return "socket";
     case OBJECT_INPUT:         return "input";
+    case OBJECT_AUDIO:         return "audio";
     }
     return "unknown";
 }

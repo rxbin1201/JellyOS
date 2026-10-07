@@ -25,4 +25,9 @@ int      chdir(const char *path);
 int      unlink(const char *path);
 int      rmdir(const char *path);
 
+/* Short options: "ab:" accepts -a and -b ARGUMENT; returns the option, '?' for an error, -1 at the end. */
+int getopt(int argc, char *const argv[], const char *optstring);
+extern char *optarg;
+extern int   optind, opterr, optopt;
+
 #endif

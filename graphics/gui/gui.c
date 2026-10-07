@@ -131,6 +131,8 @@ struct gui_window {
     void          *on_close_user;
     bool         (*on_key)(gui_window_t *, const wm_event_t *, void *);
     void          *on_key_user;
+    void         (*on_gamepad)(gui_window_t *, const wm_event_t *, void *);
+    void          *on_gamepad_user;
 };
 
 /* --- Themes and settings --------------------------------------------------------- */
@@ -1559,6 +1561,12 @@ void gui_window_on_key(gui_window_t *win, bool (*fn)(gui_window_t *, const wm_ev
     win->on_key_user = user;
 }
 
+void gui_window_on_gamepad(gui_window_t *win, void (*fn)(gui_window_t *, const wm_event_t *, void *), void *user)
+{
+    win->on_gamepad = fn;
+    win->on_gamepad_user = user;
+}
+
 void gui_window_invalidate(gui_window_t *win)
 {
     win->dirty = true;
@@ -1706,6 +1714,11 @@ static void dispatch(gui_app_t *app, const wm_event_t *e, window_t *surface)
     case WM_EVENT_KEY_UP:
         if (win->focus && win->focus->type == W_CUSTOM && win->focus->custom.event)
             win->focus->custom.event(win->focus, e, win->focus->custom.user);
+        break;
+    case WM_EVENT_GAMEPAD_BUTTON:
+    case WM_EVENT_GAMEPAD_AXIS:
+        if (win->on_gamepad)
+            win->on_gamepad(win, e, win->on_gamepad_user);
         break;
     default:
         pointer(win, e);

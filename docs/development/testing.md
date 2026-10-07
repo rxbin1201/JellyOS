@@ -16,6 +16,14 @@ blitting, UTF-8, text and the font).
 [`tests/unit/sha256_test.c`](../../tests/unit/sha256_test.c) checks libc's
 SHA-256 against the FIPS 180-4 test vectors, and the password hash of the
 default account against `tools/image_builder/mkpasswd.py`.
+[`tests/unit/hid_test.c`](../../tests/unit/hid_test.c) feeds
+`drivers/input/hid.c` the report descriptors of a boot keyboard, a mouse,
+QEMU's USB tablet and two gamepads (report IDs, hat switch, 16-bit axes) and
+checks the events their reports become, plus malformed descriptors.
+[`tests/unit/mixer_test.c`](../../tests/unit/mixer_test.c) covers
+`audio/mixer`: sample-rate conversion up and down (a tone keeps its pitch,
+chunked input gives the same result), mono to stereo, volume, mixing and
+clipping.
 
 ## Kernel self-tests (`make test`)
 
@@ -154,6 +162,32 @@ covers:
 (Phase 10) checks the RTC wall clock (a plausible date that advances with
 the monotonic clock) and the live process count of `SYS_SYSTEM_INFO`.
 
+### Input and audio tests (Phase 11)
+
+[`tests/kernel/input_tests.c`](../../tests/kernel/input_tests.c):
+
+- PS/2: scan codes and mouse packets are injected through the i8042
+  controller (commands 0xD2/0xD3) and must arrive as input events: make,
+  typematic repeat, break, E0-prefixed keys, movement with sign bits,
+  buttons, wheel
+- HID reports of a gamepad travel through the input manager as
+  GAMEPAD_BUTTON / GAMEPAD_AXIS events
+- USB: the xHCI driver enumerates QEMU's USB keyboard and tablet and the HID
+  driver binds to both
+
+[`tests/kernel/audio_tests.c`](../../tests/kernel/audio_tests.c):
+
+- the device layer with a driver that exists only in the test: exclusive
+  open, order of frames across the end of the ring, the low-water signal,
+  underruns as silence, capture overruns dropping the oldest frames, closing
+  stops the device
+- the HD Audio driver in real time: playback takes frames at 48 000 per
+  second (compared with the monotonic clock), stops when disabled, and
+  recording delivers frames at the same rate
+
+The kernel test run attaches VirtIO and USB input devices and an Intel HDA
+card with the `none` audio backend.
+
 ## Integration test: the shell (milestone M6)
 
 After the kernel tests pass, `make test` boots a second time, normally this
@@ -206,10 +240,34 @@ checks QMP screenshots:
 - the file manager opens the viewer on a double-click
 - settings switch to the dark theme and the file manager follows; maximize
   fills the screen above the taskbar
+- the gamepad viewer starts from the launcher
 - `notify` shows a notification; logging out returns to the login
 
 Window positions follow the compositor's cascade (terminal, guidemo, files,
 viewer, settings in this order).
+
+Since Phase 11 keyboard and pointer of this run are **USB devices** on an
+xHCI controller (the kernel test run keeps the VirtIO devices as well), so
+every GUI step also exercises xHCI, the USB core and the HID driver.
+
+**Sound (milestone M10).** The machine has an Intel HDA card whose output
+QEMU writes to `build/audio-test.wav` (`-audiodev wav`); a second codec
+records silence in real time. On the shell: `svc status audio`, `volume`,
+`tone` (alone; two at once, one of them mono at 22 050 Hz), `play` of the
+generated chime, a tone at volume 50, a muted tone, `record` (file size and
+frame count) and `play` of the recording, and a file that is not a WAV file.
+After QEMU has exited, the script analyzes the WAV file in windows of 50 ms
+with the Goertzel algorithm:
+
+- a 440 Hz tone of about one second with the amplitude the program wrote
+- 1000 Hz and 2500 Hz at the same time (two programs mixed), then 2500 Hz
+  alone
+- the chime's two notes (sample-rate and channel conversion)
+- the tone at volume 50 has a quarter of the amplitude
+- the muted tone does not appear
+
+Durations are checked with tolerance: under emulation the mixer may run
+late and lose a few windows.
 
 Requirements on the host: `sgdisk` (gdisk) and `mtools`.
 

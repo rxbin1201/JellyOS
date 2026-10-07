@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Integration test for milestones M6, M7 and M8: the shell, the network and graphical applications.
+"""Integration test for milestones M6 to M10: the shell, the network, graphical applications, sound.
 
-usage: shell_test.py [--timeout SECONDS] [--qmp SOCKET] -- QEMU COMMAND LINE...
+usage: shell_test.py [--timeout SECONDS] [--qmp SOCKET] [--wav FILE] -- QEMU COMMAND LINE...
 
 The machine boots normally (initramfs, init, service manager, shell). The
 script waits for each shell prompt on the serial console, types a command,
@@ -12,15 +12,22 @@ For the network steps the QEMU command line must attach a NIC on the user
 network. The script runs an HTTP server and TCP/UDP echo servers on the
 host's 127.0.0.1, which JellyOS reaches as 10.0.2.2.
 
-With --qmp (QEMU started with -qmp unix:SOCKET,server,nowait and a VirtIO
+With --qmp (QEMU started with -qmp unix:SOCKET,server,nowait and a USB
 keyboard and tablet) the graphical steps run: the script starts guidemo,
 types and clicks through QMP input events, follows guidemo's output on the
 console and checks screenshots.
+
+With an intel-hda sound card on the command line the audio steps run. With
+--wav (the file QEMU's "wav" audio backend writes) the script analyzes
+what JellyOS played after QEMU has exited: which tones, how loud, and that
+two programs were mixed.
 Exit status 0 means every check passed.
 """
 
+import array
 import http.server
 import json
+import math
 import os
 import re
 import select
@@ -78,6 +85,122 @@ def network_steps(http_port, tcp_port, udp_port):
         ("http http://10.0.2.2:1/", ["Connection refused"]),
         ("svc status network", ["network", "running"]),
     ]
+
+
+def audio_steps():
+    """Milestone M10: the audio server, its tools and the mixer. The sound itself is checked by check_sound()."""
+    return [
+        ("svc status audio", ["audio", "running"], 10),
+        ("volume", ["volume: 100%", "HD Audio", "48000 Hz"]),
+        ("tone -f 440 -d 1000", ["tone: 440 Hz for 1000 ms"]),
+        # Two programs at once; the second stream is mono at another sample rate.
+        ("tone -f 1000 -d 1000 -v 70 & tone -f 2500 -d 1500 -v 70 -r 22050 -m",
+         ["tone: 1000 Hz for 1000 ms", "tone: 2500 Hz for 1500 ms"]),
+        ("play /usr/share/sounds/chime.wav", ["play: /usr/share/sounds/chime.wav: 22050 Hz, 1 channel, 700 ms"]),
+        ("volume 50; tone -f 3500 -d 800; volume 100", ["volume: 50%", "tone: 3500 Hz for 800 ms", "volume: 100%"]),
+        ("volume mute; tone -f 5000 -d 500; volume unmute",
+         ["volume: 100% (muted)", "tone: 5000 Hz for 500 ms", "volume: 100%"]),
+        ("record -d 1 -r 16000 -c 1 /tmp/rec.wav; ls -l /tmp/rec.wav",
+         ["record: /tmp/rec.wav: 16000 frames at 16000 Hz", "32044"]),
+        ("play /tmp/rec.wav", ["play: /tmp/rec.wav: 16000 Hz, 1 channel, 1000 ms"]),
+        ("play /etc/motd; echo code $?", ["not a PCM WAV file", "code 1"]),
+    ]
+
+
+WINDOW_SECONDS = 0.05
+TONES = (440, 660, 880, 1000, 2500, 3500, 5000)
+
+
+def read_wav(path):
+    """Left channel and sample rate of a 16-bit PCM WAV file."""
+    data = open(path, "rb").read()
+    if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise ValueError("not a WAV file")
+    position, rate, channels = 12, 0, 0
+    while position + 8 <= len(data):
+        name, size = data[position:position + 4], int.from_bytes(data[position + 4:position + 8], "little")
+        position += 8
+        if name == b"fmt ":
+            channels = int.from_bytes(data[position + 2:position + 4], "little")
+            rate = int.from_bytes(data[position + 4:position + 8], "little")
+            if int.from_bytes(data[position + 14:position + 16], "little") != 16:
+                raise ValueError("not 16 bits")
+        elif name == b"data":
+            samples = array.array("h")
+            body = data[position:]  # QEMU fixes the length only when it exits cleanly: take what is there
+            samples.frombytes(body[:len(body) // 2 * 2])
+            if sys.byteorder == "big":
+                samples.byteswap()
+            return samples[::channels], rate
+        position += size + (size & 1)
+    raise ValueError("no sample data")
+
+
+def analyze(samples, rate):
+    """Per window of 50 ms: (RMS amplitude, {tone: share of the window's energy})."""
+    size = int(rate * WINDOW_SECONDS)
+    windows = []
+    for start in range(0, len(samples) - size + 1, size):
+        window = samples[start:start + size]
+        energy = sum(v * v for v in window)
+        shares = {}
+        if energy > size * 100.0 * 100.0:  # louder than an RMS of 100: not silence
+            for tone in TONES:
+                # Goertzel: the energy at one frequency
+                coefficient = 2 * math.cos(2 * math.pi * tone / rate)
+                s1 = s2 = 0.0
+                for v in window:
+                    s1, s2 = v + coefficient * s1 - s2, s1
+                power = s1 * s1 + s2 * s2 - coefficient * s1 * s2
+                shares[tone] = 2 * power / (size * energy)
+        windows.append((math.sqrt(energy / size), shares))
+    return windows
+
+
+def check_sound(path):
+    """What JellyOS played, as recorded by QEMU. Returns the number of failures."""
+    failures = 0
+
+    def check(name, condition, detail=""):
+        nonlocal failures
+        if condition:
+            print(f"shell test: ok    sound: {name}")
+        else:
+            failures += 1
+            print(f"shell test: FAIL  sound: {name} {detail}")
+
+    try:
+        samples, rate = read_wav(path)
+    except (OSError, ValueError) as error:
+        check("QEMU recorded the output", False, f"({error})")
+        return failures
+    windows = analyze(samples, rate)
+    check("QEMU recorded the output", len(samples) > rate, f"({len(samples) / rate:.1f} s)")
+
+    def seconds(*tones, share=0.6):
+        """How long these tones together made up most of the sound, each of them clearly present."""
+        count = sum(1 for _, shares in windows
+                    if shares and sum(shares[t] for t in tones) >= share
+                    and all(shares[t] >= 0.15 for t in tones))
+        return count * WINDOW_SECONDS
+
+    def loudness(tone):
+        values = sorted(rms for rms, shares in windows if shares and shares[tone] >= 0.9)
+        return values[len(values) // 2] if values else 0.0
+
+    # Durations are lower bounds: under emulation the mixer may run late, which costs a few windows.
+    check("a 440 Hz tone of one second", 0.7 <= seconds(440) <= 1.3, f"({seconds(440):.2f} s)")
+    full = loudness(440)
+    check("the tone has the amplitude the program wrote", 9500 <= full <= 12500, f"(RMS {full:.0f}, expected 11314)")
+    check("two programs are mixed", seconds(1000, 2500) >= 0.6, f"({seconds(1000, 2500):.2f} s of 1000 + 2500 Hz)")
+    check("the longer stream plays on alone", seconds(2500, share=0.9) >= 0.25, f"({seconds(2500, share=0.9):.2f} s)")
+    check("the WAV file is played (22050 Hz mono converted)", seconds(660) >= 0.1 and seconds(880) >= 0.2,
+          f"({seconds(660):.2f} s of 660 Hz, {seconds(880):.2f} s of 880 Hz)")
+    half = loudness(3500)
+    check("volume 50 plays at a quarter of the amplitude", full > 0 and 0.2 <= half / full <= 0.3,
+          f"(RMS {half:.0f} of {full:.0f})")
+    check("a muted tone is silent", seconds(5000, share=0.2) == 0, f"({seconds(5000, share=0.2):.2f} s of 5000 Hz)")
+    return failures
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -286,7 +409,7 @@ DEMO_X, DEMO_Y = cascade(1)          # guidemo's content area
 TITLE_FOCUSED, TITLE_UNFOCUSED = 0x7C3AED, 0x3B3B4F
 DARK_BACKGROUND = 0x1B1A26
 LAUNCHER = (50, 780)                 # the JellyOS button in the taskbar
-MENU = {"Files": 562, "GUI demo": 590, "Settings": 618, "Terminal": 646, "Log out": 683}
+MENU = {"Files": 534, "GUI demo": 562, "Gamepad": 590, "Settings": 618, "Terminal": 646, "Log out": 683}
 
 
 def gui_steps(console, qmp, timeout):
@@ -401,6 +524,10 @@ def gui_steps(console, qmp, timeout):
         check("maximize fills the screen above the taskbar", shot.color(640, 6) == TITLE_FOCUSED,
               f"(top of the screen {shot.color(640, 6):06x})")
 
+    # --- The gamepad viewer starts (QEMU has no gamepad to press buttons on)
+    launch("Gamepad", "gamepad: ready")
+    time.sleep(0.5)
+
     # --- Notifications from any program
     console.send("notify Test Nachricht")
     expect("notify shows a notification", "desktop: notification 'Test'")
@@ -420,10 +547,12 @@ def gui_steps(console, qmp, timeout):
 def main():
     args = sys.argv[1:]
     timeout = 90.0
-    qmp_path = None
-    while args[:1] in (["--timeout"], ["--qmp"]):
+    qmp_path = wav_path = None
+    while args[:1] in (["--timeout"], ["--qmp"], ["--wav"]):
         if args[0] == "--timeout":
             timeout = float(args[1])
+        elif args[0] == "--wav":
+            wav_path = args[1]
         else:
             qmp_path = args[1]
         args = args[2:]
@@ -435,6 +564,8 @@ def main():
     steps = STEPS[:]
     if "virtio-net" in " ".join(args):
         steps += network_steps(*start_host_servers())
+    if "intel-hda" in " ".join(args):
+        steps += audio_steps()
     steps.append(FINAL_STEP)
     console = Console(args[1:], log)
     failures = 0
@@ -487,6 +618,8 @@ def main():
         failures += 1
         print("shell test: FAIL  QEMU did not exit after poweroff")
         console.process.kill()
+    if wav_path:
+        failures += check_sound(wav_path)
     log.close()
     print(f"shell test: {'PASSED' if failures == 0 else f'{failures} FAILED'} (log: build/shell-test.log)")
     return 0 if failures == 0 else 1

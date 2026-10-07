@@ -165,6 +165,9 @@ bus_t    *bus_find(const char *name);
 /* Add a device to the tree (parent NULL: root) and its bus, then try to bind a driver. */
 status_t  device_register(device_t *device, bus_t *bus, device_t *parent);
 
+/* The device is gone: detach its driver and take it out of the tree. It must have no children. */
+void      device_unregister(device_t *device);
+
 /* Add a driver and bind it to every matching unbound device. */
 status_t  driver_register(driver_t *driver);
 

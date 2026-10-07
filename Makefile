@@ -49,7 +49,7 @@ KERNEL_OBJ_DIR := $(BUILD)/kernel
 # Built-in drivers live in drivers/, storage layers and file systems in fs/, the network stack in net/,
 # the input manager in input/. Kernel tests (tests/kernel) are linked
 # into the kernel and run with selftest=1.
-KERNEL_SRCS    := $(shell find kernel drivers fs net input tests/kernel -name '*.c' -o -name '*.S') \
+KERNEL_SRCS    := $(shell find kernel drivers fs net input audio/device tests/kernel -name '*.c' -o -name '*.S') \
                   graphics/core/font8x16.c
 KERNEL_OBJS    := $(patsubst %,$(BUILD)/%.o,$(KERNEL_SRCS))
 KERNEL_LDS     := kernel/arch/x86_64/linker.ld
@@ -104,10 +104,17 @@ GRAPHICS_SRCS := $(wildcard graphics/*/*.c)
 GRAPHICS_OBJS := $(patsubst %,$(BUILD)/ugraphics/%.o,$(GRAPHICS_SRCS))
 GRAPHICS_A    := $(BUILD)/userspace/libgraphics.a
 
+# Audio libraries (README section 38) for userspace: the mixer and the client side of the audio server.
+# The kernel takes audio/device.
+AUDIO_SRCS    := $(wildcard audio/mixer/*.c audio/client/*.c)
+AUDIO_OBJS    := $(patsubst %,$(BUILD)/uaudio/%.o,$(AUDIO_SRCS))
+AUDIO_A       := $(BUILD)/userspace/libaudio.a
+
 # Programs of the initramfs: <name>:<install path>:<sources>
 PROGRAM_DIR  := $(BUILD)/userspace/programs
 COREUTILS    := cat cp echo false ls mkdir mv rm sleep touch true
 NETTOOLS     := http ifconfig nc nslookup ping
+AUDIOTOOLS   := play record tone volume
 PROGRAMS     := init:/init:userspace/init/init.c \
                 servicemanager:/sbin/servicemanager:userspace/services/servicemanager/servicemanager.c \
                 networkd:/sbin/networkd:userspace/services/network/networkd.c \
@@ -121,10 +128,15 @@ PROGRAMS     := init:/init:userspace/init/init.c \
                 settings:/bin/settings:userspace/applications/settings/settings.c \
                 viewer:/bin/viewer:userspace/applications/viewer/viewer.c \
                 notify:/bin/notify:userspace/applications/notify/notify.c \
+                audiod:/sbin/audiod:userspace/services/audio/audiod.c \
+                gamepad:/bin/gamepad:userspace/applications/gamepad/gamepad.c \
+                $(foreach u,$(AUDIOTOOLS),$(u):/bin/$(u):userspace/applications/audio/$(u).c) \
                 $(foreach u,$(NETTOOLS),$(u):/bin/$(u):userspace/applications/network/$(u).c) \
                 $(foreach u,$(COREUTILS),$(u):/bin/$(u):userspace/applications/coreutils/$(u).c)
 # Further sources of programs made of several files: PROGRAM_EXTRA_<name>
 PROGRAM_EXTRA_displayd := userspace/services/display/keymap.c
+PROGRAM_EXTRA_play     := userspace/applications/audio/wav.c
+PROGRAM_EXTRA_record   := userspace/applications/audio/wav.c
 program_name   = $(word 1,$(subst :, ,$(1)))
 program_path   = $(word 2,$(subst :, ,$(1)))
 program_source = $(word 3,$(subst :, ,$(1)))
@@ -137,6 +149,9 @@ INITRAMFS       := $(BUILD)/initramfs.img
 INITRAMFS_ESP   := $(ESP)/boot/initrd/current.img
 INITRAMFS_TOOL  := tools/image_builder/mkinitramfs.py
 INITRAMFS_OWNERS := tools/image_builder/initramfs.owners
+# Generated files of the initramfs: system sounds (/usr/share/sounds)
+SOUND_TOOL      := tools/image_builder/mksound.py
+SOUNDS          := $(BUILD)/sounds/chime.wav
 
 # Test program embedded into the kernel (tests/kernel/user_images.S)
 USERTEST_ELF := $(BUILD)/tests/userspace/usertest.elf
@@ -171,12 +186,22 @@ endif
 qemu_disks  = -drive if=pflash,format=raw,file=$(2) -drive format=raw,file=fat:rw:$(1)
 # VirtIO keyboard and tablet (absolute pointer) for the display server
 virtio_input = -device virtio-keyboard-pci -device virtio-tablet-pci
+# USB keyboard and tablet on an xHCI controller (the PS/2 keyboard and mouse are part of the machine)
+usb_input = -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0
+# $(call audio_hw,<backend>): Intel HDA sound card with QEMU's audio backend (none, pa, alsa, sdl, ...)
+audio_hw = -audiodev $(1),id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0
+# Sound of `make run`: silent unless a backend is chosen, e.g. `make run AUDIO=pa`
+AUDIO ?= none
+# Integration test: the output goes into a WAV file that the test analyzes; the input is silence in real time.
+AUDIO_TEST_WAV := $(BUILD)/audio-test.wav
+audio_test_hw = -audiodev wav,id=snd0,path=$(AUDIO_TEST_WAV) -audiodev none,id=snd1 \
+                -device intel-hda -device hda-output,audiodev=snd0 -device hda-micro,audiodev=snd1
 # $(call virtio_disk,<image>,<id>)
 virtio_disk = -drive file=$(1),if=none,id=$(2),format=raw -device virtio-blk-pci,drive=$(2)
 # $(call virtio_nic,<id>): VirtIO NIC on QEMU's user network (NAT; gateway and host 10.0.2.2, DNS 10.0.2.3)
 virtio_nic  = -netdev user,id=$(1) -device virtio-net-pci,netdev=$(1)
 
-QEMU_FLAGS := $(QEMU_BASE) $(call qemu_disks,$(ESP),$(VARS_COPY)) $(virtio_input)
+QEMU_FLAGS := $(QEMU_BASE) $(call qemu_disks,$(ESP),$(VARS_COPY)) $(usb_input) $(call audio_hw,$(AUDIO))
 
 # make run NET=0: without a network card
 ifneq ($(NET),0)
@@ -248,6 +273,10 @@ $(BUILD)/input/%.o: input/%
 	@mkdir -p $(@D)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
+$(BUILD)/audio/%.o: audio/%
+	@mkdir -p $(@D)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
 # The font is shared: the kernel console gets its own copy built with kernel flags.
 $(BUILD)/graphics/core/font8x16.c.o: graphics/core/font8x16.c
 	@mkdir -p $(@D)
@@ -274,6 +303,18 @@ $(GRAPHICS_A): $(GRAPHICS_OBJS)
 	@rm -f $@
 	ar rcs $@ $^
 
+$(BUILD)/uaudio/%.o: %
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+$(AUDIO_A): $(AUDIO_OBJS)
+	@rm -f $@
+	ar rcs $@ $^
+
+$(BUILD)/sounds/%.wav: $(SOUND_TOOL)
+	@mkdir -p $(@D)
+	python3 $(SOUND_TOOL) $* $@
+
 $(USERTEST_ELF): $(BUILD)/tests/userspace/usertest.c.o $(LIBOS_OBJS) $(USER_LDS)
 	$(LD) $(USER_LDFLAGS) $(BUILD)/tests/userspace/usertest.c.o $(LIBOS_OBJS) -o $@
 
@@ -290,10 +331,10 @@ program_objects = $(BUILD)/$(call program_source,$(1)).o \
 
 define program_rule
 $(PROGRAM_DIR)/$(call program_name,$(1)).elf: $(call program_objects,$(1)) $(LIBC_CRT0) $(LIBC_A) $(LIBOS_A) \
-        $(GRAPHICS_A) $(USER_LDS)
+        $(GRAPHICS_A) $(AUDIO_A) $(USER_LDS)
 	@mkdir -p $$(@D)
 	$(LD) $(USER_LDFLAGS) $(LIBC_CRT0) $(call program_objects,$(1)) \
-	      --start-group $(GRAPHICS_A) $(LIBC_A) $(LIBOS_A) --end-group $(LIBGCC) -o $$@
+	      --start-group $(GRAPHICS_A) $(AUDIO_A) $(LIBC_A) $(LIBOS_A) --end-group $(LIBGCC) -o $$@
 endef
 $(foreach p,$(PROGRAMS),$(eval $(call program_rule,$(p))))
 
@@ -304,9 +345,10 @@ $(eval $(call program_rule,$(SPAWNTEST)))
 programs: $(PROGRAM_ELFS)
 
 # The root is rebuilt from scratch so removed programs disappear from the image.
-$(INITRAMFS): $(PROGRAM_ELFS) $(INITRAMFS_TOOL) $(INITRAMFS_OWNERS) $(shell find $(INITRAMFS_SKEL) -type f)
+$(INITRAMFS): $(PROGRAM_ELFS) $(SOUNDS) $(INITRAMFS_TOOL) $(INITRAMFS_OWNERS) $(shell find $(INITRAMFS_SKEL) -type f)
 	@rm -rf $(INITRAMFS_ROOT) && mkdir -p $(INITRAMFS_ROOT)
 	@cp -r $(INITRAMFS_SKEL)/. $(INITRAMFS_ROOT)/
+	@install -D -m 0644 -t $(INITRAMFS_ROOT)/usr/share/sounds $(SOUNDS)
 	@mkdir -p $(INITRAMFS_ROOT)/bin $(INITRAMFS_ROOT)/sbin $(INITRAMFS_ROOT)/lib
 	@chmod -R u=rwX,go=rX $(INITRAMFS_ROOT)
 	@$(foreach p,$(PROGRAMS),install -D -m 0755 $(PROGRAM_DIR)/$(call program_name,$(p)).elf \
@@ -369,7 +411,7 @@ debug: all $(VARS_COPY)
 # QEMU's isa-debug-exit turns the kernel's verdict into the exit status: 1 = passed.
 # The test drivers are passed as boot modules; edu and e1000e are their devices.
 # Host unit tests: code without OS dependencies, built with the host compiler and sanitizers.
-UNIT_TESTS := $(BUILD)/unit/canvas_test $(BUILD)/unit/sha256_test
+UNIT_TESTS := $(BUILD)/unit/canvas_test $(BUILD)/unit/sha256_test $(BUILD)/unit/hid_test $(BUILD)/unit/mixer_test
 UNIT_CFLAGS := -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -I.
 
 $(BUILD)/unit/canvas_test: tests/unit/canvas_test.c graphics/core/canvas.c graphics/core/canvas.h \
@@ -381,6 +423,14 @@ $(BUILD)/unit/canvas_test: tests/unit/canvas_test.c graphics/core/canvas.c graph
 $(BUILD)/unit/sha256_test: tests/unit/sha256_test.c userspace/libc/sha256.c sdk/include/sha256.h
 	@mkdir -p $(@D)
 	$(CC) $(UNIT_CFLAGS) -idirafter $(SDK_INC) tests/unit/sha256_test.c userspace/libc/sha256.c -o $@
+
+$(BUILD)/unit/hid_test: tests/unit/hid_test.c drivers/input/hid.c drivers/input/hid.h
+	@mkdir -p $(@D)
+	$(CC) $(UNIT_CFLAGS) -idirafter $(SDK_INC) tests/unit/hid_test.c drivers/input/hid.c -o $@
+
+$(BUILD)/unit/mixer_test: tests/unit/mixer_test.c audio/mixer/mixer.c audio/mixer/mixer.h
+	@mkdir -p $(@D)
+	$(CC) $(UNIT_CFLAGS) tests/unit/mixer_test.c audio/mixer/mixer.c -o $@
 
 unit: $(UNIT_TESTS)
 	@for t in $(UNIT_TESTS); do $$t || { echo "make unit: FAILED ($$t)"; exit 1; }; done
@@ -402,7 +452,8 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	@sh tools/image_builder/mkdisk.sh $(TEST_DISK) 64 $(TEST_DISK_FILES) JELLYTEST
 	@timeout $(TEST_TIMEOUT) $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(TEST_ESP),$(TEST_VARS)) -display none \
 	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -device edu -device e1000e \
-	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(virtio_input); \
+	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(virtio_input) $(usb_input) \
+	    $(call audio_hw,none); \
 	status=$$?; \
 	if [ $$status -ne 1 ]; then echo "make test: FAILED (QEMU exit status $$status)"; exit 1; fi
 	@# The host (mtools) must read what the kernel's FAT32 driver wrote.
@@ -420,10 +471,11 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	    > $(SHELL_TEST_ESP)/boot/boot.cfg
 	@printf 'initrd=/boot/initrd/current.img\ncmdline="loglevel=info"\n' >> $(SHELL_TEST_ESP)/boot/boot.cfg
 	@cp $(OVMF_VARS) $(SHELL_TEST_VARS)
-	@rm -f $(BUILD)/qmp.sock
-	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) --qmp $(BUILD)/qmp.sock -- \
+	@rm -f $(BUILD)/qmp.sock $(AUDIO_TEST_WAV)
+	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) --qmp $(BUILD)/qmp.sock \
+	    --wav $(AUDIO_TEST_WAV) -- \
 	    $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(SHELL_TEST_ESP),$(SHELL_TEST_VARS)) -display none \
-	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(virtio_input) \
+	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(usb_input) $(audio_test_hw) \
 	    -qmp unix:$(BUILD)/qmp.sock,server,nowait || { echo "make test: FAILED (shell test)"; exit 1; }
 	@if mtype -i $(TEST_DISK)@@1M ::/motd.txt | grep -q "Welcome to JellyOS"; then \
 	    echo "make test: host reads the file the shell copied"; \
@@ -437,6 +489,8 @@ reset-vars:
 clean:
 	rm -rf $(BUILD)
 
--include $(BOOT_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(LIBOS_OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(LIBC_CRT0:.o=.d) \n         $(foreach p,$(PROGRAMS) $(SPAWNTEST),$(BUILD)/$(call program_source,$(p)).d) \
-         $(BUILD)/userspace/services/display/keymap.c.d $(GRAPHICS_OBJS:.o=.d) $(BUILD)/tests/userspace/usertest.c.d \
+-include $(BOOT_OBJS:.o=.d) $(KERNEL_OBJS:.o=.d) $(LIBOS_OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(LIBC_CRT0:.o=.d) \
+         $(foreach p,$(PROGRAMS) $(SPAWNTEST),$(BUILD)/$(call program_source,$(p)).d) \
+         $(BUILD)/userspace/services/display/keymap.c.d $(BUILD)/userspace/applications/audio/wav.c.d \
+         $(GRAPHICS_OBJS:.o=.d) $(AUDIO_OBJS:.o=.d) $(BUILD)/tests/userspace/usertest.c.d \
          $(patsubst %,$(BUILD)/%.d,$(TEST_MODULE_SRCS))
