@@ -363,3 +363,36 @@ Not yet: changing the display clock, several screens at once, the embedded
 panel of a notebook, lane reversal and other board wiring that only the
 firmware's video BIOS table knows, acceleration.
 
+
+## AMD graphics driver (Phase 12)
+
+[`drivers/graphics/amd_gpu.c`](../../drivers/graphics/amd_gpu.c) is the third
+driver behind the display driver interface: the display part of AMD's
+integrated graphics with the display engine DCN 2.1 (Ryzen 4000 and 5000
+processors with Radeon Graphics, for example the Ryzen 5 5600G).
+
+One screen is driven by a chain of blocks, each of which exists several
+times: a HUBP reads the framebuffer from memory, the DPP of the same number
+converts it and mixes the cursor in, and a timing generator (OTG) makes
+sync and blanking. The driver finds the HUBP whose surface address is the
+boot framebuffer and, through it, the timing generator.
+
+Without an option it only reports what it finds (`dmesg amdgpu`): the video
+memory, the planes, the timing registers, the kind of connection and the
+measured refresh rate. With `amdgpu=on` (the default boot entry; the entry
+`FirmwareGrafik` leaves it out) it offers:
+
+| | |
+| --- | --- |
+| Hardware pointer | The cursor of the HUBP and DPP, 64x64 ARGB. The registers hold the place of the hot spot; an image that hangs over the left or top edge is shown by moving the hot spot into the image |
+| Vertical blank | The timing generator's frame counter, polled every millisecond. Interrupts of this GPU arrive through a ring buffer (IH) that is not set up yet |
+| Page flipping | The HUBP's surface address, which the hardware takes over at the next frame; the wait ends when the "flip pending" bit is gone |
+
+The second framebuffer and the pointer image lie in the GPU's video memory
+behind the firmware's framebuffer; the CPU reaches them through BAR 0, the
+GPU through its own address of that memory (`DCN_VM_FB_LOCATION_BASE`).
+
+The mode stays the firmware's. Not yet: switching modes (the pixel clock
+and the port's PHY are programmed through the firmware's AtomBIOS tables or
+the display microcontroller on this hardware), EDID, hot plug, several
+screens, acceleration.
