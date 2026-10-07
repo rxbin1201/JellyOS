@@ -5,8 +5,9 @@
  *
  * The UEFI firmware has lit the screen and JellyOS shows its framebuffer.
  * This driver looks at how the firmware set the display engine up and, with
- * "amdgpu=on" on the kernel command line, adds what the engine can do
- * without touching the mode:
+ * "amdgpu=on" or "amdgpu=native" on the kernel command line, adds what the
+ * engine can do ("native" also switches to the monitor's best mode at once;
+ * "on" leaves the firmware's mode until somebody chooses another):
  *
  *   - a hardware pointer (the cursor of the pipe's HUBP and DPP, 64x64 ARGB)
  *   - waiting for the vertical blank (the frame counter of the timing
@@ -52,14 +53,24 @@
  * the pipe reports that it ran out of data, everything is written back.
  * The framebuffers keep their place and their line length.
  *
- * Not yet: a faster link than the firmware's (which needs the port's PHY
- * reprogrammed through the firmware's AtomBIOS tables: a 3440x1440 monitor
- * stays at 60 Hz on a link trained for that), HDMI modes, hot plug, several
- * screens, any kind of acceleration.
+ * A mode that needs a faster link than the firmware trained (a 3440x1440
+ * monitor at 100 Hz on a link set up for 60 Hz) gets one. The port's PHY
+ * is not programmed through registers the driver knows but by a program in
+ * the video BIOS ("AtomBIOS command table" DIG1TransmitterControl), which
+ * the driver runs with the interpreter in atom.c; the video BIOS comes from
+ * the ACPI table VFCT. So: display clock up (a message to the system
+ * management unit), stream and timing generator off, transmitter off and on
+ * at the new rate, link training (dp_aux.c, with this file's functions for
+ * patterns and signal levels), then the mode as above. If training fails,
+ * the old rate is brought back.
+ *
+ * Not yet: HDMI modes, hot plug, several screens, any kind of acceleration.
  */
 
+#include "drivers/acpi/acpi.h"
 #include "drivers/bus/pci/pci.h"
 #include "drivers/core/module.h"
+#include "drivers/graphics/atom.h"
 #include "drivers/graphics/display.h"
 #include "drivers/graphics/dp_aux.h"
 #include "drivers/graphics/edid.h"
@@ -171,7 +182,14 @@
 #define DIG_FE_CNTL(i)        (0x154A0 + 0x400u * (uint32_t)(i)) /* bits 2:0 timing generator, bit 10 started */
 #define DIG_BE_CNTL(i)        (0x155BC + 0x400u * (uint32_t)(i)) /* bits 18:16 mode */
 #define DIG_BE_EN_CNTL(i)     (0x155C0 + 0x400u * (uint32_t)(i))
-#define DP_LINK_CNTL(i)       (0x15720 + 0x400u * (uint32_t)(i))
+#define DP_LINK_CNTL(i)       (0x15720 + 0x400u * (uint32_t)(i)) /* bit 4: training is complete */
+#define DP_CONFIG(i)          (0x1572C + 0x400u * (uint32_t)(i)) /* lanes - 1 */
+#define DP_PHY_INTERNAL(i)    (0x1573C + 0x400u * (uint32_t)(i)) /* panel mode: 0 for a monitor */
+#define DP_LINK_FRAMING(i)    (0x1574C + 0x400u * (uint32_t)(i)) /* 17:0 idle interval, bit 24 no VB-ID, 28 enhanced */
+#define DP_PHY_CNTL(i)        (0x1575C + 0x400u * (uint32_t)(i)) /* bit 16 bypass */
+#define DP_PHY_PATTERN(i)     (0x15760 + 0x400u * (uint32_t)(i)) /* training pattern 1-4 as 0-3 */
+#define DP_PHY_PRBS(i)        (0x15774 + 0x400u * (uint32_t)(i)) /* bit 0: test pattern generator on */
+#define DP_PHY_SCRAMBLER(i)   (0x15778 + 0x400u * (uint32_t)(i)) /* bit 4 advance, 17:8 scrambler reset interval */
 #define DP_VID_STREAM_CNTL(i) (0x15730 + 0x400u * (uint32_t)(i)) /* bit 0 on, 9:8 when to stop, bit 16 sending */
 #define DP_STEER_FIFO(i)      (0x15734 + 0x400u * (uint32_t)(i)) /* bit 0 reset */
 #define DP_VID_TIMING(i)      (0x15740 + 0x400u * (uint32_t)(i)) /* bit 8: M is measured by the hardware */
@@ -204,6 +222,16 @@
 #define SMU_ARGUMENT          0x58A4C
 #define SMU_RESPONSE          0x58A6C
 
+#define SMU_SET_DISPCLK       0x4     /* messages: argument and answer in MHz */
+#define SMU_SET_DPPCLK        0x7
+
+/* The video BIOS's command table that switches a port's transmitter (PHY), and what it is told */
+#define ATOM_TRANSMITTER_CONTROL 76
+#define TRANSMITTER_DISABLE   0
+#define TRANSMITTER_ENABLE    1
+#define TRANSMITTER_LEVELS    11      /* voltage swing and pre-emphasis */
+#define CONNECTOR_DISPLAYPORT 0x13
+
 #define REGISTER_WINDOW       0x60000u
 #define MAX_MODES             24
 #define MAX_WRITES            48
@@ -232,6 +260,11 @@ typedef struct {
     int               encoder;                 /* the encoder our timing generator feeds, -1 if not found */
     bool              displayport;
     display_timing_t  current;                 /* the timing on the screen */
+
+    uint32_t          sink_khz;                /* the fastest link the monitor takes */
+    atom_t            atom;                    /* the video BIOS's programs */
+    bool              atom_ready;              /* the transmitter can be switched through them */
+    uint32_t          atom_bad_register;       /* a register beyond the BAR a table asked for (0: none) */
 } amdgpu_t;
 
 /* A register and the value it is to get: a mode switch is a list of these, and so is its undoing. */
@@ -339,6 +372,7 @@ static void read_monitor(amdgpu_t *g)
     }
     klog_info("amdgpu: AUX channel %d: the monitor accepts up to %u lanes at %u.%02u Gbit/s (DisplayPort %u.%u)",
               g->aux_engine, caps[2] & 0x1F, caps[1] * 27 / 100, caps[1] * 27 % 100, caps[0] >> 4, caps[0] & 0xF);
+    g->sink_khz = (uint32_t)(caps[1] > 0x14 ? 0x14 : caps[1]) * 27000; /* at most 5.4 Gbit/s: what this port does */
     if (dp_dpcd_read(&aux, DPCD_LINK_BW_SET, link, 2) == 2 && link[0] && (link[1] & 0x1F)) {
         g->link_khz = (uint32_t)link[0] * 27000;
         g->lanes = link[1] & 0x1F;
@@ -359,7 +393,7 @@ static void read_monitor(amdgpu_t *g)
         uint32_t hz = display_timing_hz100(t);
         klog_info("amdgpu: monitor mode %ux%u at %u.%02u Hz, pixel clock %u kHz (total %ux%u)%s", t->ha, t->va, hz / 100,
                   hz % 100, t->khz, t->ht, t->vt,
-                  g->limit_khz && t->khz > g->limit_khz ? " (too fast for the link as it is)" : "");
+                  g->limit_khz && t->khz > g->limit_khz ? " (needs a faster link than the firmware's)" : "");
     }
 }
 
@@ -475,6 +509,201 @@ static void amdgpu_cursor_move(display_t *display, int32_t x, int32_t y, bool vi
         wr(g, CURSOR_CONTROL(g->hubp), visible ? control | CURSOR_ON : control & ~CURSOR_ON);
     if (visible != !!(mixer & 1u))
         wr(g, DPP_CURSOR_CONTROL(g->hubp), visible ? mixer | 1u : mixer & ~1u);
+}
+
+/* --- The video BIOS and its programs ----------------------------------------------------- */
+
+static uint32_t atom_reg_read(void *context, uint32_t reg)
+{
+    amdgpu_t *g = context;
+
+    if ((uint64_t)reg * 4 + 4 > g->regs_size) {
+        g->atom_bad_register = reg;
+        return 0;
+    }
+    return rd(g, reg * 4);
+}
+
+static void atom_reg_write(void *context, uint32_t reg, uint32_t value)
+{
+    amdgpu_t *g = context;
+
+    if ((uint64_t)reg * 4 + 4 > g->regs_size)
+        g->atom_bad_register = reg;
+    else
+        wr(g, reg * 4, value);
+}
+
+static void atom_delay(void *context, uint32_t us)
+{
+    (void)context;
+    sleep_ms((us + 999) / 1000); /* the clock ticks in milliseconds: short delays become one */
+}
+
+/*
+ * The video BIOS of an integrated GPU is not in a ROM of its own: the firmware hands it over in the ACPI table
+ * "VFCT", a list of images each marked with the PCI device it belongs to.
+ */
+static void atom_load(amdgpu_t *g, const device_t *device)
+{
+    static uint32_t scratch[4096]; /* the tables' own memory: 16 KiB */
+    const acpi_header_t *table = acpi_find_table("VFCT", 0);
+    const uint8_t *bytes = (const uint8_t *)table;
+    const atom_io_t io = { g, atom_reg_read, atom_reg_write, atom_delay };
+    uint8_t format = 0, content = 0;
+
+    if (!table || table->length < 0x40) {
+        klog_info("amdgpu: no video BIOS (ACPI table VFCT): the link stays as the firmware trained it");
+        return;
+    }
+    /* After the ACPI header and a UUID: the offset of the first image. Each image: a header of 28 bytes
+     * (PCI bus, device, function as dwords; vendor, device, subsystem IDs; revision; length), then the BIOS. */
+    uint32_t offset = *(const uint32_t *)(bytes + 36 + 16);
+    while ((uint64_t)offset + 28 <= table->length) {
+        const uint8_t *header = bytes + offset;
+        uint32_t length = *(const uint32_t *)(header + 24);
+        uint16_t vendor = *(const uint16_t *)(header + 12), id = *(const uint16_t *)(header + 14);
+        offset += 28;
+        if ((uint64_t)offset + length > table->length)
+            break;
+        if (length && vendor == device->id.vendor && id == device->id.device) {
+            if (!atom_init(&g->atom, bytes + offset, length, &io, scratch, sizeof(scratch))) {
+                klog_warn("amdgpu: the video BIOS image in VFCT is not an AtomBIOS");
+                return;
+            }
+            if (!atom_table_revision(&g->atom, ATOM_TRANSMITTER_CONTROL, &format, &content) || content != 6) {
+                klog_info("amdgpu: video BIOS of %u KiB, but its transmitter control is revision %u.%u (6 is known here)",
+                          length >> 10, format, content);
+                return;
+            }
+            g->atom_ready = true;
+            klog_info("amdgpu: video BIOS of %u KiB from ACPI; transmitter control revision %u.%u", length >> 10, format,
+                      content);
+            return;
+        }
+        offset += length;
+    }
+    klog_info("amdgpu: the ACPI table VFCT has no video BIOS for this device");
+}
+
+/* Run the transmitter control table for our port. `value`: the lanes' levels for TRANSMITTER_LEVELS, else unused. */
+static bool transmitter(amdgpu_t *g, uint8_t action, uint8_t value, uint32_t link_khz)
+{
+    uint32_t parameters[ATOM_PARAMETERS] = { 0 }, e = (uint32_t)g->encoder;
+    uint32_t hpd = ((rd(g, DIG_BE_CNTL(e)) >> 28) & 7) + 1;
+
+    /* phy, action, mode (0: DisplayPort) or levels, lanes; link symbol clock in 10 kHz; hot plug pin, front end, connector */
+    parameters[0] = e | (uint32_t)action << 8 | (uint32_t)(action == TRANSMITTER_LEVELS ? value : 0) << 16 | g->lanes << 24;
+    parameters[1] = link_khz / 10;
+    parameters[2] = hpd | (1u << e) << 8 | CONNECTOR_DISPLAYPORT << 16;
+    g->atom_bad_register = 0;
+    bool ok = atom_execute(&g->atom, ATOM_TRANSMITTER_CONTROL, parameters);
+    klog_debug("amdgpu: transmitter control %u (0x%x, %u kHz): %u tables, %u reads, %u writes%s", action, value,
+               link_khz, g->atom.calls, g->atom.reads, g->atom.writes, ok ? "" : ", failed");
+    if (!ok)
+        klog_warn("amdgpu: the video BIOS's transmitter control stopped: %s (at 0x%x)", g->atom.error, g->atom.error_at);
+    if (g->atom_bad_register)
+        klog_warn("amdgpu: the video BIOS asked for register 0x%x, which is beyond the register BAR", g->atom_bad_register);
+    return ok;
+}
+
+/* A message to the system management unit; returns its answer, 0 if it does not answer. */
+static uint32_t smu_message(amdgpu_t *g, uint32_t message, uint32_t argument)
+{
+    for (int tries = 0; tries < 2000 && rd(g, SMU_RESPONSE) == 0; tries++)
+        sleep_ms(1); /* something else is still being worked on */
+    wr(g, SMU_RESPONSE, 0);
+    wr(g, SMU_ARGUMENT, argument);
+    wr(g, SMU_MESSAGE, message);
+    for (int tries = 0; tries < 2000 && rd(g, SMU_RESPONSE) == 0; tries++)
+        sleep_ms(1);
+    if (rd(g, SMU_RESPONSE) != 1) {
+        klog_warn("amdgpu: the system management unit answers 0x%x to message %u (%u)", rd(g, SMU_RESPONSE), message,
+                  argument);
+        return 0;
+    }
+    return rd(g, SMU_ARGUMENT);
+}
+
+/* The display clock must run at least as fast as the pixel clock (with some room). */
+static void display_clock_for(amdgpu_t *g, uint32_t pixel_khz)
+{
+    uint32_t now_khz = rd(g, CLK_DISPCLK) * 100, wanted_mhz = (pixel_khz + pixel_khz / 10 + 999) / 1000;
+
+    if (now_khz >= wanted_mhz * 1000)
+        return;
+    uint32_t got = smu_message(g, SMU_SET_DISPCLK, wanted_mhz);
+    smu_message(g, SMU_SET_DPPCLK, got ? got : wanted_mhz);
+    sleep_ms(2);
+    klog_info("amdgpu: display clock from %u to %u kHz (asked for %u MHz, the unit says %u)", now_khz,
+              rd(g, CLK_DISPCLK) * 100, wanted_mhz, got);
+}
+
+/* The source's side of link training (dp_aux.h) */
+static void source_pattern(void *context, int pattern)
+{
+    amdgpu_t *g = context;
+    uint32_t e = (uint32_t)g->encoder;
+
+    if (pattern) {
+        wr(g, DP_PHY_PATTERN(e), (uint32_t)pattern - 1);
+        wr(g, DP_LINK_CNTL(e), rd(g, DP_LINK_CNTL(e)) & ~(1u << 4));
+    } else {
+        /* Normal operation: framing as a monitor expects it, scrambler reset interval, training complete. */
+        wr(g, DP_PHY_INTERNAL(e), 0);
+        wr(g, DP_LINK_FRAMING(e), (rd(g, DP_LINK_FRAMING(e)) & ~(0x3FFFFu | 1u << 24)) | 0x2000 | 1u << 28);
+        wr(g, DP_PHY_SCRAMBLER(e), (rd(g, DP_PHY_SCRAMBLER(e)) & ~(0x3FFu << 8)) | 0x1FFu << 8);
+        wr(g, DP_LINK_CNTL(e), rd(g, DP_LINK_CNTL(e)) | 1u << 4);
+    }
+    wr(g, DP_PHY_CNTL(e), rd(g, DP_PHY_CNTL(e)) & ~(1u << 16));
+    wr(g, DP_PHY_PRBS(e), rd(g, DP_PHY_PRBS(e)) & ~1u);
+}
+
+static void source_levels(void *context, uint8_t swing, uint8_t emphasis)
+{
+    amdgpu_t *g = context;
+
+    transmitter(g, TRANSMITTER_LEVELS, (uint8_t)(swing | emphasis << 3), g->link_khz);
+}
+
+/* The transmitter off and on again at link_khz, and the link trained. The pipe must be stopped. */
+static bool link_bring_up(amdgpu_t *g, uint32_t link_khz)
+{
+    aux_engine_t where = { g, g->aux_engine };
+    dp_aux_t aux = { &where, aux_once };
+    dp_source_t source = { g, source_pattern, source_levels, 3 };
+    uint32_t e = (uint32_t)g->encoder;
+    dp_training_t training;
+
+    transmitter(g, TRANSMITTER_DISABLE, 0, g->link_khz);
+    wr(g, DP_PHY_PATTERN(e), 0);
+    wr(g, DP_LINK_CNTL(e), rd(g, DP_LINK_CNTL(e)) & ~(1u << 4));
+    wr(g, DP_PHY_INTERNAL(e), 0);
+    wr(g, DP_CONFIG(e), g->lanes - 1);
+    wr(g, DP_PHY_SCRAMBLER(e), rd(g, DP_PHY_SCRAMBLER(e)) | 1u << 4);
+    g->link_khz = link_khz;
+    if (!transmitter(g, TRANSMITTER_ENABLE, 0, link_khz))
+        return false;
+    bool ok = dp_link_train(&aux, &source, link_khz, g->lanes, false, &training);
+    if (ok)
+        klog_info("amdgpu: link trained: %u lane%s at %u.%02u Gbit/s, voltage swing %u, pre-emphasis %u", g->lanes,
+                  g->lanes == 1 ? "" : "s", link_khz / 100000, link_khz / 1000 % 100, training.swing, training.emphasis);
+    else
+        klog_warn("amdgpu: no link at %u.%02u Gbit/s: %s (lane status %02x %02x, alignment %02x)", link_khz / 100000,
+                  link_khz / 1000 % 100, training.problem, training.status[0], training.status[1], training.status[2]);
+    return ok;
+}
+
+/* The pixel clock a link of this rate carries: 24 bits per pixel over 8b/10b lanes. */
+static uint32_t link_limit(const amdgpu_t *g, uint32_t link_khz)
+{
+    return (uint32_t)((uint64_t)link_khz * 8 * g->lanes / 24);
+}
+
+/* The fastest pixel clock a mode may have: with the video BIOS's help, what the monitor's fastest link carries. */
+static uint32_t pixel_limit(const amdgpu_t *g)
+{
+    return g->atom_ready && g->sink_khz > g->link_khz ? link_limit(g, g->sink_khz) : g->limit_khz;
 }
 
 /* --- Switching modes ------------------------------------------------------------------- */
@@ -673,6 +902,28 @@ static status_t amdgpu_set_mode(display_t *display, uint32_t mode, uint32_t *pit
     klog_info("amdgpu: switching to %ux%u, pixel clock %u kHz (%u registers)", t->ha, t->va, t->khz, count);
     /* The old picture has another size: black until the console or the display server has drawn. */
     memset((void *)display->pixels, 0, (size_t)display->info.size);
+    display_clock_for(g, t->khz);
+    if (t->khz > g->limit_khz) {
+        /* The link the firmware trained is too slow for this mode: the slowest rate that carries it. */
+        static const uint32_t rates[] = { 162000, 270000, 540000 };
+        uint32_t before = g->link_khz, rate = 0;
+        for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]) && !rate; i++) {
+            if (rates[i] <= g->sink_khz && link_limit(g, rates[i]) >= t->khz)
+                rate = rates[i];
+        }
+        if (!rate || !g->atom_ready)
+            return STATUS_NOT_SUPPORTED;
+        klog_info("amdgpu: the mode needs a faster link: from %u.%02u to %u.%02u Gbit/s", before / 100000,
+                  before / 1000 % 100, rate / 100000, rate / 1000 % 100);
+        pipe_stop(g);
+        if (!link_bring_up(g, rate)) {
+            if (!link_bring_up(g, before))
+                klog_warn("amdgpu: the old link does not come back either: the screen stays dark until a restart");
+            pipe_start(g, &old);
+            return STATUS_DEVICE_ERROR;
+        }
+        g->limit_khz = link_limit(g, rate);
+    }
     if (!pipe_apply(g, list, count, undo, t)) {
         klog_warn("amdgpu: %ux%u does not come up: back to the mode before", t->ha, t->va);
         pipe_apply(g, undo, count, NULL, &old);
@@ -700,7 +951,7 @@ static void publish_modes(amdgpu_t *g, display_t *d, bool switchable)
         const display_timing_t *t = &g->modes[i];
         bool shown = known && display_timing_same(t, &g->current);
         bool fits = t->ha * 4 <= d->info.pitch && (uint64_t)t->va * d->info.pitch <= d->info.size;
-        if (shown || (fits && g->limit_khz && t->khz <= g->limit_khz))
+        if (shown || (fits && g->limit_khz && t->khz <= pixel_limit(g)))
             g->modes[kept++] = *t;
     }
     if (!switchable && known) {
@@ -866,7 +1117,9 @@ static status_t amdgpu_probe(device_t *device)
         klog_warn("amdgpu: the register BAR has only %u KiB", g->regs_size >> 10);
         return STATUS_NOT_SUPPORTED;
     }
-    g->regs = (volatile uint8_t *)vmm_map_mmio(pci->bars[5].phys, REGISTER_WINDOW, VM_UNCACHED);
+    if (g->regs_size > (1u << 20))
+        g->regs_size = 1u << 20;
+    g->regs = (volatile uint8_t *)vmm_map_mmio(pci->bars[5].phys, g->regs_size, VM_UNCACHED);
     if (!g->regs)
         return STATUS_OUT_OF_MEMORY;
     g->aperture = pci->bars[0].phys;
@@ -879,12 +1132,14 @@ static status_t amdgpu_probe(device_t *device)
         return STATUS_SUCCESS;
     }
     read_monitor(g);
+    atom_load(g, device);
     dump_state(g);
     uint32_t measured = measure_refresh(g), refresh = g->refresh_mhz ? g->refresh_mhz : measured;
     klog_info("amdgpu: %u.%02u frames per second (%s; the frame counter says about %u)", refresh / 1000,
               refresh % 1000 / 10, g->refresh_mhz ? "from the pixel clock" : "measured", measured / 1000);
-    if (!cmdline_value("amdgpu", option, sizeof(option)) || strcmp(option, "on") != 0) {
-        klog_info("amdgpu: nothing changed; boot with amdgpu=on for the hardware pointer and page flipping");
+    bool native = cmdline_value("amdgpu", option, sizeof(option)) && strcmp(option, "native") == 0;
+    if (!native && (!cmdline_value("amdgpu", option, sizeof(option)) || strcmp(option, "on") != 0)) {
+        klog_info("amdgpu: nothing changed; boot with amdgpu=native (or amdgpu=on to keep the firmware's mode)");
         return STATUS_SUCCESS;
     }
 
@@ -928,6 +1183,15 @@ static status_t amdgpu_probe(device_t *device)
     if (!STATUS_IS_ERROR(status))
         publish_modes(g, d, switchable);
     (void)refresh;
+    /* amdgpu=native: the monitor's best mode (the first of the list) right away, if it is not the firmware's. */
+    if (native && switchable && g->mode_count && !display_timing_same(&g->modes[0], &g->current)) {
+        const display_timing_t *best = &g->modes[0];
+        uint32_t hz = display_timing_hz100(best);
+        klog_info("amdgpu: amdgpu=native: the monitor's best mode is %ux%u at %u.%02u Hz", best->ha, best->va, hz / 100,
+                  hz % 100);
+        if (STATUS_IS_ERROR(display_set_mode(0, 0)))
+            klog_warn("amdgpu: the best mode does not come up: the firmware's mode stays");
+    }
     return STATUS_SUCCESS;
 }
 

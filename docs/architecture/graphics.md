@@ -379,8 +379,10 @@ boot framebuffer and, through it, the timing generator.
 
 Without an option it only reports what it finds (`dmesg amdgpu`): the video
 memory, the planes, the timing registers, the kind of connection and the
-measured refresh rate. With `amdgpu=on` (the default boot entry; the entry
-`FirmwareGrafik` leaves it out) it offers:
+measured refresh rate. With `amdgpu=native` (the default boot entry; the
+entry `FirmwareGrafik` leaves it out) it takes the display over and switches
+to the monitor's best mode at once; `amdgpu=on` does the same but keeps the
+firmware's mode until another one is chosen. It offers:
 
 | | |
 | --- | --- |
@@ -419,8 +421,32 @@ link carries as the firmware trained it:
 The framebuffers stay in place with their line length; a smaller mode shows
 their top left part.
 
-A faster link than the firmware's is not possible yet: the port's PHY is
-programmed through the firmware's AtomBIOS tables on this hardware. A
-3440x1440 monitor on a link trained for 60 Hz (2.7 Gbit/s per lane) cannot
-be switched to 100 Hz. Also not yet: HDMI modes, hot plug, several screens,
-acceleration.
+**A faster link.** The firmware trains the link only as fast as its own
+mode needs: for 3440x1440 at 60 Hz that is 2.7 Gbit/s per lane, and 100 Hz
+needs 5.4. On this hardware the port's transmitter (PHY) is not programmed
+through registers a driver is told about, but by a program in the video
+BIOS: an *AtomBIOS command table*, byte code that reads and writes
+registers. So the driver
+
+1. takes the video BIOS from the ACPI table `VFCT` (an integrated GPU has
+   no ROM of its own);
+2. runs its table `DIG1TransmitterControl` with the interpreter in
+   [`atom.c`](../../drivers/graphics/atom.c): transmitter off, on at the new
+   rate, and during training once per change of signal levels;
+3. raises the display clock, which must be at least the pixel clock, with a
+   message to the system management unit;
+4. trains the link. Training itself is shared code
+   ([`dp_aux.c`](../../drivers/graphics/dp_aux.c), `dp_link_train()`): what
+   is said to the monitor is the same for every GPU, and a driver brings two
+   functions, "send training pattern n" and "drive the lanes at these
+   levels".
+
+If the new rate cannot be trained, the old one is brought back and the mode
+stays.
+
+The interpreter knows nothing about the hardware (registers are reached
+through functions of the driver), which is what makes it testable: a unit
+test runs it on a small image built by hand
+([`tests/unit/atom_test.c`](../../tests/unit/atom_test.c)).
+
+Not yet: HDMI modes, hot plug, several screens, acceleration.

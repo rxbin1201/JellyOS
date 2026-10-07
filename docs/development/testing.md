@@ -361,3 +361,17 @@ initialization, to check exception handling and panic output:
 | `stack-overflow` | Panic: double fault, kernel stack overflow (guard page hit) |
 | `breakpoint` | Logged, execution continues |
 | `panic` / `assert` | Panic with message / failed assertion |
+
+## AtomBIOS interpreter
+
+[`tests/unit/atom_test.c`](../../tests/unit/atom_test.c) (host, `make unit`)
+tests [`drivers/graphics/atom.c`](../../drivers/graphics/atom.c), the
+interpreter for the programs in the video BIOS of AMD graphics. There is no
+such BIOS in QEMU, so the test builds a small image by hand: the headers,
+command tables that use arithmetic, partial moves into registers, compare
+and jump, switch, calls with parameters passed on, data tables, delays and
+indirect register access, and tables that must be stopped (an unknown
+instruction, an endless loop). The registers are an array.
+
+What the real tables do on a Ryzen's GPU (switching the DisplayPort
+transmitter to another link rate) can only be seen on that hardware.

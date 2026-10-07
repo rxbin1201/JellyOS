@@ -1193,7 +1193,7 @@ static bool link_good(const uint8_t *status, uint32_t lanes)
  * satisfied. Rate and number of lanes are the ones the firmware used: the
  * PLL stays as it is. Afterwards the port sends idle patterns, then pixels.
  */
-static bool dp_link_train(igpu_t *g)
+static bool port_link_train(igpu_t *g)
 {
     int port = g->port;
     uint32_t lanes = g->lanes, buf = g->buf_ctl & ~(ENABLE | DDI_BUF_LEVEL_MASK);
@@ -1310,7 +1310,7 @@ static bool dp_link_train(igpu_t *g)
 static bool link_restore(igpu_t *g)
 {
     pipe_off(g);
-    bool ok = dp_link_train(g);
+    bool ok = port_link_train(g);
     if (g->lit)
         pipe_on(g, &g->active, false);
     g->pending_surface = 0;
@@ -1472,7 +1472,7 @@ static bool output_move(igpu_t *g, int port, uint8_t *edid)
                 klog_warn("igpu: PLL %d does not lock at the link rate (status 0x%x)", g->dpll, rd(g, DPLL_STATUS));
                 continue;
             }
-            trained = dp_link_train(g);
+            trained = port_link_train(g);
         }
         if (!trained) {
             klog_warn("igpu: port %c: no DisplayPort link at any rate", 'A' + port);

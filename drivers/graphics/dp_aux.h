@@ -45,4 +45,36 @@ bool dp_dpcd_write(const dp_aux_t *aux, uint32_t address, const uint8_t *data, i
 /* The monitor's EDID (up to two blocks, 256 bytes), with retries: returns the number of valid blocks. */
 int  dp_edid_read(const dp_aux_t *aux, uint8_t *edid);
 
+/*
+ * Link training: before pixels can be sent, source and monitor agree on the signal. The monitor recovers the
+ * clock from training pattern 1 and then equalizes the lanes with pattern 2 or 3, each time asking the source
+ * for another voltage swing and pre-emphasis until it is satisfied. The talking is the same for every GPU; the
+ * source's side is two functions of the driver.
+ */
+typedef struct dp_source {
+    void   *context;
+    /* Send training pattern 1, 2 or 3 on the lanes; 0: training is over, send idle patterns and then pixels. */
+    void    (*pattern)(void *context, int pattern);
+    /* Drive all lanes with this voltage swing and pre-emphasis (levels 0-3). */
+    void    (*levels)(void *context, uint8_t swing, uint8_t emphasis);
+    uint8_t max_swing; /* the highest swing level the source has; swing + emphasis never exceeds 3 */
+} dp_source_t;
+
+typedef struct {
+    bool    clock_recovered;     /* false: it already failed with pattern 1 */
+    uint8_t swing, emphasis;     /* the levels training ended with */
+    uint8_t status[6];           /* the monitor's last DPCD_LANE_STATUS */
+    const char *problem;         /* NULL on success */
+} dp_training_t;
+
+/* Do all `lanes` report clock recovery, equalization, symbol lock and alignment in a DPCD_LANE_STATUS? */
+bool dp_link_good(const uint8_t *status, uint32_t lanes);
+
+/*
+ * Train `lanes` lanes at link_khz (162000, 270000 or 540000). The source must already send at that rate.
+ * spread: the source's clock is spread-spectrum. True if the link is up; *result says how it went.
+ */
+bool dp_link_train(const dp_aux_t *aux, const dp_source_t *source, uint32_t link_khz, uint32_t lanes, bool spread,
+                   dp_training_t *result);
+
 #endif

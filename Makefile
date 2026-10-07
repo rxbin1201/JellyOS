@@ -430,7 +430,8 @@ debug: all $(VARS_COPY)
 # QEMU's isa-debug-exit turns the kernel's verdict into the exit status: 1 = passed.
 # The test drivers are passed as boot modules; edu and e1000e are their devices.
 # Host unit tests: code without OS dependencies, built with the host compiler and sanitizers.
-UNIT_TESTS := $(BUILD)/unit/canvas_test $(BUILD)/unit/sha256_test $(BUILD)/unit/hid_test $(BUILD)/unit/mixer_test
+UNIT_TESTS := $(BUILD)/unit/canvas_test $(BUILD)/unit/sha256_test $(BUILD)/unit/hid_test $(BUILD)/unit/mixer_test \
+              $(BUILD)/unit/atom_test
 UNIT_CFLAGS := -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -I.
 
 $(BUILD)/unit/canvas_test: tests/unit/canvas_test.c graphics/core/canvas.c graphics/core/canvas.h \
@@ -450,6 +451,10 @@ $(BUILD)/unit/hid_test: tests/unit/hid_test.c drivers/input/hid.c drivers/input/
 $(BUILD)/unit/mixer_test: tests/unit/mixer_test.c audio/mixer/mixer.c audio/mixer/mixer.h
 	@mkdir -p $(@D)
 	$(CC) $(UNIT_CFLAGS) tests/unit/mixer_test.c audio/mixer/mixer.c -o $@
+
+$(BUILD)/unit/atom_test: tests/unit/atom_test.c drivers/graphics/atom.c drivers/graphics/atom.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UNIT_CFLAGS) tests/unit/atom_test.c drivers/graphics/atom.c -o $@
 
 unit: $(UNIT_TESTS)
 	@for t in $(UNIT_TESTS); do $$t || { echo "make unit: FAILED ($$t)"; exit 1; }; done
