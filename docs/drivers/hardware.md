@@ -59,7 +59,7 @@ are listed as block devices but not mounted. `dmesg` shows what was found.
 | Device | Status | Notes |
 | --- | --- | --- |
 | UEFI framebuffer (GOP) | SUPPORTED | The boot manager selects the best mode the firmware offers. Works on the ThinkCentre. Software rendering only |
-| Intel GPUs, generation 9 (Skylake to Comet Lake: HD/UHD Graphics 5xx/6xx) | PARTIALLY_SUPPORTED | Mode switching to the monitor's resolution and refresh rate with `igpu=native` (the default boot entry). Works on the ThinkCentre (UHD 630): 3440x1440 at 100 Hz over DisplayPort, 50 Hz over HDMI. Other models of the generation untested; no link training, one screen, no acceleration. No automated test: QEMU has no such device |
+| Intel GPUs, generation 9 (Skylake to Comet Lake: HD/UHD Graphics 5xx/6xx) | PARTIALLY_SUPPORTED | Mode switching to the monitor's resolution and refresh rate with `igpu=native` (the default boot entry). Works on the ThinkCentre (UHD 630): 3440x1440 at 100 Hz over DisplayPort, 50 Hz over HDMI. Hardware mouse pointer, vertical blank timing and page flipping (tear-free frames). Other models of the generation untested; no link training, one screen, no acceleration. No automated test: QEMU has no such device |
 | Other Intel GPUs | UNSUPPORTED | Only through the UEFI framebuffer |
 | AMD GPUs | UNSUPPORTED | Only through the UEFI framebuffer (a Ryzen 5 5600G shows 3440x1440 that way) |
 | NVIDIA GPUs | UNSUPPORTED | Only through the UEFI framebuffer |

@@ -93,6 +93,8 @@ def intel_nic_steps(http_port):
     """Phase 12: the Intel e1000e driver, as a second card on its own network (the host is 10.0.3.2 there)."""
     return [
         ("dmesg e1000:", ["Intel 82574L", "link up"]),
+        # The display server reports in the kernel log how it shows frames (no graphics driver in QEMU).
+        ("dmesg displayd", ["plain framebuffer, waiting for clients"]),
         ("ifconfig", ["10.0.2.15/24", "inet 10.0.3.15/24 gateway 10.0.3.2"], 30),
         ("ping -c 3 -i 0.2 10.0.3.2", ["3 packets transmitted, 3 received"]),
         (f"http http://10.0.3.2:{http_port}/hello.txt", [HOST_TEXT]),

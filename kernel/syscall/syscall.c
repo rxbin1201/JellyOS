@@ -436,6 +436,10 @@ static const syscall_fn table[SYS_COUNT] = {
     [SYS_AUDIO_WRITE]      = sys_audio_write,
     [SYS_AUDIO_READ]       = sys_audio_read,
     [SYS_AUDIO_CONTROL]    = sys_audio_control,
+    [SYS_DISPLAY_CURSOR]   = sys_display_cursor,
+    [SYS_DISPLAY_VBLANK]   = sys_display_vblank,
+    [SYS_DISPLAY_BUFFER]   = sys_display_buffer,
+    [SYS_DISPLAY_FLIP]     = sys_display_flip,
 };
 
 uint64_t syscall_dispatch(uint64_t number, const uint64_t args[6])

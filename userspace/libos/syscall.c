@@ -456,3 +456,25 @@ status_t jelly_audio_control(jelly_handle_t device, uint32_t command, uint64_t v
 {
     return (status_t)SYSCALL4(SYS_AUDIO_CONTROL, device, command, value, result);
 }
+
+/* --- Graphics driver features of a display (ABI version 8) ------------------------------ */
+
+status_t jelly_display_cursor(uint32_t index, const jelly_cursor_t *cursor)
+{
+    return (status_t)SYSCALL2(SYS_DISPLAY_CURSOR, index, cursor);
+}
+
+status_t jelly_display_vblank(uint32_t index, uint64_t timeout_ns)
+{
+    return (status_t)SYSCALL2(SYS_DISPLAY_VBLANK, index, timeout_ns);
+}
+
+status_t jelly_display_buffer(uint32_t index, uint32_t buffer, jelly_handle_t *memory)
+{
+    return (status_t)SYSCALL3(SYS_DISPLAY_BUFFER, index, buffer, memory);
+}
+
+status_t jelly_display_flip(uint32_t index, uint32_t buffer)
+{
+    return (status_t)SYSCALL2(SYS_DISPLAY_FLIP, index, buffer);
+}

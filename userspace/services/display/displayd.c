@@ -75,13 +75,14 @@ static comp_window_t *pressed_window;
 static void log_message(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static void log_message(const char *format, ...)
 {
+    /* Into the kernel log (`dmesg displayd`): a service has no terminal to print to. */
+    char text[200];
     va_list args;
     va_start(args, format);
-    printf("displayd: ");
-    vprintf(format, args);
-    printf("\n");
-    fflush(stdout);
+    int length = vsnprintf(text, sizeof(text), format, args);
     va_end(args);
+    if (length > 0)
+        jelly_debug_write(text, (size_t)length < sizeof(text) ? (size_t)length : sizeof(text) - 1);
 }
 
 static bool is_normal(const comp_window_t *w)
@@ -538,6 +539,8 @@ static rect_t sizing_rect(void)
 static void pointer_moved(void)
 {
     compositor_move_pointer(&compositor, pointer_x, pointer_y);
+    if (compositor.hardware_pointer)
+        display_pointer_move(&display, pointer_x, pointer_y, true);
     if (drag) {
         compositor_move(&compositor, drag, pointer_x - drag_dx, pointer_y - drag_dy);
         return;
@@ -821,8 +824,19 @@ int main(void)
     compositor_init(&compositor, &display);
     pointer_x = compositor.pointer_x;
     pointer_y = compositor.pointer_y;
+    if (display.hardware_pointer) {
+        /* The graphics driver has a pointer plane: the pointer no longer costs a repaint when it moves. */
+        static uint32_t image[JELLY_CURSOR_SIZE * JELLY_CURSOR_SIZE];
+        compositor_pointer_image(image, JELLY_CURSOR_SIZE);
+        if (display_pointer_image(&display, image)) {
+            compositor.hardware_pointer = true;
+            display_pointer_move(&display, pointer_x, pointer_y, true);
+        }
+    }
     compositor_render(&compositor);
-    log_message("%ux%u, keymap %s, waiting for clients", display.info.width, display.info.height, keymap_name());
+    log_message("%ux%u, keymap %s, %s%s, waiting for clients", display.info.width, display.info.height, keymap_name(),
+                display.flip ? "page flipping" : display.vblank ? "vertical blank timing" : "plain framebuffer",
+                compositor.hardware_pointer ? ", hardware pointer" : "");
     start_programs();
 
     for (;;) {

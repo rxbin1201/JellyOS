@@ -209,3 +209,104 @@ KTEST(display_framebuffer_can_be_replaced)
     KEXPECT(d->info.width == old_width && d->info.height == old_height && d->phys == old_phys);
     pmm_free_pages(phys, pages);
 }
+
+/* --- The driver interface of a display, with a driver that exists only here ---------------- */
+
+static struct {
+    int      images, moves, waits, flips;
+    int32_t  x, y;
+    bool     visible;
+    uint32_t shown, first_pixel;
+} fake_gpu;
+
+static status_t fake_cursor_image(display_t *display, const uint32_t *pixels)
+{
+    (void)display;
+    fake_gpu.images++;
+    fake_gpu.first_pixel = pixels[0];
+    return STATUS_SUCCESS;
+}
+
+static void fake_cursor_move(display_t *display, int32_t x, int32_t y, bool visible)
+{
+    (void)display;
+    fake_gpu.moves++;
+    fake_gpu.x = x;
+    fake_gpu.y = y;
+    fake_gpu.visible = visible;
+}
+
+static status_t fake_wait_vblank(display_t *display, uint64_t timeout_ns)
+{
+    (void)display;
+    fake_gpu.waits++;
+    return timeout_ns ? STATUS_SUCCESS : STATUS_TIMEOUT;
+}
+
+static status_t fake_flip(display_t *display, uint32_t buffer)
+{
+    (void)display;
+    fake_gpu.flips++;
+    fake_gpu.shown = buffer;
+    return STATUS_SUCCESS;
+}
+
+KTEST(display_driver_operations)
+{
+    static const display_ops_t all = { fake_cursor_image, fake_cursor_move, fake_wait_vblank, fake_flip };
+    static const display_ops_t pointer_only = { .cursor_image = fake_cursor_image, .cursor_move = fake_cursor_move };
+    static uint32_t image[JELLY_CURSOR_SIZE * JELLY_CURSOR_SIZE] = { 0xFF112233 };
+    display_t *d = display_get(0);
+    jelly_cursor_t cursor = { .flags = JELLY_CURSOR_IMAGE | JELLY_CURSOR_VISIBLE, .x = -3, .y = 700, .pixels = image };
+    object_t *memory, *second;
+    uint64_t phys;
+
+    if (!d)
+        return;
+    size_t pages = (size_t)(d->info.size / PAGE_SIZE);
+
+    /* Without a driver the display is a plain framebuffer and says so. */
+    KEXPECT(!(d->info.flags & (JELLY_DISPLAY_CURSOR | JELLY_DISPLAY_VBLANK | JELLY_DISPLAY_FLIP)));
+    KEXPECT(display_cursor(0, &cursor, image) == STATUS_NOT_SUPPORTED);
+    KEXPECT(display_wait_vblank(0, 1000000) == STATUS_NOT_SUPPORTED);
+    KEXPECT(display_flip(0, 1) == STATUS_NOT_SUPPORTED);
+    KEXPECT(display_buffer(0, 1, &second) == STATUS_NOT_SUPPORTED);
+    KEXPECT(display_set_driver(99, &all, NULL, 0) == STATUS_NOT_FOUND);
+
+    /* A driver with only a pointer: only that capability appears. */
+    KASSERT(display_set_driver(0, &pointer_only, NULL, 0) == STATUS_SUCCESS);
+    KEXPECT((d->info.flags & JELLY_DISPLAY_CURSOR) && !(d->info.flags & (JELLY_DISPLAY_VBLANK | JELLY_DISPLAY_FLIP)));
+    KEXPECT(display_cursor(0, &cursor, image) == STATUS_SUCCESS);
+    KEXPECT(fake_gpu.images == 1 && fake_gpu.first_pixel == 0xFF112233 && fake_gpu.x == -3 && fake_gpu.y == 700 &&
+            fake_gpu.visible);
+    cursor.flags = 0; /* move only: no new image, hidden */
+    KEXPECT(display_cursor(0, &cursor, NULL) == STATUS_SUCCESS && fake_gpu.images == 1 && !fake_gpu.visible);
+    KEXPECT(display_flip(0, 1) == STATUS_NOT_SUPPORTED);
+
+    /* Everything, with a second framebuffer: flipping needs both the operation and the memory. */
+    KASSERT(display_set_driver(0, &all, NULL, 0) == STATUS_SUCCESS);
+    KEXPECT(!(d->info.flags & JELLY_DISPLAY_FLIP));
+    KASSERT(pmm_alloc_pages(pages, &phys) == STATUS_SUCCESS);
+    KASSERT(display_set_driver(0, &all, NULL, phys) == STATUS_SUCCESS);
+    KEXPECT((d->info.flags & JELLY_DISPLAY_FLIP) && (d->info.flags & JELLY_DISPLAY_VBLANK));
+    KEXPECT(display_wait_vblank(0, 1000000) == STATUS_SUCCESS && display_wait_vblank(0, 0) == STATUS_TIMEOUT);
+    KEXPECT(display_flip(0, 2) == STATUS_INVALID_ARGUMENT);
+    KEXPECT(display_buffer(0, 0, &second) == STATUS_INVALID_ARGUMENT);
+
+    /* A display server takes the display, flips to the second buffer and goes away: the first one is shown again. */
+    KASSERT(display_acquire(0, &memory) == STATUS_SUCCESS);
+    KEXPECT(display_set_driver(0, &all, NULL, phys) == STATUS_BUSY);
+    KASSERT(display_buffer(0, 1, &second) == STATUS_SUCCESS);
+    KEXPECT(shm_size(second) == d->info.size);
+    cursor.flags = JELLY_CURSOR_VISIBLE;
+    KEXPECT(display_cursor(0, &cursor, NULL) == STATUS_SUCCESS && fake_gpu.visible);
+    KEXPECT(display_flip(0, 1) == STATUS_SUCCESS && fake_gpu.shown == 1);
+    object_release(second);
+    object_release(memory);
+    KEXPECT(fake_gpu.shown == 0 && !fake_gpu.visible && !d->acquired);
+
+    /* Back to a display without a driver, as the rest of the tests expect it. */
+    KASSERT(display_set_driver(0, NULL, NULL, 0) == STATUS_SUCCESS);
+    KEXPECT(!(d->info.flags & (JELLY_DISPLAY_CURSOR | JELLY_DISPLAY_VBLANK | JELLY_DISPLAY_FLIP)));
+    pmm_free_pages(phys, pages);
+}

@@ -65,6 +65,7 @@ typedef struct {
     int            damage_count;
     int32_t        pointer_x, pointer_y;
     bool           pointer_visible;
+    bool           hardware_pointer; /* the display shows the pointer itself: it is not painted into the picture */
     uint32_t       next_id;
     const char    *status_text;  /* bottom-right of the desktop */
     rect_t         outline;      /* resize preview, empty if none */
@@ -102,6 +103,8 @@ void           compositor_damage(compositor_t *c, rect_t area);
 /* A rectangle of a window's content changed (content coordinates). */
 void           compositor_damage_content(compositor_t *c, comp_window_t *w, rect_t area);
 void           compositor_move_pointer(compositor_t *c, int32_t x, int32_t y);
+/* The pointer as an image for a hardware pointer plane: size x size pixels (at least 19), 0xAARRGGBB, tip at 0, 0. */
+void           compositor_pointer_image(uint32_t *pixels, int32_t size);
 
 /* Repaint and present everything damaged; returns true if anything was drawn. */
 bool           compositor_render(compositor_t *c);

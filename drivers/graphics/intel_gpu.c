@@ -23,6 +23,13 @@
  *
  * Without the option nothing is changed: the driver only reports (dmesg igpu).
  *
+ * Once it owns the framebuffer it also offers the display layer's driver
+ * operations (drivers/graphics/display.h), which is all the display server
+ * ever sees of this file:
+ *   - a hardware pointer (the cursor plane with a 64x64 ARGB image)
+ *   - waiting for the vertical blank (the pipe's interrupt, delivered by MSI)
+ *   - a second framebuffer and flipping between the two (PLANE_SURF)
+ *
  * Ported from the display part of the previous JellyOS implementation
  * (minikernel, drivers/gpu/igd*.c), which was developed on a Core i5-8400T
  * with UHD Graphics 630. Register information from Intel's Programmer's
@@ -31,8 +38,8 @@
  * QEMU has no such device: this driver can only be tested on real hardware.
  *
  * Not yet: DisplayPort link training (a faster link than the firmware's),
- * changing the display clock (CDCLK), several screens, hot plug, the
- * hardware cursor, any kind of acceleration.
+ * changing the display clock (CDCLK), several screens, hot plug, changing
+ * modes after the start, any kind of acceleration.
  */
 
 #include "drivers/bus/pci/pci.h"
@@ -47,6 +54,7 @@
 #include "memory/pmm.h"
 #include "memory/vmm.h"
 #include "scheduler/thread.h"
+#include "scheduler/wait.h"
 #include "time/clock.h"
 
 /* --- Registers (offsets in BAR 0) --------------------------------------------------- */
@@ -71,7 +79,19 @@
 #define PIPECONF(p)           (0x70008 + PIPE_OFF(p)) /* bit 31 enable, bit 30 running */
 #define PIPE_FRMCOUNT(p)      (0x70040 + PIPE_OFF(p))
 #define CUR_CTL(p)            (0x70080 + PIPE_OFF(p))
-#define CUR_BASE(p)           (0x70084 + PIPE_OFF(p))
+#define CUR_BASE(p)           (0x70084 + PIPE_OFF(p)) /* writing arms the cursor registers */
+#define CUR_POS(p)            (0x70088 + PIPE_OFF(p))
+#define CUR_WM(p, level)      (0x70140 + PIPE_OFF(p) + 4u * (uint32_t)(level))
+#define CUR_BUF_CFG(p)        (0x7017C + PIPE_OFF(p))
+#define PLANE_SURFLIVE(p)     (0x701AC + PIPE_OFF(p)) /* the surface actually on the screen */
+#define MASTER_IRQ            0x44200                 /* bit 31: interrupts on; bits 16-18: pipe A-C has something */
+#define DE_PIPE_IMR(p)        (0x44404 + 0x10u * (uint32_t)(p))
+#define DE_PIPE_IIR(p)        (0x44408 + 0x10u * (uint32_t)(p))
+#define DE_PIPE_IER(p)        (0x4440C + 0x10u * (uint32_t)(p))
+#define PIPE_VBLANK           (1u << 0)
+#define CURSOR_64_ARGB        0x27
+#define DDB_BLOCKS            892                     /* generation 9: 896 blocks, 4 of them for the bypass path */
+#define CURSOR_DDB_BLOCKS     32
 #define PLANE_CTL(p)          (0x70180 + PIPE_OFF(p)) /* primary plane */
 #define PLANE_STRIDE(p)       (0x70188 + PIPE_OFF(p)) /* linear: units of 64 bytes */
 #define PLANE_POS(p)          (0x7018C + PIPE_OFF(p))
@@ -166,6 +186,19 @@ typedef struct {
     uint32_t          limit_khz;               /* fastest mode possible without retraining or a new display clock */
     uint32_t          pipeconf, plane_ctl, clk_sel, buf_ctl, tp_ctl;
     hw_mode_t         boot;
+
+    uint32_t          boot_buf_cfg;            /* the firmware's share of the display buffer for the plane */
+
+    /* Once the driver owns the screen */
+    uint32_t          surfaces[2];             /* the two framebuffers in the graphics address space */
+    uint64_t          framebuffers[2];         /* their memory */
+    uint32_t          pending_surface;         /* flipped to, not yet confirmed on the screen */
+    uint32_t          cursor_surface;
+    uint64_t          cursor_phys;
+    bool              cursor_visible;
+    uint32_t          irq;
+    wait_queue_t      vblank_waiters;
+    volatile uint64_t vblank_count;
 
     timing_t          current;                 /* the timing the firmware drives the monitor with */
     timing_t          modes[MAX_MODES];
@@ -560,6 +593,7 @@ static bool read_state(igpu_t *g)
     g->buf_ctl = rd(g, DDI_BUF_CTL(g->port));
     g->tp_ctl = rd(g, DP_TP_CTL(g->port));
     g->scaler = (rd(g, PS_CTRL(p, 0)) | rd(g, PS_CTRL(p, 1))) & ENABLE;
+    g->boot_buf_cfg = rd(g, PLANE_BUF_CFG(p));
     mode_read(g, &g->boot);
     g->source_w = (g->boot.pipesrc >> 16) + 1;
     g->source_h = (g->boot.pipesrc & 0xFFFF) + 1;
@@ -774,7 +808,11 @@ static void write_timings_and_plane(igpu_t *g, const hw_mode_t *m, bool boot_mod
     wr(g, TRANS_DDI_FUNC_CTL(p), m->ddi_func);
     if (!boot_mode) {
         scalers_off(g);
+        /* The pipe is off: split the display buffer anew, the plane first, the last blocks for the cursor. */
+        wr(g, PLANE_BUF_CFG(p), (DDB_BLOCKS - CURSOR_DDB_BLOCKS - 1) << 16);
         write_watermarks(g, (m->plane_size & 0xFFFF) + 1);
+    } else {
+        wr(g, PLANE_BUF_CFG(p), g->boot_buf_cfg);
     }
     wr(g, PLANE_STRIDE(p), m->plane_stride);
     wr(g, PLANE_POS(p), 0);
@@ -855,43 +893,195 @@ static bool frames_running(igpu_t *g)
 }
 
 /*
- * A framebuffer of `bytes` bytes: contiguous memory, entered into the global
- * graphics translation table at 1 GiB of the graphics address space (far
- * from the firmware's entries). Returns the surface address, 0 on failure.
+ * `bytes` bytes of contiguous memory, cleared, entered into the global
+ * graphics translation table from entry `first` on. Returns the address in
+ * the graphics address space, 0 on failure.
+ *
+ * The memory is cleared through the kernel's cached direct map, while it is
+ * later written through write-combining mappings: the zeros are pushed out
+ * of the cache at once, or cache lines written back later would wipe out
+ * newer pixels (the display engine reads memory, not the cache).
  */
-static uint32_t framebuffer_alloc(igpu_t *g, uint64_t bytes, uint64_t *phys)
+static uint32_t graphics_memory_alloc(igpu_t *g, uint64_t bytes, uint32_t first, uint64_t *phys)
 {
-    uint32_t pages = (uint32_t)(align_up(bytes, PAGE_SIZE) / PAGE_SIZE), base = g->ggtt_entries / 4;
+    uint32_t pages = (uint32_t)(align_up(bytes, PAGE_SIZE) / PAGE_SIZE);
 
-    if (!g->ggtt || base + pages > g->ggtt_entries) {
+    if (!g->ggtt || first + pages > g->ggtt_entries) {
         klog_warn("igpu: the graphics translation table is too small");
         return 0;
     }
     /* The firmware enters only what it uses (its framebuffer in stolen memory); the rest is whatever was there. */
     for (uint32_t i = 0; i < pages; i++) {
-        uint64_t entry = g->ggtt[base + i];
+        uint64_t entry = g->ggtt[first + i];
         if ((entry & PTE_VALID) && (entry & PTE_ADDRESS) >= g->stolen_base &&
             (entry & PTE_ADDRESS) < g->stolen_base + g->stolen_size) {
-            klog_warn("igpu: translation table entry 0x%x is in use (0x%lx)", base + i, entry);
+            klog_warn("igpu: translation table entry 0x%x is in use (0x%lx)", first + i, entry);
             return 0;
         }
     }
     if (STATUS_IS_ERROR(pmm_alloc_pages(pages, phys))) {
-        klog_warn("igpu: no %u MiB of contiguous memory for the framebuffer", (uint32_t)(bytes >> 20));
+        klog_warn("igpu: no %u KiB of contiguous memory", (uint32_t)(bytes >> 10));
         return 0;
     }
+    memset(phys_to_virt(*phys), 0, (size_t)pages * PAGE_SIZE);
+    for (uint64_t offset = 0; offset < (uint64_t)pages * PAGE_SIZE; offset += 64)
+        __asm__ volatile("clflush (%0)" : : "r"((uint8_t *)phys_to_virt(*phys) + offset) : "memory");
+    __asm__ volatile("mfence" : : : "memory");
+
     for (uint32_t i = 0; i < pages; i++)
-        g->ggtt[base + i] = (*phys + (uint64_t)i * PAGE_SIZE) | PTE_VALID;
+        g->ggtt[first + i] = (*phys + (uint64_t)i * PAGE_SIZE) | PTE_VALID;
     wr(g, GFX_FLSH_CNTL, 1);
     (void)rd(g, GFX_FLSH_CNTL);
-    return base << 12;
+    return first << 12;
 }
+
+/* --- Driver operations for the display layer ------------------------------------------ */
+
+static igpu_t *igpu_of(display_t *display)
+{
+    return display->driver_data;
+}
+
+static void igpu_interrupt(void *context)
+{
+    igpu_t *g = context;
+    uint32_t master = rd(g, MASTER_IRQ);
+
+    /* As i915 does it: master bit off, read and acknowledge the cause, master bit on. */
+    wr(g, MASTER_IRQ, 0);
+    if (master & (1u << (16 + g->pipe))) {
+        uint32_t cause = rd(g, DE_PIPE_IIR(g->pipe));
+        if (cause & PIPE_VBLANK) {
+            wr(g, DE_PIPE_IIR(g->pipe), PIPE_VBLANK);
+            g->vblank_count++;
+            wait_queue_wake_all(&g->vblank_waiters, STATUS_SUCCESS);
+        }
+    }
+    wr(g, MASTER_IRQ, ENABLE);
+}
+
+static status_t igpu_wait_vblank(display_t *display, uint64_t timeout_ns)
+{
+    igpu_t *g = igpu_of(display);
+    uint64_t deadline = wait_deadline(timeout_ns);
+    status_t status = STATUS_SUCCESS;
+
+    /* One vertical blank; after a flip one more if the new surface is not on the screen yet. */
+    for (int round = 0; round < 3 && status == STATUS_SUCCESS; round++) {
+        uint64_t flags = arch_interrupts_save();
+        uint64_t seen = g->vblank_count;
+        while (g->vblank_count == seen && status == STATUS_SUCCESS)
+            status = wait_queue_block(&g->vblank_waiters, deadline);
+        arch_interrupts_restore(flags);
+        if (!g->pending_surface || (rd(g, PLANE_SURFLIVE(g->pipe)) & ~0xFFFu) == g->pending_surface)
+            break;
+    }
+    g->pending_surface = 0;
+    return status;
+}
+
+static status_t igpu_flip(display_t *display, uint32_t buffer)
+{
+    igpu_t *g = igpu_of(display);
+
+    if (!g->surfaces[buffer])
+        return STATUS_NOT_SUPPORTED;
+    g->pending_surface = g->surfaces[buffer];
+    wr(g, PLANE_SURF(g->pipe), g->surfaces[buffer]); /* takes effect at the next vertical blank */
+    return STATUS_SUCCESS;
+}
+
+static status_t igpu_cursor_image(display_t *display, const uint32_t *pixels)
+{
+    igpu_t *g = igpu_of(display);
+    size_t bytes = JELLY_CURSOR_SIZE * JELLY_CURSOR_SIZE * sizeof(uint32_t);
+    uint8_t *image = phys_to_virt(g->cursor_phys);
+
+    memcpy(image, pixels, bytes);
+    for (size_t offset = 0; offset < bytes; offset += 64)
+        __asm__ volatile("clflush (%0)" : : "r"(image + offset) : "memory");
+    __asm__ volatile("mfence" : : : "memory");
+    wr(g, CUR_BASE(g->pipe), g->cursor_surface);
+    return STATUS_SUCCESS;
+}
+
+static void igpu_cursor_move(display_t *display, int32_t x, int32_t y, bool visible)
+{
+    igpu_t *g = igpu_of(display);
+    uint32_t position = 0;
+
+    /* Sign and magnitude: the image may hang over the left and top edges. */
+    position |= x < 0 ? (1u << 15) | ((uint32_t)-x & 0xFFF) : ((uint32_t)x & 0xFFF);
+    position |= y < 0 ? (1u << 31) | (((uint32_t)-y & 0xFFF) << 16) : (((uint32_t)y & 0xFFF) << 16);
+    if (visible != g->cursor_visible) {
+        wr(g, CUR_CTL(g->pipe), visible ? CURSOR_64_ARGB : 0);
+        g->cursor_visible = visible;
+    }
+    wr(g, CUR_POS(g->pipe), position);
+    wr(g, CUR_BASE(g->pipe), g->cursor_surface); /* position and visibility apply at the next frame */
+}
+
+/* The cursor plane: its image in graphics memory, its share of the display buffer and a watermark. */
+static bool cursor_setup(igpu_t *g, uint32_t first_entry)
+{
+    int p = g->pipe;
+    uint32_t plane_end = (rd(g, PLANE_BUF_CFG(p)) >> 16) & 0x3FF;
+    uint32_t start = plane_end + 1, end = start + CURSOR_DDB_BLOCKS - 1;
+
+    if (end >= DDB_BLOCKS) {
+        klog_info("igpu: no room in the display buffer for the cursor plane (the plane ends at block %u)", plane_end);
+        return false;
+    }
+    g->cursor_surface = graphics_memory_alloc(g, JELLY_CURSOR_SIZE * JELLY_CURSOR_SIZE * 4, first_entry, &g->cursor_phys);
+    if (!g->cursor_surface)
+        return false;
+    wr(g, CUR_BUF_CFG(p), end << 16 | start);
+    wr(g, CUR_WM(p, 0), ENABLE | 1u << 14 | 8);
+    for (int level = 1; level < 8; level++)
+        wr(g, CUR_WM(p, level), 0);
+    wr(g, CUR_CTL(p), 0); /* invisible until the display server shows it */
+    wr(g, CUR_BASE(p), g->cursor_surface);
+    return true;
+}
+
+/* The pipe's vertical blank interrupt. False if it cannot be had (the driver then offers no timing or flipping). */
+static bool vblank_setup(igpu_t *g)
+{
+    int p = g->pipe;
+
+    wait_queue_init(&g->vblank_waiters);
+    if (STATUS_IS_ERROR(pci_enable_msi(g->pci, igpu_interrupt, g, &g->irq))) {
+        klog_info("igpu: no MSI interrupt: no vertical blank timing");
+        return false;
+    }
+    wr(g, DE_PIPE_IIR(p), PIPE_VBLANK);
+    wr(g, DE_PIPE_IER(p), rd(g, DE_PIPE_IER(p)) | PIPE_VBLANK);
+    wr(g, DE_PIPE_IMR(p), rd(g, DE_PIPE_IMR(p)) & ~PIPE_VBLANK);
+    wr(g, MASTER_IRQ, ENABLE);
+
+    /* Does it arrive? Two frames at least in a tenth of a second. */
+    uint64_t before = g->vblank_count;
+    sleep_ms(100);
+    if (g->vblank_count < before + 2) {
+        klog_warn("igpu: the vertical blank interrupt does not arrive (IIR 0x%x, master 0x%x)", rd(g, DE_PIPE_IIR(p)),
+                  rd(g, MASTER_IRQ));
+        wr(g, DE_PIPE_IMR(p), rd(g, DE_PIPE_IMR(p)) | PIPE_VBLANK);
+        wr(g, DE_PIPE_IER(p), rd(g, DE_PIPE_IER(p)) & ~PIPE_VBLANK);
+        wr(g, MASTER_IRQ, 0);
+        pci_disable_msi(g->pci);
+        return false;
+    }
+    return true;
+}
+
+static display_ops_t igpu_ops; /* filled with what works on this machine */
 
 /* Switch to timing t. True on success; on failure the firmware's mode is back. */
 static bool mode_set(igpu_t *g, const timing_t *t)
 {
     uint32_t stride = (uint32_t)align_up((uint64_t)t->ha * 4, 64);
-    uint64_t bytes = (uint64_t)stride * t->va, phys = 0;
+    uint64_t bytes = (uint64_t)stride * t->va;
+    uint32_t pages = (uint32_t)(align_up(bytes, PAGE_SIZE) / PAGE_SIZE), base = g->ggtt_entries / 4;
     bool unchanged = same_timing(t, &g->current);
     hw_mode_t mode;
 
@@ -899,22 +1089,16 @@ static bool mode_set(igpu_t *g, const timing_t *t)
         klog_warn("igpu: the firmware's plane is not linear 32-bit RGB (PLANE_CTL 0x%x): not touched", g->plane_ctl);
         return false;
     }
-    uint32_t surface = framebuffer_alloc(g, bytes, &phys);
-    if (!surface)
+    /* At 1 GiB of the graphics address space, far from the firmware's entries: two framebuffers, then the cursor. */
+    g->surfaces[0] = graphics_memory_alloc(g, bytes, base, &g->framebuffers[0]);
+    if (!g->surfaces[0])
         return false;
-    /*
-     * Show black, not old memory. This goes through the kernel's cached direct map, while the screen is
-     * later written through write-combining mappings: push the zeros out of the cache now, or cache lines
-     * written back later would wipe out newer pixels.
-     */
-    memset(phys_to_virt(phys), 0, bytes);
-    for (uint64_t offset = 0; offset < bytes; offset += 64)
-        __asm__ volatile("clflush (%0)" : : "r"((uint8_t *)phys_to_virt(phys) + offset) : "memory");
-    __asm__ volatile("mfence" : : : "memory");
+    uint32_t surface = g->surfaces[0];
 
     if (unchanged) {
-        /* The monitor already gets this timing; only the picture is smaller and scaled. All of this latches at the next frame. */
-        klog_info("igpu: the monitor already runs at this timing: turning the scaler off");
+        /* The monitor already gets this timing: everything here latches at the next frame, the pipe keeps running. */
+        klog_info("igpu: the monitor already runs at this timing: %s",
+                  g->scaler ? "turning the scaler off" : "taking the plane over");
         mode = g->boot;
         mode.pipesrc = (t->ha - 1) << 16 | (t->va - 1);
         mode.plane_stride = stride / 64;
@@ -931,38 +1115,54 @@ static bool mode_set(igpu_t *g, const timing_t *t)
         wait_frame(g);
         wait_frame(g);
     } else {
-        if (t->khz > g->limit_khz) {
+        bool possible = t->khz <= g->limit_khz;
+        if (!possible)
             klog_warn("igpu: %ux%u needs a pixel clock of %u kHz, possible are %u kHz", t->ha, t->va, t->khz,
                       g->limit_khz);
-            pmm_free_pages(phys, (size_t)(align_up(bytes, PAGE_SIZE) / PAGE_SIZE));
+        mode_fill(g, t, surface, stride, &mode);
+        if (possible && g->hdmi && !hdmi_pll_compute(t->khz, &mode.cfgcr1, &mode.cfgcr2)) {
+            klog_warn("igpu: no PLL setting for %u kHz", t->khz);
+            possible = false;
+        }
+        if (!possible) {
+            pmm_free_pages(g->framebuffers[0], pages);
+            g->surfaces[0] = 0;
             return false;
         }
         klog_info("igpu: switching the %s to %ux%u, pixel clock %u kHz", g->dp ? "DisplayPort timing" : "HDMI port",
                   t->ha, t->va, t->khz);
-        mode_fill(g, t, surface, stride, &mode);
-        if (g->hdmi && !hdmi_pll_compute(t->khz, &mode.cfgcr1, &mode.cfgcr2)) {
-            klog_warn("igpu: no PLL setting for %u kHz", t->khz);
-            pmm_free_pages(phys, (size_t)(align_up(bytes, PAGE_SIZE) / PAGE_SIZE));
-            return false;
-        }
         pipe_off(g);
         if (!pipe_on(g, &mode, false) || !frames_running(g)) {
             klog_warn("igpu: %ux%u does not come up: back to the firmware's mode", t->ha, t->va);
             pipe_off(g);
             pipe_on(g, &g->boot, true);
+            g->surfaces[0] = 0;
             return false;
         }
         g->current = *t;
     }
 
-    status_t status = display_set_framebuffer(0, phys, t->ha, t->va, stride);
+    status_t status = display_set_framebuffer(0, g->framebuffers[0], t->ha, t->va, stride);
     if (STATUS_IS_ERROR(status)) {
         klog_warn("igpu: the display does not take the new framebuffer (%s)", status_name(status));
         return false;
     }
     uint32_t hz = timing_hz100(t);
     klog_info("igpu: now %ux%u at %u.%02u Hz, framebuffer of %u MiB at 0x%lx", t->ha, t->va, hz / 100, hz % 100,
-              (uint32_t)(bytes >> 20), phys);
+              (uint32_t)(bytes >> 20), g->framebuffers[0]);
+
+    /* What else the hardware can do for the display server; each part on its own. */
+    if (vblank_setup(g)) {
+        igpu_ops.wait_vblank = igpu_wait_vblank;
+        g->surfaces[1] = graphics_memory_alloc(g, bytes, base + pages, &g->framebuffers[1]);
+        if (g->surfaces[1])
+            igpu_ops.flip = igpu_flip; /* flipping needs the interrupt to know when a flip has happened */
+    }
+    if (cursor_setup(g, base + 2 * pages)) {
+        igpu_ops.cursor_image = igpu_cursor_image;
+        igpu_ops.cursor_move = igpu_cursor_move;
+    }
+    display_set_driver(0, &igpu_ops, g, g->surfaces[1] ? g->framebuffers[1] : 0);
     return true;
 }
 
@@ -1084,10 +1284,7 @@ static status_t igpu_probe(device_t *device)
     const timing_t *wanted = choose_mode(g, option);
     if (!wanted)
         return STATUS_SUCCESS;
-    if (same_timing(wanted, &g->current) && wanted->ha == g->source_w && wanted->va == g->source_h) {
-        klog_info("igpu: the screen already shows this mode");
-        return STATUS_SUCCESS;
-    }
+    /* Also if the screen already shows this mode: the driver's own framebuffers are what the extras build on. */
     mode_set(g, wanted);
     return STATUS_SUCCESS;
 }

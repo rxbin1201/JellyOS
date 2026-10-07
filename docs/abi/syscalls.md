@@ -1,6 +1,6 @@
 # JellyOS System Call ABI
 
-**ABI version:** 7 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67); version 6 adds the desktop calls (68–70); version 7 adds audio devices (71–75) and the gamepad input events.
+**ABI version:** 8 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67); version 6 adds the desktop calls (68–70); version 7 adds audio devices (71–75) and the gamepad input events; version 8 adds the display driver calls (76–79) and the display flags `CURSOR`, `VBLANK` and `FLIP`.
 **Headers:** [`sdk/include/jelly/syscall.h`](../../sdk/include/jelly/syscall.h) (numbers, rights, flags), [`sdk/include/jelly/status.h`](../../sdk/include/jelly/status.h) (errors), [`sdk/include/jelly/os.h`](../../sdk/include/jelly/os.h) (libos wrappers)
 
 ## Calling convention (x86_64)
@@ -221,6 +221,30 @@ interleaved signed 16-bit samples in the device's format.
 | 73 | `SYS_AUDIO_WRITE` | `handle, const int16_t *frames, count, size_t *written` | frames queued | Needs `WRITE`. Never blocks: takes what fits |
 | 74 | `SYS_AUDIO_READ` | `handle, int16_t *frames, count, size_t *read` | recorded frames | Needs `READ`. Never blocks: 0 frames if none wait |
 | 75 | `SYS_AUDIO_CONTROL` | `handle, command, value, uint64_t *result` | | Needs `WRITE`. `JELLY_AUDIO_PLAYBACK_ENABLE` / `CAPTURE_ENABLE` (value 1 or 0; disabling empties the buffer), `PLAYBACK_QUEUED` / `CAPTURE_QUEUED` (frames, in `*result`) |
+
+### Display drivers (ABI version 8)
+
+What a display can do beyond being a framebuffer is told by the flags in
+`jelly_display_info_t`: `JELLY_DISPLAY_CURSOR`, `JELLY_DISPLAY_VBLANK`,
+`JELLY_DISPLAY_FLIP`. They come from the display's driver in the kernel; a
+display without one (the UEFI framebuffer) has none of them and every call
+below answers `NOT_SUPPORTED`. The calls are the same for every graphics
+driver. All four are root only and need the display to be acquired.
+
+| Nr | Name | Arguments | Result | Notes |
+|---|---|---|---|---|
+| 76 | `SYS_DISPLAY_CURSOR` | `index, const jelly_cursor_t *cursor` | | Hardware pointer. With `JELLY_CURSOR_IMAGE`, `pixels` is a new image of 64×64 pixels, 0xAARRGGBB; `x`, `y` is the top left corner of the image on the screen (may be negative or beyond the edge); shown only with `JELLY_CURSOR_VISIBLE` |
+| 77 | `SYS_DISPLAY_VBLANK` | `index, timeout_ns` | | Sleeps until the next frame begins; after a flip, until the new framebuffer is the one being shown. `TIMEOUT` |
+| 78 | `SYS_DISPLAY_BUFFER` | `index, buffer, jelly_handle_t *memory` | memory handle (`MAP`, `WRITE`) | The second framebuffer (`buffer` = 1) of a display with `FLIP`; same size and format as the first |
+| 79 | `SYS_DISPLAY_FLIP` | `index, buffer` | | Shows framebuffer 0 or 1 from the next frame on. Returns at once; wait with `SYS_DISPLAY_VBLANK`. When the owner releases the display, buffer 0 is shown again and the pointer hidden |
+
+```c
+typedef struct {
+    uint32_t        flags;  /* JELLY_CURSOR_IMAGE | JELLY_CURSOR_VISIBLE */
+    int32_t         x, y;
+    const uint32_t *pixels; /* with JELLY_CURSOR_IMAGE */
+} jelly_cursor_t;
+```
 
 Version 7 also adds two input event types (`SYS_INPUT_READ`):
 `JELLY_INPUT_GAMEPAD_BUTTON` (`code` = 0-based button, `value` = 1/0) and

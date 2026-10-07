@@ -275,3 +275,56 @@ status_t sys_system_info(const uint64_t *a)
     info.realtime_ns = clock_realtime_ns();
     return copy_to_user(a[0], &info, sizeof(info));
 }
+
+/* --- Graphics driver features of a display (ABI 8) ----------------------------- */
+
+status_t sys_display_cursor(const uint64_t *a)
+{
+    jelly_cursor_t cursor;
+    uint32_t *pixels = NULL;
+    size_t bytes = JELLY_CURSOR_SIZE * JELLY_CURSOR_SIZE * sizeof(uint32_t);
+
+    if (!is_root())
+        return STATUS_ACCESS_DENIED;
+    status_t status = copy_from_user(&cursor, a[1], sizeof(cursor));
+    if (STATUS_IS_ERROR(status))
+        return status;
+    if (cursor.flags & JELLY_CURSOR_IMAGE) {
+        pixels = kmalloc(bytes);
+        if (!pixels)
+            return STATUS_OUT_OF_MEMORY;
+        status = copy_from_user(pixels, (uint64_t)(uintptr_t)cursor.pixels, bytes);
+    }
+    if (!STATUS_IS_ERROR(status))
+        status = display_cursor((uint32_t)a[0], &cursor, pixels);
+    kfree(pixels);
+    return status;
+}
+
+status_t sys_display_vblank(const uint64_t *a)
+{
+    if (!is_root())
+        return STATUS_ACCESS_DENIED;
+    return display_wait_vblank((uint32_t)a[0], a[1]);
+}
+
+status_t sys_display_buffer(const uint64_t *a)
+{
+    object_t *memory;
+
+    if (!is_root())
+        return STATUS_ACCESS_DENIED;
+    if (!user_range_ok(a[2], sizeof(jelly_handle_t), true))
+        return STATUS_INVALID_ARGUMENT;
+    status_t status = display_buffer((uint32_t)a[0], (uint32_t)a[1], &memory);
+    if (STATUS_IS_ERROR(status))
+        return status;
+    return syscall_give_handle(memory, JELLY_RIGHT_MAP | JELLY_RIGHT_WRITE, a[2]);
+}
+
+status_t sys_display_flip(const uint64_t *a)
+{
+    if (!is_root())
+        return STATUS_ACCESS_DENIED;
+    return display_flip((uint32_t)a[0], (uint32_t)a[1]);
+}

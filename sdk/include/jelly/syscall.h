@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define JELLY_SYSCALL_ABI_VERSION 7
+#define JELLY_SYSCALL_ABI_VERSION 8
 
 typedef uint32_t jelly_handle_t;
 #define JELLY_HANDLE_INVALID 0u
@@ -104,6 +104,11 @@ enum {
     SYS_AUDIO_WRITE      = 73, /* (handle, const int16_t *frames, size_t count, size_t *done)   never blocks */
     SYS_AUDIO_READ       = 74, /* (handle, int16_t *frames, size_t count, size_t *done)         never blocks */
     SYS_AUDIO_CONTROL    = 75, /* (handle, uint32_t command, uint64_t value, uint64_t *result) */
+    /* ABI version 8: what a graphics driver adds to a display (root only; NOT_SUPPORTED without it) */
+    SYS_DISPLAY_CURSOR   = 76, /* (uint32_t index, const jelly_cursor_t *cursor)             hardware pointer */
+    SYS_DISPLAY_VBLANK   = 77, /* (uint32_t index, uint64_t timeout_ns)                      wait for the next frame */
+    SYS_DISPLAY_BUFFER   = 78, /* (uint32_t index, uint32_t buffer, jelly_handle_t *memory)  the second framebuffer (1) */
+    SYS_DISPLAY_FLIP     = 79, /* (uint32_t index, uint32_t buffer)                          show buffer 0 or 1 from the next frame */
     SYS_COUNT
 };
 
@@ -281,6 +286,20 @@ typedef struct {
 #define JELLY_SERVICE_NAME_MAX    63
 
 #define JELLY_DISPLAY_ACQUIRED    (1u << 0) /* a display server owns it */
+/* ABI version 8: capabilities a graphics driver adds */
+#define JELLY_DISPLAY_CURSOR      (1u << 1) /* hardware pointer: SYS_DISPLAY_CURSOR */
+#define JELLY_DISPLAY_VBLANK      (1u << 2) /* SYS_DISPLAY_VBLANK */
+#define JELLY_DISPLAY_FLIP        (1u << 3) /* two framebuffers: SYS_DISPLAY_BUFFER, SYS_DISPLAY_FLIP */
+
+#define JELLY_CURSOR_SIZE         64        /* hardware pointer images are 64x64, 0xAARRGGBB */
+#define JELLY_CURSOR_IMAGE        (1u << 0) /* `pixels` holds a new image */
+#define JELLY_CURSOR_VISIBLE      (1u << 1)
+
+typedef struct {
+    uint32_t        flags;   /* JELLY_CURSOR_* */
+    int32_t         x, y;    /* top left corner of the image on the screen (may be negative) */
+    const uint32_t *pixels;  /* JELLY_CURSOR_SIZE * JELLY_CURSOR_SIZE pixels with JELLY_CURSOR_IMAGE */
+} jelly_cursor_t;
 
 typedef struct {
     uint32_t index;

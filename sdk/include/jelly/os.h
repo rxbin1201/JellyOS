@@ -127,6 +127,12 @@ jelly_handle_t jelly_startup_handle(unsigned index);
 uint64_t jelly_syscall(uint64_t number, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                        uint64_t a5);
 
+/* --- Graphics driver features of a display (ABI version 8); see graphics/display/display.h --- */
+status_t jelly_display_cursor(uint32_t index, const jelly_cursor_t *cursor);
+status_t jelly_display_vblank(uint32_t index, uint64_t timeout_ns);
+status_t jelly_display_buffer(uint32_t index, uint32_t buffer, jelly_handle_t *memory);
+status_t jelly_display_flip(uint32_t index, uint32_t buffer);
+
 /* --- Audio devices (ABI version 7); applications use the audio server instead: audio/client/audio.h --- */
 status_t jelly_audio_info(uint32_t index, jelly_audio_info_t *info);
 status_t jelly_audio_open(uint32_t index, jelly_handle_t *device);

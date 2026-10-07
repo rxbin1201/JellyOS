@@ -188,6 +188,11 @@ void compositor_move_pointer(compositor_t *c, int32_t x, int32_t y)
 {
     if (x == c->pointer_x && y == c->pointer_y)
         return;
+    if (c->hardware_pointer) { /* nothing to repaint: the display moves its pointer plane */
+        c->pointer_x = x;
+        c->pointer_y = y;
+        return;
+    }
     compositor_damage(c, pointer_rect(c));
     c->pointer_x = x;
     c->pointer_y = y;
@@ -499,9 +504,23 @@ static void paint_window(canvas_t *canvas, comp_window_t *w)
     }
 }
 
+void compositor_pointer_image(uint32_t *pixels, int32_t size)
+{
+    memset(pixels, 0, (size_t)size * (size_t)size * sizeof(uint32_t)); /* transparent */
+    for (int32_t y = 0; y < POINTER_HEIGHT && y < size; y++) {
+        for (int32_t x = 0; x < POINTER_WIDTH && x < size; x++) {
+            uint8_t bit = (uint8_t)(0x80 >> (x % 8));
+            if (pointer_outline[y * 2 + x / 8] & bit)
+                pixels[y * size + x] = 0xFF000000;
+            else if (pointer_fill[y * 2 + x / 8] & bit)
+                pixels[y * size + x] = 0xFFFFFFFF;
+        }
+    }
+}
+
 static void paint_pointer(compositor_t *c, canvas_t *canvas)
 {
-    if (!c->pointer_visible)
+    if (!c->pointer_visible || c->hardware_pointer)
         return;
     canvas_mask(canvas, c->pointer_x, c->pointer_y, pointer_fill, POINTER_WIDTH, POINTER_HEIGHT, RGB(255, 255, 255));
     canvas_mask(canvas, c->pointer_x, c->pointer_y, pointer_outline, POINTER_WIDTH, POINTER_HEIGHT, RGB(0, 0, 0));
@@ -534,5 +553,6 @@ bool compositor_render(compositor_t *c)
     }
     canvas_set_clip(canvas, rect_make(0, 0, canvas->width, canvas->height));
     c->damage_count = 0;
+    display_commit(c->display); /* the whole frame at once; with a graphics driver in step with the screen */
     return true;
 }

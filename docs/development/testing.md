@@ -204,6 +204,14 @@ another framebuffer and size, checks that the console repaints into it and
 that a display server would get the new memory, and puts the real screen
 back. The Intel driver itself cannot run in QEMU.
 
+`display_driver_operations` registers a driver made for the test with
+`display_set_driver()` and checks the display driver interface: which flags
+appear for which operations, hardware pointer, vertical blank wait, the
+second framebuffer and flipping, and that the first framebuffer is shown
+again and the pointer hidden when the display server goes away. In QEMU the
+display server runs on a display without a driver, so every GUI step of the
+integration test covers the software path of `display_commit()`.
+
 [`tests/kernel/desktop_tests.c`](../../tests/kernel/desktop_tests.c)
 (Phase 10) checks the RTC wall clock (a plausible date that advances with
 the monotonic clock) and the live process count of `SYS_SYSTEM_INFO`.

@@ -46,6 +46,39 @@ driver; everything is drawn in software.
   While it is owned, the console stops drawing. When the owner closes the
   handle and unmaps, or exits, the console takes over and repaints.
 
+### Display driver interface
+
+A display is a framebuffer first; that is all the firmware gives. A graphics
+driver adds to a display what its hardware can do by handing the display
+layer a table of operations
+([`drivers/graphics/display.h`](../../drivers/graphics/display.h)):
+
+```c
+typedef struct display_ops {
+    status_t (*cursor_image)(display_t *, const uint32_t *pixels); /* 64x64, 0xAARRGGBB */
+    void     (*cursor_move)(display_t *, int32_t x, int32_t y, bool visible);
+    status_t (*wait_vblank)(display_t *, uint64_t timeout_ns);
+    status_t (*flip)(display_t *, uint32_t buffer);                /* show framebuffer 0 or 1 */
+} display_ops_t;
+
+status_t display_set_framebuffer(index, phys, width, height, pitch);         /* after a mode switch */
+status_t display_set_driver(index, ops, driver_data, second_framebuffer_phys);
+```
+
+Every operation is optional. From the ones that are there the display layer
+derives the flags userspace sees (`JELLY_DISPLAY_CURSOR`, `VBLANK`, `FLIP`;
+flipping also needs the second framebuffer), checks arguments and
+ownership, hands out the second framebuffer and restores the screen when a
+display server goes away. The system calls 76–79, the display library and
+the display server only know this interface.
+
+**A driver for another GPU family is one file**: find the device, set a
+mode, call `display_set_framebuffer()`, fill in the operations its hardware
+has, call `display_set_driver()`. Nothing above the driver changes; what it
+leaves out is done in software as before. The kernel test
+`display_driver_operations` runs the whole interface with a driver that
+exists only in the test.
+
 ### Input manager (README section 37)
 
 - Drivers report events with `input_report()`, also from interrupt handlers.
@@ -76,7 +109,7 @@ driver; everything is drawn in software.
 | Directory | Contents |
 |---|---|
 | `graphics/core` | `canvas_t`: 32-bit 0xAARRGGBB pixels with a clip rectangle. Rectangles, alpha blending ("source over"), rounded rectangles with 4×4 supersampled corners, outlines, gradients, lines, blitting, 1-bit masks, UTF-8 text with the 8×16 font at integer scales. No OS dependencies (host unit tests) |
-| `graphics/display` | Display abstraction for the server: acquire the display, draw into a back buffer in RAM, `display_present(rect)` copies to the framebuffer and converts the pixel format |
+| `graphics/display` | Display abstraction for the server: acquire the display, draw into a back buffer in RAM, `display_present(rect)` names what changed, `display_commit()` shows the frame (converting the pixel format). Depending on the display's flags: a plain copy, a copy timed to the vertical blank, or a copy into the hidden framebuffer and a page flip. `display_pointer_image/move()` for a hardware pointer |
 | `graphics/window` | Window protocol (`protocol.h`) and client library: connect, create windows, present, events |
 | `graphics/compositor` | Window stack, decorations, damage rectangles, pointer, composition |
 | `graphics/gui` | GUI toolkit |
@@ -122,7 +155,8 @@ autostart=/bin/terminal # programs started with the server (repeatable)
   Windows have a rounded title bar (violet when focused, grey otherwise),
   a 1-pixel border, a soft shadow and a round close button. Only damaged
   rectangles are repainted (at most 16; more are merged), bottom window
-  first, the pointer last. New windows are placed in a cascade.
+  first, the pointer last. With a hardware pointer the pointer is not
+  painted at all, and a frame ends with `display_commit()`. New windows are placed in a cascade.
 - **Input routing (README sections 35 and 37):**
   - Keys go to the focused window.
   - The pointer goes to the window under it; while a button is held, the
@@ -214,7 +248,26 @@ QEMU has no such device; the driver runs on real hardware only. On a Core
 i5-8400T (UHD Graphics 630) with a 3440x1440 monitor it switches to 100 Hz
 over DisplayPort (a real mode switch on the firmware's link) and stays at the
 firmware's 50 Hz over HDMI, where 300 MHz pixel clock is the limit and only
-the scaler is turned off. Not yet:
-DisplayPort link training, changing the display clock, several screens, hot
-plug, the hardware cursor, acceleration.
+the scaler is turned off.
+
+After a mode switch the driver also offers the three things of the display
+driver interface (above):
+
+- **Hardware pointer:** the cursor plane of the pipe, 64×64 ARGB, from memory
+  entered into the graphics translation table. Moving the mouse writes two
+  registers and repaints nothing.
+- **Vertical blank:** the pipe's vertical blank interrupt (MSI) counts frames
+  and wakes waiters. The driver checks at start that interrupts really
+  arrive; if not, it offers neither this nor page flipping.
+- **Page flipping:** two framebuffers side by side in the translation table.
+  A flip writes the plane's surface address, which the hardware takes over
+  at the next vertical blank; the wait ends when the live surface register
+  shows the new one.
+
+The display server then draws each frame into the framebuffer that is not
+shown and swaps: no tearing and no half-drawn windows, at the refresh rate
+of the monitor. `dmesg igpu` and `dmesg displayd` say what is in use.
+
+Not yet: DisplayPort link training, changing the display clock, several
+screens, hot plug, mode changes while running, acceleration.
 

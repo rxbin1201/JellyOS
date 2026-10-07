@@ -102,9 +102,101 @@ status_t display_set_framebuffer(uint32_t index, uint64_t phys, uint32_t width, 
     return STATUS_SUCCESS;
 }
 
+/* --- Graphics drivers ------------------------------------------------------------------- */
+
+status_t display_set_driver(uint32_t index, const display_ops_t *ops, void *driver_data, uint64_t second_phys)
+{
+    display_t *d = display_get(index);
+
+    if (!d)
+        return STATUS_NOT_FOUND;
+    if (d->acquired)
+        return STATUS_BUSY;
+    d->ops = ops;
+    d->driver_data = driver_data;
+    d->second_phys = ops && ops->flip ? second_phys : 0;
+    d->info.flags &= ~(JELLY_DISPLAY_CURSOR | JELLY_DISPLAY_VBLANK | JELLY_DISPLAY_FLIP);
+    if (ops && ops->cursor_image && ops->cursor_move)
+        d->info.flags |= JELLY_DISPLAY_CURSOR;
+    if (ops && ops->wait_vblank)
+        d->info.flags |= JELLY_DISPLAY_VBLANK;
+    if (d->second_phys)
+        d->info.flags |= JELLY_DISPLAY_FLIP;
+    klog_info("display: %u: driver provides%s%s%s%s", index,
+              (d->info.flags & JELLY_DISPLAY_CURSOR) ? " a hardware pointer" : "",
+              (d->info.flags & JELLY_DISPLAY_VBLANK) ? " vertical blank timing" : "",
+              (d->info.flags & JELLY_DISPLAY_FLIP) ? " page flipping" : "",
+              (d->info.flags & (JELLY_DISPLAY_CURSOR | JELLY_DISPLAY_VBLANK | JELLY_DISPLAY_FLIP)) ? "" : " nothing");
+    return STATUS_SUCCESS;
+}
+
+status_t display_cursor(uint32_t index, const jelly_cursor_t *cursor, const uint32_t *pixels)
+{
+    display_t *d = display_get(index);
+
+    if (!d)
+        return STATUS_NOT_FOUND;
+    if (!(d->info.flags & JELLY_DISPLAY_CURSOR))
+        return STATUS_NOT_SUPPORTED;
+    if (cursor->flags & JELLY_CURSOR_IMAGE) {
+        status_t status = pixels ? d->ops->cursor_image(d, pixels) : STATUS_INVALID_ARGUMENT;
+        if (STATUS_IS_ERROR(status))
+            return status;
+    }
+    d->ops->cursor_move(d, cursor->x, cursor->y, cursor->flags & JELLY_CURSOR_VISIBLE);
+    return STATUS_SUCCESS;
+}
+
+status_t display_wait_vblank(uint32_t index, uint64_t timeout_ns)
+{
+    display_t *d = display_get(index);
+
+    if (!d)
+        return STATUS_NOT_FOUND;
+    if (!(d->info.flags & JELLY_DISPLAY_VBLANK))
+        return STATUS_NOT_SUPPORTED;
+    return d->ops->wait_vblank(d, timeout_ns);
+}
+
+status_t display_flip(uint32_t index, uint32_t buffer)
+{
+    display_t *d = display_get(index);
+
+    if (!d)
+        return STATUS_NOT_FOUND;
+    if (!(d->info.flags & JELLY_DISPLAY_FLIP))
+        return STATUS_NOT_SUPPORTED;
+    if (buffer > 1)
+        return STATUS_INVALID_ARGUMENT;
+    return d->ops->flip(d, buffer);
+}
+
+static void buffer_released(void *context)
+{
+    (void)context; /* the framebuffer itself decides when the display is free again */
+}
+
+status_t display_buffer(uint32_t index, uint32_t buffer, object_t **memory)
+{
+    display_t *d = display_get(index);
+
+    if (!d)
+        return STATUS_NOT_FOUND;
+    if (!(d->info.flags & JELLY_DISPLAY_FLIP))
+        return STATUS_NOT_SUPPORTED;
+    if (buffer != 1)
+        return STATUS_INVALID_ARGUMENT; /* buffer 0 is what SYS_DISPLAY_ACQUIRE hands out */
+    return shm_create_device(d->second_phys, d->info.size, buffer_released, d, memory);
+}
+
 static void release(void *context)
 {
     display_t *d = context;
+    /* Back to what the kernel console draws on, without a pointer on top. */
+    if (d->info.flags & JELLY_DISPLAY_FLIP)
+        d->ops->flip(d, 0);
+    if (d->info.flags & JELLY_DISPLAY_CURSOR)
+        d->ops->cursor_move(d, 0, 0, false);
     d->acquired = false;
     d->info.flags &= ~JELLY_DISPLAY_ACQUIRED;
     klog_info("display: %u released", d->info.index);

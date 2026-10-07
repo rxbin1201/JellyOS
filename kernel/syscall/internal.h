@@ -69,6 +69,11 @@ status_t sys_display_info(const uint64_t *a);
 status_t sys_display_acquire(const uint64_t *a);
 status_t sys_input_open(const uint64_t *a);
 status_t sys_input_read(const uint64_t *a);
+/* Graphics driver features, ABI 8 (graphics_syscalls.c) */
+status_t sys_display_cursor(const uint64_t *a);
+status_t sys_display_vblank(const uint64_t *a);
+status_t sys_display_buffer(const uint64_t *a);
+status_t sys_display_flip(const uint64_t *a);
 /* Audio devices, ABI 7 (audio_syscalls.c) */
 status_t sys_audio_info(const uint64_t *a);
 status_t sys_audio_open(const uint64_t *a);
