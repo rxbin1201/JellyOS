@@ -6,7 +6,7 @@
 ## Layers (README section 25)
 
 ```text
-VirtIO block (NVMe, AHCI, USB later)   drivers/storage, drivers/bus/virtio
+VirtIO block, NVMe, AHCI (USB later)   drivers/storage, drivers/bus/virtio
             │  block_ops_t
             ▼
       Block Device API                  fs/block
@@ -55,6 +55,34 @@ Partitions are named `<disk>p<number>`, for example `virtio0p1`.
   callers may pass any kernel buffer.
 
 Not yet included: multiple requests in flight, multiqueue, discard.
+
+### NVMe driver
+
+`drivers/storage/nvme.c` (Phase 12) binds to PCI class 01.08. It enables the
+controller with an admin queue pair, identifies it, creates one I/O queue
+pair and registers every active namespace with 512-byte blocks as
+`nvme<controller>n<namespace>` (`nvme0n1`). Requests are serialized and go
+through a bounce buffer of up to 64 KiB (less if the controller's maximum
+transfer size is smaller); transfers of more than two pages use a PRP list.
+Completion comes by MSI-X or MSI; without an interrupt the driver polls.
+
+### AHCI driver
+
+`drivers/storage/ahci.c` (Phase 12) binds to PCI class 01.06 in AHCI mode,
+takes the controller from the firmware and sets up every port with a SATA
+disk: command list, received-FIS area and one command table. It uses
+IDENTIFY DEVICE, READ/WRITE DMA EXT and FLUSH CACHE EXT in command slot 0,
+with a 64 KiB bounce buffer. Disks are named `ahci<n>` in port order.
+ATAPI devices are skipped.
+
+### Internal disks are read-only by default
+
+NVMe and SATA disks are the disks built into a real machine: they hold
+other operating systems and their data. The drivers register them
+read-only, and file systems on them can be read but not changed, unless
+the kernel command line contains `disks=rw` (`cmdline=` of the entry in
+`boot.cfg`). VirtIO disks are always writable. `make test` boots with
+`disks=rw`.
 
 ## VFS (README section 26)
 
@@ -181,6 +209,26 @@ FAT32 supports reading and writing with long file names (VFAT):
 
 Not supported: FAT12/16, symbolic links (`NOT_SUPPORTED`), timestamps (a fixed
 date until there is a wall clock), a block cache.
+
+### exFAT (read-only)
+
+[`fs/filesystems/exfat/exfat.c`](../../fs/filesystems/exfat/exfat.c) (Phase 12)
+mounts exFAT volumes with 512-byte sectors, the usual format of large data
+partitions and removable disks. It reads directories and files: entry sets
+(File, Stream Extension, File Name), contiguous files ("NoFatChain") and
+files whose clusters are chained through the allocation table, the valid
+data length (the rest of a file reads as zeros), and names as UTF-8
+including characters outside the Basic Multilingual Plane. Lookups ignore
+the case of ASCII letters only; the volume's up-case table is not used.
+There is no write support: files have mode 0444, directories 0555, and
+create, write, rename and remove fail. Boot and entry-set checksums are not
+verified.
+
+### The kernel log as a file
+
+`/dev/kmsg` holds the last 64 KiB of the kernel log; `dmesg [WORD...]`
+prints it, optionally only the lines containing one of the words. On a real
+machine this is the way to see what the drivers found.
 
 ## Process side
 

@@ -108,6 +108,28 @@ root rights, is tested through `usertest` (scenarios `FILES` and
 After QEMU exits, the host reads `/jellyos/written.txt` from the image with
 `mtype`. The file must contain exactly what the kernel's FAT32 driver wrote.
 
+**NVMe and AHCI (Phase 12).** Two more images with the same contents are
+attached as an NVMe namespace and as a second SATA disk on the machine's
+AHCI controller (the first one is QEMU's boot disk).
+[`tests/kernel/disk_tests.c`](../../tests/kernel/disk_tests.c) writes 150 KiB
+into the unused sectors before the partition and reads them back whole and
+in pieces around the page and bounce-buffer boundaries, checks that a small
+write changes exactly its sectors, and reads a file from the mounted FAT32
+partition of each disk. The integration test copies a file onto both disks
+from the shell; the host reads it back with `mtype`.
+
+**exFAT (Phase 12).** `tools/image_builder/mkexfat.py` writes a 16 MiB exFAT
+volume from the specification, independently of the driver: contiguous and
+fragmented files, a root directory in scattered clusters, nested
+directories, a file with a valid data length below its size, a deleted
+file, and names with umlauts and with UTF-16 surrogates. It is attached as
+a second VirtIO disk without a partition table (`/volumes/virtio1`).
+[`tests/kernel/exfat_tests.c`](../../tests/kernel/exfat_tests.c) reads every
+file and compares the contents, reads across sector and cluster borders,
+lists the root directory and checks that nothing can be changed. No host
+tool for exFAT is available in the build environment, so the generated
+volume has not been cross-checked with another implementation.
+
 ### Userspace tests (Phase 7)
 
 [`tests/kernel/userspace_tests.c`](../../tests/kernel/userspace_tests.c)

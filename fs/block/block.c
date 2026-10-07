@@ -2,6 +2,7 @@
 
 #include "fs/vfs/vfs.h"
 
+#include "core/cmdline.h"
 #include "core/export.h"
 #include "core/log.h"
 #include "core/string.h"
@@ -12,6 +13,19 @@ static list_t devices = { { &devices.head, &devices.head } };
 static bool in_range(const block_device_t *device, uint64_t lba, uint32_t count)
 {
     return count && lba < device->sector_count && count <= device->sector_count - lba;
+}
+
+bool block_internal_disks_writable(void)
+{
+    static bool announced;
+    char value[8];
+    bool writable = cmdline_value("disks", value, sizeof(value)) && strcmp(value, "rw") == 0;
+
+    if (!writable && !announced) {
+        announced = true;
+        klog_info("block: internal disks are read-only (boot with disks=rw to allow writing)");
+    }
+    return writable;
 }
 
 status_t block_register(block_device_t *device)
@@ -102,5 +116,6 @@ block_device_t *block_at(size_t index)
 }
 
 EXPORT_SYMBOL(block_register);
+EXPORT_SYMBOL(block_internal_disks_writable);
 EXPORT_SYMBOL(block_read);
 EXPORT_SYMBOL(block_write);

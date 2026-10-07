@@ -87,6 +87,24 @@ def network_steps(http_port, tcp_port, udp_port):
     ]
 
 
+def disk_steps():
+    """Phase 12: files on the NVMe disk and the second SATA disk; the host reads them back afterwards."""
+    steps = [("dmesg ahci: nvme0:", ["ahci: port 1: QEMU HARDDISK, 64 MiB", "nvme0: namespace 1: 64 MiB"])]
+    steps += [
+        # exFAT (read-only), a volume without a partition table
+        ("ls /volumes/virtio1", ["big.bin", "docs/", "Fragmented Datei", "hello.txt"]),
+        ("cat /volumes/virtio1/docs/nested/deep.txt", ["deep inside exFAT"]),
+        ("cp /etc/motd /volumes/virtio1/x.txt; echo code $?", ["code 1"]),
+    ]
+    for volume in ("nvme0n1p1", "ahci1p1"):
+        steps += [
+            (f"cat /volumes/{volume}/hello.txt", ["Hello from the JellyOS test disk!"]),
+            (f"cp /etc/motd /volumes/{volume}/from-jelly.txt; sync; cat /volumes/{volume}/from-jelly.txt",
+             ["Welcome to JellyOS"]),
+        ]
+    return steps
+
+
 def audio_steps():
     """Milestone M10: the audio server, its tools and the mixer. The sound itself is checked by check_sound()."""
     return [
@@ -566,6 +584,8 @@ def main():
         steps += network_steps(*start_host_servers())
     if "intel-hda" in " ".join(args):
         steps += audio_steps()
+    if "nvme" in " ".join(args):
+        steps += disk_steps()
     steps.append(FINAL_STEP)
     console = Console(args[1:], log)
     failures = 0

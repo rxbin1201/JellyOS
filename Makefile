@@ -112,7 +112,7 @@ AUDIO_A       := $(BUILD)/userspace/libaudio.a
 
 # Programs of the initramfs: <name>:<install path>:<sources>
 PROGRAM_DIR  := $(BUILD)/userspace/programs
-COREUTILS    := cat cp echo false ls mkdir mv rm sleep touch true
+COREUTILS    := cat cp dmesg echo false ls mkdir mv rm sleep touch true
 NETTOOLS     := http ifconfig nc nslookup ping
 AUDIOTOOLS   := play record tone volume
 PROGRAMS     := init:/init:userspace/init/init.c \
@@ -217,12 +217,20 @@ endif
 TEST_ESP     := $(BUILD)/test-esp
 TEST_VARS    := $(BUILD)/OVMF_VARS_test.fd
 TEST_TIMEOUT := 120
-TEST_CMDLINE := loglevel=info selftest=exit
+TEST_CMDLINE := loglevel=info selftest=exit disks=rw
 
 # Test disk: GPT + FAT32 built from tests/storage/disk (tools/image_builder/mkdisk.sh)
 TEST_DISK       := $(BUILD)/test-disk.img
 TEST_DISK_FILES := $(BUILD)/test-disk-files
 # Written by tests/kernel/storage_tests.c and checked from the host after the run
+# The same disk contents once more behind an NVMe and an AHCI controller
+NVME_DISK       := $(BUILD)/test-nvme.img
+SATA_DISK       := $(BUILD)/test-sata.img
+# $(call hw_disks): NVMe controller with one namespace, and a second SATA disk on the machine's AHCI controller
+hw_disks = -drive file=$(NVME_DISK),if=none,id=nvmedisk,format=raw -device nvme,serial=jellynvme,drive=nvmedisk \
+           -drive file=$(SATA_DISK),if=none,id=satadisk,format=raw -device ide-hd,drive=satadisk,bus=ide.1
+# An exFAT volume written by tools/image_builder/mkexfat.py, as a second VirtIO disk without a partition table
+EXFAT_DISK      := $(BUILD)/test-exfat.img
 HOST_CHECK_PATH := ::/jellyos/written.txt
 HOST_CHECK_TEXT := Written by the JellyOS FAT32 driver.
 
@@ -450,10 +458,13 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	@python3 -c "import sys; sys.stdout.buffer.write(bytes((i * 7 + i // 251) % 256 for i in range(200000)))" \
 	    > $(TEST_DISK_FILES)/pattern.bin
 	@sh tools/image_builder/mkdisk.sh $(TEST_DISK) 64 $(TEST_DISK_FILES) JELLYTEST
+	@sh tools/image_builder/mkdisk.sh $(NVME_DISK) 64 $(TEST_DISK_FILES) JELLYNVME
+	@sh tools/image_builder/mkdisk.sh $(SATA_DISK) 64 $(TEST_DISK_FILES) JELLYSATA
+	@python3 tools/image_builder/mkexfat.py $(EXFAT_DISK)
 	@timeout $(TEST_TIMEOUT) $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(TEST_ESP),$(TEST_VARS)) -display none \
 	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -device edu -device e1000e \
 	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(virtio_input) $(usb_input) \
-	    $(call audio_hw,none); \
+	    $(call audio_hw,none) $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk); \
 	status=$$?; \
 	if [ $$status -ne 1 ]; then echo "make test: FAILED (QEMU exit status $$status)"; exit 1; fi
 	@# The host (mtools) must read what the kernel's FAT32 driver wrote.
@@ -469,17 +480,22 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	@cp $(INITRAMFS) $(SHELL_TEST_ESP)/boot/initrd/current.img
 	@printf '[boot]\ntimeout=0\nmenu=hidden\nresolution=keep\nfallback_kernel=\n[entry Shell]\nkernel=/boot/kernels/kernel-current.elf\n' \
 	    > $(SHELL_TEST_ESP)/boot/boot.cfg
-	@printf 'initrd=/boot/initrd/current.img\ncmdline="loglevel=info"\n' >> $(SHELL_TEST_ESP)/boot/boot.cfg
+	@printf 'initrd=/boot/initrd/current.img\ncmdline="loglevel=info disks=rw"\n' >> $(SHELL_TEST_ESP)/boot/boot.cfg
 	@cp $(OVMF_VARS) $(SHELL_TEST_VARS)
 	@rm -f $(BUILD)/qmp.sock $(AUDIO_TEST_WAV)
 	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) --qmp $(BUILD)/qmp.sock \
 	    --wav $(AUDIO_TEST_WAV) -- \
 	    $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(SHELL_TEST_ESP),$(SHELL_TEST_VARS)) -display none \
 	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(usb_input) $(audio_test_hw) \
+	    $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk) \
 	    -qmp unix:$(BUILD)/qmp.sock,server,nowait || { echo "make test: FAILED (shell test)"; exit 1; }
 	@if mtype -i $(TEST_DISK)@@1M ::/motd.txt | grep -q "Welcome to JellyOS"; then \
 	    echo "make test: host reads the file the shell copied"; \
 	else echo "make test: FAILED (host cannot read ::/motd.txt)"; exit 1; fi
+	@for d in $(NVME_DISK) $(SATA_DISK); do \
+	    if mtype -i $$d@@1M ::/from-jelly.txt | grep -q "Welcome to JellyOS"; then \
+	        echo "make test: host reads the file written to $$d"; \
+	    else echo "make test: FAILED (host cannot read ::/from-jelly.txt on $$d)"; exit 1; fi; done
 	@echo "make test: PASSED"
 
 # Forget the persistent boot state (fresh UEFI variable store).

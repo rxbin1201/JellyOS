@@ -42,4 +42,7 @@ void kconsole_mirror_char(char c);
 /* Feed the log buffer's contents to `write` (a new console catching up). */
 void klog_replay(void (*write)(const char *text, size_t length));
 
+/* Copy up to `size` bytes of the retained log, starting `offset` bytes after its oldest byte. Returns the count. */
+size_t klog_read(size_t offset, char *buffer, size_t size);
+
 #endif

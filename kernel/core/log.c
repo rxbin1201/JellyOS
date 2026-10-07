@@ -49,6 +49,18 @@ void kconsole_mirror_char(char c)
         console_mirror(&c, 1);
 }
 
+size_t klog_read(size_t offset, char *buffer, size_t size)
+{
+    uint64_t flags = arch_interrupts_save();
+    size_t start = ring_head > LOG_RING_SIZE ? ring_head - LOG_RING_SIZE : 0;
+    size_t available = ring_head - start, done = 0;
+
+    for (; offset + done < available && done < size; done++)
+        buffer[done] = ring[(start + offset + done) % LOG_RING_SIZE];
+    arch_interrupts_restore(flags);
+    return done;
+}
+
 void klog_replay(void (*write)(const char *text, size_t length))
 {
     uint64_t flags = arch_interrupts_save();

@@ -179,5 +179,7 @@ extern fs_type_t ramfs_type;
 /* Device file system (fs/filesystems/devfs), mounted at /dev. */
 extern fs_type_t devfs_type;
 status_t devfs_register(const char *name, const vnode_ops_t *ops, uint32_t mode, void *data);
+/* A node that is read like a regular file: read() gets the position, and reading ends at its end. */
+status_t devfs_register_file(const char *name, const vnode_ops_t *ops, uint32_t mode, void *data);
 
 #endif

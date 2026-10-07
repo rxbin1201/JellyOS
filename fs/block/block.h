@@ -55,6 +55,14 @@ typedef struct block_device {
     list_node_t          node;
 } block_device_t;
 
+/*
+ * May the disks built into the machine (NVMe, SATA) be written? They hold
+ * other operating systems and their data, so they are read-only unless the
+ * kernel command line says "disks=rw". Drivers of such disks set read_only
+ * from this.
+ */
+bool block_internal_disks_writable(void);
+
 /* Register a disk or partition. Disks are scanned for partitions, then offered to file systems. */
 status_t block_register(block_device_t *device);
 

@@ -53,7 +53,7 @@ static status_t dev_readdir(vnode_t *dir, uint64_t *cookie, vfs_dirent_t *entry)
         if (index++ != *cookie)
             continue;
         device_node_t *d = container_of(node, device_node_t, node);
-        entry->type = VNODE_DEVICE;
+        entry->type = d->vnode.type;
         entry->inode = d->vnode.inode;
         entry->name_length = (uint32_t)d->length;
         memcpy(entry->name, d->name, d->length + 1);
@@ -99,7 +99,7 @@ static const vnode_ops_t zero_ops = { .read = zero_read, .write = null_write };
 
 static void init_once(void);
 
-status_t devfs_register(const char *name, const vnode_ops_t *ops, uint32_t mode, void *data)
+static status_t register_node(const char *name, const vnode_ops_t *ops, uint32_t mode, void *data, vnode_type_t type)
 {
     init_once();
     size_t length = strlen(name);
@@ -111,7 +111,7 @@ status_t devfs_register(const char *name, const vnode_ops_t *ops, uint32_t mode,
         return STATUS_OUT_OF_MEMORY;
 
     /* The initial reference is never dropped: device nodes are permanent. */
-    vnode_init(&d->vnode, &devfs, VNODE_DEVICE, ops);
+    vnode_init(&d->vnode, &devfs, type, ops);
     d->vnode.mode = mode & 0777;
     d->vnode.inode = next_inode++;
     d->vnode.data = data;
@@ -120,6 +120,16 @@ status_t devfs_register(const char *name, const vnode_ops_t *ops, uint32_t mode,
     list_push_back(&devices, &d->node);
     klog_debug("devfs: /dev/%s registered", name);
     return STATUS_SUCCESS;
+}
+
+status_t devfs_register(const char *name, const vnode_ops_t *ops, uint32_t mode, void *data)
+{
+    return register_node(name, ops, mode, data, VNODE_DEVICE);
+}
+
+status_t devfs_register_file(const char *name, const vnode_ops_t *ops, uint32_t mode, void *data)
+{
+    return register_node(name, ops, mode, data, VNODE_FILE);
 }
 
 static void init_once(void)

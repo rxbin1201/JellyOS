@@ -17,6 +17,7 @@ static list_t mounts = { { &mounts.head, &mounts.head } };
 static filesystem_t *root_fs;
 
 extern fs_type_t fat_type;
+extern fs_type_t exfat_type;
 
 /* --- Vnodes --------------------------------------------------------------------- */
 
@@ -816,6 +817,7 @@ status_t vfs_init(void)
         return STATUS_OUT_OF_MEMORY;
 
     vfs_register_type(&fat_type);
+    vfs_register_type(&exfat_type);
     vfs_register_type(&ramfs_type);
     vfs_register_type(&devfs_type);
     vfs_mkdir("/volumes", 0755, NULL);
