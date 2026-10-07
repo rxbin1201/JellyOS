@@ -53,7 +53,47 @@ int display_open(uint32_t index, display_t *d)
         d->previous.full = true;
         d->current.full = true;
     }
+    if (jelly_display_watch(index, &d->watch) != STATUS_SUCCESS)
+        d->watch = JELLY_HANDLE_INVALID;
     return 0;
+}
+
+bool display_changed(display_t *d)
+{
+    jelly_display_info_t info;
+
+    if (d->watch != JELLY_HANDLE_INVALID)
+        jelly_event_reset(d->watch); /* before reading: a change after this signals again */
+    if (jelly_display_info(d->info.index, &info) != STATUS_SUCCESS)
+        return false;
+    bool resized = info.width != d->info.width || info.height != d->info.height || info.pitch != d->info.pitch;
+    bool touched = info.generation != d->info.generation;
+    d->info = info;
+    if (!resized) {
+        if (touched) {
+            /*
+             * Possibly a mode switch at the same size: the first framebuffer is shown and both are empty.
+             * Without this, flipping would alternate between the picture and a black one.
+             */
+            d->front = 0;
+            d->previous.count = d->current.count = 0;
+            d->previous.full = d->current.full = true;
+            d->stale = true;
+        }
+        return false;
+    }
+
+    uint32_t *back = malloc((size_t)info.width * info.height * 4);
+    if (!back)
+        return false; /* the old back buffer stays; the picture is cut off or has a border */
+    free(d->back.pixels);
+    canvas_init(&d->back, back, (int32_t)info.width, (int32_t)info.height, (int32_t)info.width);
+    d->framebuffer_stride = info.pitch / 4;
+    /* After a mode switch the first framebuffer is shown, and neither holds a picture of the new size. */
+    d->front = 0;
+    d->previous.count = d->current.count = 0;
+    d->previous.full = d->current.full = true;
+    return true;
 }
 
 void display_frame_add(display_frame_t *frame, rect_t area)

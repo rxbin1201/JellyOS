@@ -53,6 +53,8 @@ int        wm_minimize_window(wm_connection_t *connection, uint32_t id);
 /* Settings and notifications */
 int        wm_settings_changed(wm_connection_t *connection);
 int        wm_set_keymap(wm_connection_t *connection, const char *name);
+/* Ask for another screen mode (refresh_mhz 0: the fastest of that size). The answer is a WM_EVENT_SCREEN. */
+int        wm_set_display_mode(wm_connection_t *connection, int32_t width, int32_t height, uint32_t refresh_mhz);
 int        wm_notify(wm_connection_t *connection, const char *title, const char *text);
 /* After WM_EVENT_NOTIFICATION (desktop shell only). */
 void       wm_last_notification(wm_connection_t *connection, const char **title, const char **text);

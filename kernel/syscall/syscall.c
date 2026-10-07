@@ -440,6 +440,9 @@ static const syscall_fn table[SYS_COUNT] = {
     [SYS_DISPLAY_VBLANK]   = sys_display_vblank,
     [SYS_DISPLAY_BUFFER]   = sys_display_buffer,
     [SYS_DISPLAY_FLIP]     = sys_display_flip,
+    [SYS_DISPLAY_MODES]    = sys_display_modes,
+    [SYS_DISPLAY_SET_MODE] = sys_display_set_mode,
+    [SYS_DISPLAY_WATCH]    = sys_display_watch,
 };
 
 uint64_t syscall_dispatch(uint64_t number, const uint64_t args[6])

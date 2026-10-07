@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define JELLY_SYSCALL_ABI_VERSION 8
+#define JELLY_SYSCALL_ABI_VERSION 9
 
 typedef uint32_t jelly_handle_t;
 #define JELLY_HANDLE_INVALID 0u
@@ -109,6 +109,10 @@ enum {
     SYS_DISPLAY_VBLANK   = 77, /* (uint32_t index, uint64_t timeout_ns)                      wait for the next frame */
     SYS_DISPLAY_BUFFER   = 78, /* (uint32_t index, uint32_t buffer, jelly_handle_t *memory)  the second framebuffer (1) */
     SYS_DISPLAY_FLIP     = 79, /* (uint32_t index, uint32_t buffer)                          show buffer 0 or 1 from the next frame */
+    /* ABI version 9: display modes and hot plug */
+    SYS_DISPLAY_MODES    = 80, /* (uint32_t index, jelly_display_mode_t *modes, uint32_t max, uint32_t *count) */
+    SYS_DISPLAY_SET_MODE = 81, /* (uint32_t index, uint32_t mode)                            root only */
+    SYS_DISPLAY_WATCH    = 82, /* (uint32_t index, jelly_handle_t *event)                    root only; signaled on changes */
     SYS_COUNT
 };
 
@@ -290,6 +294,19 @@ typedef struct {
 #define JELLY_DISPLAY_CURSOR      (1u << 1) /* hardware pointer: SYS_DISPLAY_CURSOR */
 #define JELLY_DISPLAY_VBLANK      (1u << 2) /* SYS_DISPLAY_VBLANK */
 #define JELLY_DISPLAY_FLIP        (1u << 3) /* two framebuffers: SYS_DISPLAY_BUFFER, SYS_DISPLAY_FLIP */
+/* ABI version 9 */
+#define JELLY_DISPLAY_MODES       (1u << 4) /* the mode can be changed: SYS_DISPLAY_SET_MODE */
+#define JELLY_DISPLAY_DISCONNECTED (1u << 5) /* the driver sees no monitor */
+
+#define JELLY_DISPLAY_MODE_MAX    32
+#define JELLY_MODE_CURRENT        (1u << 0) /* the mode being shown */
+#define JELLY_MODE_PREFERRED      (1u << 1) /* the monitor's best mode */
+
+typedef struct {
+    uint32_t width, height;   /* pixels */
+    uint32_t refresh_mhz;     /* frames per 1000 seconds (60000 = 60 Hz); 0 if unknown */
+    uint32_t flags;           /* JELLY_MODE_* */
+} jelly_display_mode_t;
 
 #define JELLY_CURSOR_SIZE         64        /* hardware pointer images are 64x64, 0xAARRGGBB */
 #define JELLY_CURSOR_IMAGE        (1u << 0) /* `pixels` holds a new image */
@@ -311,7 +328,10 @@ typedef struct {
     uint8_t  green_shift, green_size;
     uint8_t  blue_shift, blue_size;
     uint8_t  reserved[2];
-    uint64_t size;            /* bytes of the framebuffer mapping */
+    uint64_t size;            /* bytes of the framebuffer mapping (stays when the mode changes) */
+    /* ABI version 9 */
+    uint32_t refresh_mhz;     /* frames per 1000 seconds; 0 if unknown */
+    uint32_t generation;      /* counts changes of geometry, modes and connection (see SYS_DISPLAY_WATCH) */
 } jelly_display_info_t;
 
 /* Standardized input events (README section 37). Key codes: <jelly/input.h>. */

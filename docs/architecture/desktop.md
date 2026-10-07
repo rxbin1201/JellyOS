@@ -74,7 +74,7 @@ displayd ──autostart──▶ /sbin/login (root)
 | Program | |
 |---|---|
 | **Files** (`/bin/files [FOLDER]`) | Table with icons (name, size, type, folders first). Double-click or Enter opens folders, and files in the viewer. Toolbar: Up, Home, path field, New folder, Rename, Copy, Paste (recursive, with "name (2)" on conflicts), Delete (recursive, with confirmation), Refresh. Keys: Backspace up, F2 rename, F5 refresh, Delete, Ctrl+C/Ctrl+V. Works on the ramfs and the FAT volumes under `/volumes` |
-| **Settings** (`/bin/settings`) | Appearance (dark mode, large text = scale 2), Keyboard (US, Deutsch; with a field to try it), Network (interfaces, addresses, counters), System (version, uptime, memory, processes, date). Saved to `~/.config/desktop.conf` (defaults in `/etc/desktop.conf`) and applied everywhere at once |
+| **Settings** (`/bin/settings`) | Appearance (dark mode, large text = scale 2), Keyboard (US, Deutsch; with a field to try it), Network (interfaces, addresses, counters), System (version, uptime, memory, processes, date), Sound (volume), Display (screen mode, if the graphics driver can switch; kept by the display server in `/etc/display.conf`). The first two are saved to `~/.config/desktop.conf` (defaults in `/etc/desktop.conf`) and applied everywhere at once |
 | **Terminal** (`/bin/terminal`) | Now resizable: the character grid follows the window. The prompt shows `$` for users and `#` for root |
 | **Viewer** (`/bin/viewer FILE`) | Read-only text, resizable, scrolling with wheel and keys |
 | **notify** (`/bin/notify TITLE [TEXT]`) | Sends a desktop notification |

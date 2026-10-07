@@ -183,6 +183,7 @@ static void launcher_chosen(int index, void *user)
 
 static void open_launcher(widget_t *widget, void *user)
 {
+    wm_screen_size(gui_connection(app), &screen_w, &screen_h); /* it may have changed */
     (void)widget;
     (void)user;
     if (menu) {
@@ -294,6 +295,7 @@ static void status_closed(widget_t *widget, void *user)
 
 static void show_status(widget_t *widget, void *user)
 {
+    wm_screen_size(gui_connection(app), &screen_w, &screen_h); /* it may have changed */
     (void)widget;
     (void)user;
     if (status_popup) {
@@ -346,6 +348,7 @@ static void notification_clicked(widget_t *widget, void *user)
 
 static void notify(const char *title, const char *text, void *user)
 {
+    wm_screen_size(gui_connection(app), &screen_w, &screen_h); /* it may have changed */
     (void)user;
     int slot = -1;
     for (int i = 0; i < MAX_NOTIFICATIONS && slot < 0; i++) {
@@ -396,6 +399,7 @@ static void settings_changed(void *user)
 
 static void build_taskbar(void)
 {
+    wm_screen_size(gui_connection(app), &screen_w, &screen_h); /* it may have changed */
     taskbar = gui_window_create_ex(app, "Taskbar", 0, screen_h - TASKBAR_HEIGHT, screen_w, TASKBAR_HEIGHT,
                                    WM_WINDOW_PANEL | WM_WINDOW_POSITIONED | WM_WINDOW_RESERVE);
     if (!taskbar) {

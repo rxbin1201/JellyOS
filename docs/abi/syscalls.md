@@ -1,6 +1,6 @@
 # JellyOS System Call ABI
 
-**ABI version:** 8 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67); version 6 adds the desktop calls (68–70); version 7 adds audio devices (71–75) and the gamepad input events; version 8 adds the display driver calls (76–79) and the display flags `CURSOR`, `VBLANK` and `FLIP`.
+**ABI version:** 9 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67); version 6 adds the desktop calls (68–70); version 7 adds audio devices (71–75) and the gamepad input events; version 8 adds the display driver calls (76–79) and the display flags `CURSOR`, `VBLANK` and `FLIP`; version 9 adds display modes and hot plug (80–82), the display flags `MODES` and `DISCONNECTED` and the fields `refresh_mhz` and `generation` of `jelly_display_info_t`.
 **Headers:** [`sdk/include/jelly/syscall.h`](../../sdk/include/jelly/syscall.h) (numbers, rights, flags), [`sdk/include/jelly/status.h`](../../sdk/include/jelly/status.h) (errors), [`sdk/include/jelly/os.h`](../../sdk/include/jelly/os.h) (libos wrappers)
 
 ## Calling convention (x86_64)
@@ -244,6 +244,29 @@ typedef struct {
     int32_t         x, y;
     const uint32_t *pixels; /* with JELLY_CURSOR_IMAGE */
 } jelly_cursor_t;
+```
+
+### Display modes and hot plug (ABI version 9)
+
+A display with the flag `JELLY_DISPLAY_MODES` has a driver that can switch
+modes. The framebuffer memory does not move when the mode changes: its
+size (`jelly_display_info_t.size`) is enough for every mode, and only
+`width`, `height`, `pitch` and `refresh_mhz` change. A mapping made before
+stays valid. `JELLY_DISPLAY_DISCONNECTED` is set while the driver sees no
+monitor. `generation` counts every such change.
+
+| Nr | Name | Arguments | Result | Notes |
+|---|---|---|---|---|
+| 80 | `SYS_DISPLAY_MODES` | `index, jelly_display_mode_t *modes, max, uint32_t *count` | up to `max` modes; `*count` = how many there are | For everyone. A display without a driver has one mode: what it shows. At most 32 |
+| 81 | `SYS_DISPLAY_SET_MODE` | `index, mode` | | Root only. `mode` = position in the list. Framebuffer 0 is shown afterwards. `NOT_SUPPORTED` without `MODES`, `DEVICE_ERROR` if the mode does not come up (the one before is back) |
+| 82 | `SYS_DISPLAY_WATCH` | `index, jelly_handle_t *event` | event handle (`WAIT`, `SIGNAL`) | Root only. Signaled after every change of mode, list of modes or connection, also by another program or by the driver itself (another monitor). The watcher resets it (`SYS_EVENT_RESET`) and reads `SYS_DISPLAY_INFO` again |
+
+```c
+typedef struct {
+    uint32_t width, height;
+    uint32_t refresh_mhz;   /* frames per 1000 seconds (60000 = 60 Hz); 0 if unknown */
+    uint32_t flags;         /* JELLY_MODE_CURRENT, JELLY_MODE_PREFERRED */
+} jelly_display_mode_t;
 ```
 
 Version 7 also adds two input event types (`SYS_INPUT_READ`):

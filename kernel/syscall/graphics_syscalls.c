@@ -328,3 +328,42 @@ status_t sys_display_flip(const uint64_t *a)
         return STATUS_ACCESS_DENIED;
     return display_flip((uint32_t)a[0], (uint32_t)a[1]);
 }
+
+/* --- Display modes and hot plug (ABI 9) ------------------------------------------ */
+
+status_t sys_display_modes(const uint64_t *a)
+{
+    jelly_display_mode_t modes[JELLY_DISPLAY_MODE_MAX];
+    uint32_t max = a[2] < JELLY_DISPLAY_MODE_MAX ? (uint32_t)a[2] : JELLY_DISPLAY_MODE_MAX, count = 0;
+
+    if (!user_range_ok(a[3], sizeof(uint32_t), true) || (max && !user_range_ok(a[1], max * sizeof(modes[0]), true)))
+        return STATUS_INVALID_ARGUMENT;
+    status_t status = display_modes((uint32_t)a[0], modes, max, &count);
+    if (STATUS_IS_ERROR(status))
+        return status;
+    uint32_t stored = count < max ? count : max;
+    if (stored)
+        status = copy_to_user(a[1], modes, stored * sizeof(modes[0]));
+    return STATUS_IS_ERROR(status) ? status : put_user_u32(a[3], count);
+}
+
+status_t sys_display_set_mode(const uint64_t *a)
+{
+    if (!is_root())
+        return STATUS_ACCESS_DENIED;
+    return display_set_mode((uint32_t)a[0], (uint32_t)a[1]);
+}
+
+status_t sys_display_watch(const uint64_t *a)
+{
+    object_t *event;
+
+    if (!is_root())
+        return STATUS_ACCESS_DENIED;
+    if (!user_range_ok(a[1], sizeof(jelly_handle_t), true))
+        return STATUS_INVALID_ARGUMENT;
+    status_t status = display_watch((uint32_t)a[0], &event);
+    if (STATUS_IS_ERROR(status))
+        return status;
+    return syscall_give_handle(event, JELLY_RIGHT_WAIT | JELLY_RIGHT_SIGNAL | JELLY_RIGHT_DUPLICATE, a[1]);
+}

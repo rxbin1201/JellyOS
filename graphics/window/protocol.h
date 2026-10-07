@@ -18,6 +18,12 @@
  * (the server proposes a size with WM_EVENT_RESIZE, the client asks for a
  * new surface with WM_RESIZE_WINDOW), minimize/maximize, the window list for
  * a taskbar, settings broadcasts and notifications relayed to the desktop.
+ *
+ * Version 3 (display modes): the screen can change its size while clients
+ * run. The server tells every client the new size with WM_SCREEN and moves
+ * and resizes what was laid out along the screen's edges (panels, full
+ * screen windows, maximized windows). A client asks for another mode with
+ * WM_SET_DISPLAY_MODE; the modes themselves come from SYS_DISPLAY_MODES.
  */
 
 #ifndef GRAPHICS_WINDOW_PROTOCOL_H
@@ -26,7 +32,7 @@
 #include <stdint.h>
 
 #define WM_SERVICE_NAME     "display"
-#define WM_PROTOCOL_VERSION 2
+#define WM_PROTOCOL_VERSION 3
 #define WM_TITLE_MAX        64
 #define WM_WINDOW_MAX_SIZE  4096
 
@@ -52,6 +58,9 @@ enum {
     WM_SETTINGS_CHANGED,   /* client: settings files changed -> WM_EVENT_SETTINGS to every client */
     WM_SET_KEYMAP,         /* client: title = layout name */
     WM_NOTIFY,             /* client: title, text -> relayed to the desktop shell (server: same fields) */
+    /* version 3 */
+    WM_SCREEN,             /* server: width, height = the screen's new size */
+    WM_SET_DISPLAY_MODE,   /* client: width, height, flags = refresh rate in mHz (0: the fastest) -> WM_SCREEN */
 };
 
 /* WM_CREATE_WINDOW flags */
@@ -88,6 +97,8 @@ enum {
     /* Gamepads (to the window with the keyboard focus): key = device, button = number or axis, x = value */
     WM_EVENT_GAMEPAD_BUTTON, /* button = 0-based number, x = 1 pressed / 0 released */
     WM_EVENT_GAMEPAD_AXIS,   /* button = JELLY_AXIS_*, x = -32768..32767 */
+    /* version 3 */
+    WM_EVENT_SCREEN,       /* client library: the screen has another size (x = width, y = height; wm_screen_size()) */
 };
 
 #define WM_MOD_SHIFT (1u << 0)

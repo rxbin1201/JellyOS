@@ -3,7 +3,8 @@
  *
  * Sections: Appearance (dark mode, large text), Keyboard (layout), Network
  * (interfaces), System (version, uptime, memory, time), Sound (system
- * volume, kept by the audio server). Changes of the first two are saved
+ * volume, kept by the audio server), Display (screen mode: the list comes
+ * from the kernel, the display server switches and remembers the choice). Changes of the first two are saved
  * to ~/.config/desktop.conf and announced with WM_SETTINGS_CHANGED, so
  * every program applies them at once.
  */
@@ -252,9 +253,74 @@ static void show_sound(void)
     gui_add(content, gui_checkbox("Mute", volume_muted, toggle_mute, NULL));
 }
 
+/* --- Display -------------------------------------------------------------------- */
+
+static jelly_display_mode_t screen_modes[JELLY_DISPLAY_MODE_MAX];
+static uint32_t screen_mode_count;
+
+static void mode_chosen(widget_t *list, void *user)
+{
+    (void)user;
+    int index = gui_list_selected(list);
+    if (index < 0 || (uint32_t)index >= screen_mode_count || (screen_modes[index].flags & JELLY_MODE_CURRENT))
+        return;
+    const jelly_display_mode_t *m = &screen_modes[index];
+    say("display mode %ux%u", m->width, m->height);
+    wm_set_display_mode(gui_connection(app), (int32_t)m->width, (int32_t)m->height, m->refresh_mhz);
+}
+
+static void show_display(void)
+{
+    jelly_display_info_t info;
+    char line[96];
+
+    gui_add(content, heading("Display"));
+    if (jelly_display_info(0, &info) != STATUS_SUCCESS) {
+        gui_add(content, dim("No display found."));
+        return;
+    }
+    if (info.refresh_mhz)
+        snprintf(line, sizeof(line), "Now: %ux%u at %u.%02u Hz", info.width, info.height, info.refresh_mhz / 1000,
+                 info.refresh_mhz % 1000 / 10);
+    else
+        snprintf(line, sizeof(line), "Now: %ux%u", info.width, info.height);
+    gui_add(content, gui_label(line));
+    if (info.flags & JELLY_DISPLAY_DISCONNECTED)
+        gui_add(content, dim("No monitor is connected."));
+    screen_mode_count = 0;
+    if (!(info.flags & JELLY_DISPLAY_MODES) ||
+        jelly_display_modes(0, screen_modes, JELLY_DISPLAY_MODE_MAX, &screen_mode_count) != STATUS_SUCCESS) {
+        gui_add(content, dim("The graphics driver of this computer cannot change the mode."));
+        return;
+    }
+    if (screen_mode_count > JELLY_DISPLAY_MODE_MAX)
+        screen_mode_count = JELLY_DISPLAY_MODE_MAX;
+
+    gui_add(content, gui_label("Resolution:"));
+    widget_t *list = gui_list(NULL, NULL);
+    for (uint32_t i = 0; i < screen_mode_count; i++) {
+        const jelly_display_mode_t *m = &screen_modes[i];
+        if (m->refresh_mhz)
+            snprintf(line, sizeof(line), "%ux%u, %u Hz%s", m->width, m->height, (m->refresh_mhz + 500) / 1000,
+                     (m->flags & JELLY_MODE_PREFERRED) ? " (recommended)" : "");
+        else
+            snprintf(line, sizeof(line), "%ux%u", m->width, m->height);
+        gui_list_add(list, line);
+        if (m->flags & JELLY_MODE_CURRENT)
+            gui_list_select(list, (int)i);
+    }
+    gui_list_set_rows(list, screen_mode_count < 8 ? (int)screen_mode_count : 8);
+    /* connect the callback after the initial selection */
+    gui_list_on_select(list, mode_chosen, NULL);
+    gui_add(content, list);
+    gui_add(content, dim("The choice is kept for the next start."));
+}
+
 /* --- Sections ------------------------------------------------------------------- */
 
-static void (*const pages[])(void) = { show_appearance, show_keyboard, show_network, show_system, show_sound };
+static void (*const pages[])(void) = { show_appearance, show_keyboard, show_network, show_system, show_sound,
+                                       show_display };
+static int current_page = -1;
 
 static void section_chosen(widget_t *list, void *user)
 {
@@ -262,8 +328,20 @@ static void section_chosen(widget_t *list, void *user)
     int index = gui_list_selected(list);
     if (index < 0)
         return;
+    current_page = index;
     gui_box_clear(content);
     pages[index]();
+}
+
+/* The screen has another mode (chosen here or elsewhere, or another monitor): the list shows it. */
+static void screen_changed(void *user)
+{
+    (void)user;
+    if (current_page >= 0 && pages[current_page] == show_display) {
+        gui_box_clear(content);
+        show_display();
+        say("display updated");
+    }
 }
 
 int main(void)
@@ -286,6 +364,7 @@ int main(void)
     gui_list_add(sections, "Network");
     gui_list_add(sections, "System");
     gui_list_add(sections, "Sound");
+    gui_list_add(sections, "Display");
     gui_set_min_size(sections, 150, 0);
     gui_add(root, sections);
     content = gui_vbox(10);
@@ -295,6 +374,7 @@ int main(void)
     gui_add(root, scroll);
     gui_window_set_root(window, root);
     gui_list_select(sections, 0);
+    gui_on_screen(app, screen_changed, NULL);
     gui_window_focus(window, sections);
     say("ready");
     return gui_run(app);

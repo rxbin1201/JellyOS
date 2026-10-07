@@ -132,6 +132,12 @@ status_t jelly_display_cursor(uint32_t index, const jelly_cursor_t *cursor);
 status_t jelly_display_vblank(uint32_t index, uint64_t timeout_ns);
 status_t jelly_display_buffer(uint32_t index, uint32_t buffer, jelly_handle_t *memory);
 status_t jelly_display_flip(uint32_t index, uint32_t buffer);
+/* --- Display modes and hot plug (ABI version 9) --- */
+/* The modes of a display: up to `max` are stored, *count is the number there are. */
+status_t jelly_display_modes(uint32_t index, jelly_display_mode_t *modes, uint32_t max, uint32_t *count);
+status_t jelly_display_set_mode(uint32_t index, uint32_t mode);
+/* An event that is signaled when the display's size, modes or connection change; reset it with jelly_event_reset(). */
+status_t jelly_display_watch(uint32_t index, jelly_handle_t *event);
 
 /* --- Audio devices (ABI version 7); applications use the audio server instead: audio/client/audio.h --- */
 status_t jelly_audio_info(uint32_t index, jelly_audio_info_t *info);

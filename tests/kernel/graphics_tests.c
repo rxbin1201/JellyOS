@@ -178,16 +178,17 @@ KTEST(display_framebuffer_can_be_replaced)
         return;
     uint64_t old_phys = d->phys;
     uint32_t old_width = d->info.width, old_height = d->info.height, old_pitch = d->info.pitch;
+    uint64_t old_size = d->info.size;
     const uint32_t width = 1000, height = 500, pitch = 4032; /* a pitch wider than the picture, as hardware has it */
     size_t pages = (size_t)(align_up((uint64_t)pitch * height, PAGE_SIZE) / PAGE_SIZE);
     KASSERT(pmm_alloc_pages(pages, &phys) == STATUS_SUCCESS);
     volatile uint32_t *memory_view = phys_to_virt(phys);
 
-    KEXPECT(display_set_framebuffer(99, phys, width, height, pitch) == STATUS_NOT_FOUND);
-    KEXPECT(display_set_framebuffer(0, phys, width, height, width * 4 - 4) == STATUS_INVALID_ARGUMENT);
-    KEXPECT(display_set_framebuffer(0, phys + 1, width, height, pitch) == STATUS_INVALID_ARGUMENT);
+    KEXPECT(display_set_framebuffer(99, phys, 0, width, height, pitch) == STATUS_NOT_FOUND);
+    KEXPECT(display_set_framebuffer(0, phys, 0, width, height, width * 4 - 4) == STATUS_INVALID_ARGUMENT);
+    KEXPECT(display_set_framebuffer(0, phys + 1, 0, width, height, pitch) == STATUS_INVALID_ARGUMENT);
 
-    KASSERT(display_set_framebuffer(0, phys, width, height, pitch) == STATUS_SUCCESS);
+    KASSERT(display_set_framebuffer(0, phys, 0, width, height, pitch) == STATUS_SUCCESS);
     KEXPECT(d->info.width == width && d->info.height == height && d->info.pitch == pitch && d->phys == phys);
     KEXPECT(d->info.size >= (uint64_t)pitch * height);
     /* The console repainted the new screen: its background fills the corners, and a message draws glyphs. */
@@ -202,15 +203,42 @@ KTEST(display_framebuffer_can_be_replaced)
     /* A display server gets the new memory; while it has it, the framebuffer cannot be replaced. */
     KASSERT(display_acquire(0, &memory) == STATUS_SUCCESS);
     KEXPECT(shm_size(memory) == d->info.size);
-    KEXPECT(display_set_framebuffer(0, old_phys, old_width, old_height, old_pitch) == STATUS_BUSY);
+    KEXPECT(display_set_framebuffer(0, old_phys, old_size, old_width, old_height, old_pitch) == STATUS_BUSY);
     object_release(memory);
 
-    KASSERT(display_set_framebuffer(0, old_phys, old_width, old_height, old_pitch) == STATUS_SUCCESS);
+    KASSERT(display_set_framebuffer(0, old_phys, old_size, old_width, old_height, old_pitch) == STATUS_SUCCESS);
     KEXPECT(d->info.width == old_width && d->info.height == old_height && d->phys == old_phys);
     pmm_free_pages(phys, pages);
 }
 
 /* --- The driver interface of a display, with a driver that exists only here ---------------- */
+
+/* The driver the machine really has (in QEMU: bochs-gpu), put aside while a test brings its own. */
+static struct {
+    const display_ops_t *ops;
+    void                *data;
+    uint64_t             second_phys;
+    jelly_display_mode_t modes[JELLY_DISPLAY_MODE_MAX];
+    uint32_t             mode_count, current;
+} real_driver;
+
+static void real_driver_save(display_t *d)
+{
+    real_driver.ops = d->ops;
+    real_driver.data = d->driver_data;
+    real_driver.second_phys = d->second_phys;
+    real_driver.mode_count = d->mode_count;
+    real_driver.current = d->current_mode;
+    memcpy(real_driver.modes, d->modes, sizeof(real_driver.modes));
+    display_set_driver(0, NULL, NULL, 0);
+}
+
+static void real_driver_restore(void)
+{
+    display_set_driver(0, real_driver.ops, real_driver.data, real_driver.second_phys);
+    if (real_driver.mode_count)
+        display_set_modes(0, real_driver.modes, real_driver.mode_count, real_driver.current);
+}
 
 static struct {
     int      images, moves, waits, flips;
@@ -253,7 +281,8 @@ static status_t fake_flip(display_t *display, uint32_t buffer)
 
 KTEST(display_driver_operations)
 {
-    static const display_ops_t all = { fake_cursor_image, fake_cursor_move, fake_wait_vblank, fake_flip };
+    static const display_ops_t all = { .cursor_image = fake_cursor_image, .cursor_move = fake_cursor_move,
+                                       .wait_vblank = fake_wait_vblank, .flip = fake_flip };
     static const display_ops_t pointer_only = { .cursor_image = fake_cursor_image, .cursor_move = fake_cursor_move };
     static uint32_t image[JELLY_CURSOR_SIZE * JELLY_CURSOR_SIZE] = { 0xFF112233 };
     display_t *d = display_get(0);
@@ -264,6 +293,7 @@ KTEST(display_driver_operations)
     if (!d)
         return;
     size_t pages = (size_t)(d->info.size / PAGE_SIZE);
+    real_driver_save(d);
 
     /* Without a driver the display is a plain framebuffer and says so. */
     KEXPECT(!(d->info.flags & (JELLY_DISPLAY_CURSOR | JELLY_DISPLAY_VBLANK | JELLY_DISPLAY_FLIP)));
@@ -305,8 +335,123 @@ KTEST(display_driver_operations)
     object_release(memory);
     KEXPECT(fake_gpu.shown == 0 && !fake_gpu.visible && !d->acquired);
 
-    /* Back to a display without a driver, as the rest of the tests expect it. */
+    /* Without a driver again, then with the one the machine has. */
     KASSERT(display_set_driver(0, NULL, NULL, 0) == STATUS_SUCCESS);
     KEXPECT(!(d->info.flags & (JELLY_DISPLAY_CURSOR | JELLY_DISPLAY_VBLANK | JELLY_DISPLAY_FLIP)));
     pmm_free_pages(phys, pages);
+    real_driver_restore();
+}
+
+/* --- Modes: a list from the driver, switching, and telling whoever watches the display ------ */
+
+static struct {
+    jelly_display_mode_t list[3];
+    uint32_t             pitch[3];
+    uint32_t             shown;
+    int                  calls;
+    bool                 fails;
+} fake_modes;
+
+static status_t fake_set_mode(display_t *display, uint32_t mode, uint32_t *pitch)
+{
+    (void)display;
+    fake_modes.calls++;
+    if (fake_modes.fails)
+        return STATUS_DEVICE_ERROR; /* as a driver whose mode did not come up and that put the old one back */
+    fake_modes.shown = mode;
+    *pitch = fake_modes.pitch[mode];
+    return STATUS_SUCCESS;
+}
+
+static bool event_is_signaled(object_t *event)
+{
+    uint32_t index;
+    return object_wait_many(&event, 1, 0, &index) == STATUS_SUCCESS;
+}
+
+KTEST(display_modes_can_be_switched)
+{
+    static const display_ops_t ops = { .set_mode = fake_set_mode };
+    display_t *d = display_get(0);
+    jelly_display_mode_t modes[4];
+    object_t *event, *memory;
+    uint32_t count = 0;
+
+    if (!d || d->info.width < 640 || d->info.height < 480)
+        return;
+    real_driver_save(d);
+    /* The framebuffer stays the same memory in every mode: the real one and two smaller ones that fit into it. */
+    const uint32_t width = d->info.width, height = d->info.height, pitch = d->info.pitch;
+    fake_modes.list[0] = (jelly_display_mode_t){ width, height, 60000, JELLY_MODE_PREFERRED };
+    fake_modes.list[1] = (jelly_display_mode_t){ 640, 480, 75000, 0 };
+    fake_modes.list[2] = (jelly_display_mode_t){ 320, 240, 0, 0 };
+    fake_modes.pitch[0] = pitch;
+    fake_modes.pitch[1] = 640 * 4 + 64; /* a pitch wider than the picture */
+    fake_modes.pitch[2] = 320 * 4;
+
+    /* No driver: one mode, the one on the screen, and no way to change it. */
+    KEXPECT(display_modes(0, modes, 4, &count) == STATUS_SUCCESS && count == 1);
+    KEXPECT(modes[0].width == width && modes[0].height == height && (modes[0].flags & JELLY_MODE_CURRENT));
+    KEXPECT(display_set_mode(0, 0) == STATUS_NOT_SUPPORTED);
+    KEXPECT(display_modes(99, modes, 4, &count) == STATUS_NOT_FOUND);
+
+    /* A driver that can switch, but only once it has named its modes. */
+    KASSERT(display_set_driver(0, &ops, NULL, 0) == STATUS_SUCCESS);
+    KEXPECT(!(d->info.flags & JELLY_DISPLAY_MODES));
+    KEXPECT(display_set_modes(0, fake_modes.list, 3, 3) == STATUS_INVALID_ARGUMENT);
+    KASSERT(display_set_modes(0, fake_modes.list, 3, 0) == STATUS_SUCCESS);
+    KEXPECT((d->info.flags & JELLY_DISPLAY_MODES) && d->info.refresh_mhz == 60000);
+    KEXPECT(display_modes(0, modes, 2, &count) == STATUS_SUCCESS && count == 3); /* two stored, three there are */
+    KEXPECT(modes[0].flags == (JELLY_MODE_CURRENT | JELLY_MODE_PREFERRED) && modes[1].flags == 0);
+
+    /* Switching: geometry, refresh rate and the marked mode follow; the watcher's event is signaled. */
+    KASSERT(display_watch(0, &event) == STATUS_SUCCESS);
+    event_reset(event);
+    uint32_t generation = d->info.generation;
+    KASSERT(display_set_mode(0, 1) == STATUS_SUCCESS);
+    KEXPECT(fake_modes.shown == 1 && d->info.width == 640 && d->info.height == 480 &&
+            d->info.pitch == fake_modes.pitch[1] && d->info.refresh_mhz == 75000);
+    KEXPECT(d->info.generation != generation && event_is_signaled(event));
+    KEXPECT(display_modes(0, modes, 4, &count) == STATUS_SUCCESS && modes[1].flags == JELLY_MODE_CURRENT &&
+            modes[0].flags == JELLY_MODE_PREFERRED);
+    klog_info("ktest: this line is drawn by the console in the switched mode");
+    event_reset(event);
+    KEXPECT(!event_is_signaled(event));
+
+    /* The mode being shown again costs nothing; a mode that is not in the list is refused. */
+    int calls = fake_modes.calls;
+    KEXPECT(display_set_mode(0, 1) == STATUS_SUCCESS && fake_modes.calls == calls);
+    KEXPECT(display_set_mode(0, 3) == STATUS_INVALID_ARGUMENT);
+
+    /* A mode that does not come up: the error is passed on and nothing changes. */
+    fake_modes.fails = true;
+    KEXPECT(display_set_mode(0, 2) == STATUS_DEVICE_ERROR);
+    KEXPECT(d->info.width == 640 && d->info.height == 480 && d->current_mode == 1);
+    fake_modes.fails = false;
+
+    /* While a display server owns the display its mapping stays valid, and the console catches up afterwards. */
+    KASSERT(display_acquire(0, &memory) == STATUS_SUCCESS);
+    uint64_t size = shm_size(memory);
+    event_reset(event);
+    KASSERT(display_set_mode(0, 2) == STATUS_SUCCESS);
+    KEXPECT(d->info.width == 320 && d->info.height == 240 && d->info.size == size && d->console_stale);
+    KEXPECT(event_is_signaled(event));
+    object_release(memory);
+    KEXPECT(!d->console_stale && !d->acquired);
+
+    /* Hot plug: the flag and the event. */
+    event_reset(event);
+    display_set_connected(0, false);
+    KEXPECT((d->info.flags & JELLY_DISPLAY_DISCONNECTED) && event_is_signaled(event));
+    display_set_connected(0, true);
+    KEXPECT(!(d->info.flags & JELLY_DISPLAY_DISCONNECTED));
+    /* Another monitor: a new list in which the mode being shown does not appear. */
+    KASSERT(display_set_modes(0, fake_modes.list, 2, DISPLAY_NO_MODE) == STATUS_SUCCESS);
+    KEXPECT(display_modes(0, modes, 4, &count) == STATUS_SUCCESS && count == 2 && !(modes[0].flags & JELLY_MODE_CURRENT));
+
+    /* The real screen back. */
+    KASSERT(display_set_mode(0, 0) == STATUS_SUCCESS);
+    KEXPECT(d->info.width == width && d->info.height == height && d->info.pitch == pitch);
+    object_release(event);
+    real_driver_restore();
 }

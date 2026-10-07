@@ -209,8 +209,26 @@ back. The Intel driver itself cannot run in QEMU.
 appear for which operations, hardware pointer, vertical blank wait, the
 second framebuffer and flipping, and that the first framebuffer is shown
 again and the pointer hidden when the display server goes away. In QEMU the
-display server runs on a display without a driver, so every GUI step of the
-integration test covers the software path of `display_commit()`.
+display server has no vertical blank or second framebuffer, so every GUI
+step of the integration test covers the software path of `display_commit()`.
+
+`display_modes_can_be_switched` does the same for modes: a list from a
+driver made for the test, switching (geometry, refresh rate, the mode
+marked as current), the event for watchers, a mode that does not come up, a
+switch while a display server owns the display (its mapping keeps its
+size; the console lays itself out again afterwards), hot plug and a new
+list of modes.
+
+In QEMU the driver `bochs-gpu` gives the standard VGA card real mode
+switching. The integration test uses it with the desktop running: the
+`display` command lists the modes, a mode is chosen with the keyboard on
+the Display page of Settings (1920x1080; the display server writes it to
+`/etc/display.conf`), another one with `display 1024x768`, and `display 0`
+goes back. After each switch a screenshot must have the new size, with the
+maximized window filling it and the taskbar at the new bottom edge.
+
+Not covered by any automated test, because QEMU has no such device: the
+Intel driver's mode switching, DisplayPort link training and hot plug.
 
 [`tests/kernel/desktop_tests.c`](../../tests/kernel/desktop_tests.c)
 (Phase 10) checks the RTC wall clock (a plausible date that advances with

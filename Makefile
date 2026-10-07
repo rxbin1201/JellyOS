@@ -112,7 +112,7 @@ AUDIO_A       := $(BUILD)/userspace/libaudio.a
 
 # Programs of the initramfs: <name>:<install path>:<sources>
 PROGRAM_DIR  := $(BUILD)/userspace/programs
-COREUTILS    := cat cp dmesg echo false ls mkdir mv rm sleep touch true
+COREUTILS    := cat cp display dmesg echo false ls mkdir mv rm sleep touch true
 NETTOOLS     := http ifconfig nc nslookup ping
 AUDIOTOOLS   := play record tone volume
 PROGRAMS     := init:/init:userspace/init/init.c \

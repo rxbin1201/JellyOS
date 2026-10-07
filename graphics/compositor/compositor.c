@@ -127,6 +127,21 @@ void compositor_init(compositor_t *c, display_t *display)
     compositor_damage(c, rect_make(0, 0, display->back.width, display->back.height));
 }
 
+void compositor_resize(compositor_t *c)
+{
+    int32_t width = c->display->back.width, height = c->display->back.height;
+
+    if (c->pointer_x >= width)
+        c->pointer_x = width - 1;
+    if (c->pointer_y >= height)
+        c->pointer_y = height - 1;
+    for (int i = 0; i < c->count; i++)
+        compositor_move(c, c->windows[i], c->windows[i]->x, c->windows[i]->y);
+    c->outline = rect_make(0, 0, 0, 0);
+    c->damage_count = 0;
+    compositor_damage(c, rect_make(0, 0, width, height));
+}
+
 rect_t compositor_work_area(compositor_t *c)
 {
     int32_t width = c->display->back.width, height = c->display->back.height;

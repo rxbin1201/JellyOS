@@ -94,7 +94,7 @@ def intel_nic_steps(http_port):
     return [
         ("dmesg e1000:", ["Intel 82574L", "link up"]),
         # The display server reports in the kernel log how it shows frames (no graphics driver in QEMU).
-        ("dmesg displayd", ["plain framebuffer, waiting for clients"]),
+        ("dmesg displayd", ["plain framebuffer, mode switching, waiting for clients"]),
         ("ifconfig", ["10.0.2.15/24", "inet 10.0.3.15/24 gateway 10.0.3.2"], 30),
         ("ping -c 3 -i 0.2 10.0.3.2", ["3 packets transmitted, 3 received"]),
         (f"http http://10.0.3.2:{http_port}/hello.txt", [HOST_TEXT]),
@@ -577,6 +577,47 @@ def gui_steps(console, qmp, timeout):
     # --- Notifications from any program
     console.send("notify Test Nachricht")
     expect("notify shows a notification", "desktop: notification 'Test'")
+
+    # --- Screen modes while the desktop runs (Phase 12). QEMU's VGA card is driven by bochs-gpu; the Settings
+    #     window is maximized and focused at this point.
+    def screen_is(name, width, height):
+        if not expect(f"{name}: the display server follows", f"the screen is now {width}x{height}"):
+            return
+        time.sleep(2.5)
+        shot = qmp.screenshot()
+        check(f"{name}: the screen has {width}x{height} pixels", (qmp.width, qmp.height) == (width, height),
+              f"({qmp.width}x{qmp.height})")
+        check(f"{name}: the maximized window fills the new screen", shot.color(width // 2, 6) == TITLE_FOCUSED,
+              f"(top of the screen {shot.color(width // 2, 6):06x})")
+        check(f"{name}: the taskbar is at the new bottom edge",
+              shot.color(4, height - 3) == taskbar_corner and shot.color(width - 4, height - 3) == taskbar_corner,
+              f"({shot.color(4, height - 3):06x} {shot.color(width - 4, height - 3):06x}, was {taskbar_corner:06x})")
+
+    taskbar_corner = qmp.screenshot().color(4, 797)
+    console.send("display")
+    output = console.read_until(PROMPT, timeout)
+    check("display lists the driver's modes",
+          all(text in output for text in ("display 0: 1280x800", "mode switching", "1920x1080", "1024x768", "(current)")),
+          f"({output!r})")
+    qmp.click(55, 54)   # the first section of Settings: the list of sections has the keyboard
+    qmp.key("end")      # the last section: Display
+    time.sleep(1.0)
+    qmp.key("tab")      # the list of modes
+    qmp.key("down")     # the second mode
+    expect("Settings asks for the chosen mode", "settings: display mode 1920x1080")
+    screen_is("mode chosen in Settings", 1920, 1080)
+    expect("Settings shows the new mode", "settings: display updated", 10)
+    console.send("cat /etc/display.conf")
+    output = console.read_until(PROMPT, timeout)
+    check("the display server keeps the choice for the next start", "mode=1920x1080@60" in output, f"({output!r})")
+    console.send("display 1024x768")
+    screen_is("mode set with the display command", 1024, 768)
+    console.send("display 640x400")
+    expect("a mode the driver does not have is refused", "display: no mode '640x400'")
+    console.send("display 0")
+    screen_is("back to the first mode", 1280, 800)
+    console.send("")
+    console.read_until(PROMPT, timeout)
 
     # --- Log out: back to the login
     qmp.click(*LAUNCHER)

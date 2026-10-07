@@ -84,6 +84,8 @@ void          gui_on_notification(gui_app_t *app, void (*fn)(const char *title, 
                                   void *user);
 /* Settings changed (after the toolkit applied the new theme). */
 void          gui_on_settings(gui_app_t *app, void (*fn)(void *user), void *user);
+/* The screen changed its size (wm_screen_size() has the new one). */
+void          gui_on_screen(gui_app_t *app, void (*fn)(void *user), void *user);
 
 gui_window_t *gui_window_create(gui_app_t *app, const char *title, int32_t width, int32_t height);
 /* Resizable, panel, popup, fixed position: WM_WINDOW_* flags; x, y with WM_WINDOW_POSITIONED. */

@@ -11,14 +11,26 @@
  * through this file, so that neither the display server nor the next
  * driver depends on a particular GPU:
  *
- *   display_set_framebuffer()   another mode: new memory, new size
+ *   display_set_framebuffer()   the driver's own framebuffer memory
  *   display_set_driver()        display_ops_t with what the hardware can do:
  *                               a hardware pointer, waiting for the vertical
- *                               blank, a second framebuffer to flip to
+ *                               blank, a second framebuffer to flip to,
+ *                               switching modes
+ *   display_set_modes()         the modes the monitor and the connection
+ *                               allow (again after another monitor was
+ *                               plugged in)
+ *   display_set_connected()     a monitor went away or came back
  *
  * Each operation is optional; what a driver provides shows up as
  * JELLY_DISPLAY_* flags of the display, and the display server falls back
- * to software for the rest (system calls 76-79).
+ * to software for the rest (system calls 76-82).
+ *
+ * Modes change while the display is in use, also while a display server
+ * owns it. The framebuffer memory therefore never moves: a driver that can
+ * switch modes allocates framebuffers large enough for every mode once, and
+ * a mode only changes width, height and pitch. Whoever has the memory
+ * mapped keeps a valid mapping; the display's event (display_watch()) tells
+ * it to read the new geometry.
  */
 
 #ifndef DRIVERS_GRAPHICS_DISPLAY_H
@@ -26,14 +38,19 @@
 
 #include "core/boot.h"
 #include "core/object.h"
+#include "scheduler/mutex.h"
 
 #include <jelly/syscall.h>
 
-#define DISPLAY_MAX 4
+#define DISPLAY_MAX     4
+#define DISPLAY_NO_MODE 0xFFFFFFFFu
 
 struct display;
 
-/* What a graphics driver can do for a display beyond a framebuffer. Thread context; every entry may be NULL. */
+/*
+ * What a graphics driver can do for a display beyond a framebuffer. Thread context; every entry may be NULL.
+ * All but wait_vblank are called with the display's lock held (display_lock()), one at a time.
+ */
 typedef struct {
     /* A new pointer image: JELLY_CURSOR_SIZE x JELLY_CURSOR_SIZE pixels, 0xAARRGGBB, not premultiplied. */
     status_t (*cursor_image)(struct display *display, const uint32_t *pixels);
@@ -43,6 +60,12 @@ typedef struct {
     status_t (*wait_vblank)(struct display *display, uint64_t timeout_ns);
     /* Show framebuffer 0 or 1 from the next frame on (needs a second framebuffer in display_set_driver()). */
     status_t (*flip)(struct display *display, uint32_t buffer);
+    /*
+     * Switch to entry `mode` of the list given with display_set_modes(). The framebuffers stay where they are;
+     * *pitch gets the bytes per line of the new mode. Framebuffer 0 is shown afterwards. If the mode does not
+     * come up, the driver puts the previous one back and returns an error.
+     */
+    status_t (*set_mode)(struct display *display, uint32_t mode, uint32_t *pitch);
 } display_ops_t;
 
 typedef struct display {
@@ -50,11 +73,18 @@ typedef struct display {
     uint64_t             phys;      /* framebuffer physical address */
     volatile uint32_t   *pixels;    /* kernel mapping (write-combining) */
     bool                 acquired;
+    bool                 console_stale; /* the mode changed while a display server owned the display */
 
     /* Set by a graphics driver */
     const display_ops_t *ops;
     void                *driver_data;
     uint64_t             second_phys; /* the second framebuffer (same size), 0 if there is none */
+    jelly_display_mode_t modes[JELLY_DISPLAY_MODE_MAX];
+    uint32_t             mode_count;
+    uint32_t             current_mode; /* DISPLAY_NO_MODE: what is shown is not in the list */
+
+    mutex_t              lock;      /* driver operations and mode changes */
+    object_t            *changed;   /* event: signaled when geometry, modes or the connection change */
 } display_t;
 
 /* Register the boot framebuffer as display 0 (no-op without one). */
@@ -63,17 +93,31 @@ display_t *display_get(uint32_t index);
 uint32_t   display_count(void);
 
 /*
- * A graphics driver switched modes: display `index` now has this framebuffer (32 bits per pixel, the pixel
- * format stays). BUSY once a display server owns the display. The kernel console moves to the new screen.
+ * A graphics driver gives display `index` its own framebuffer (32 bits per pixel, the pixel format stays):
+ * `size` bytes of memory at `phys` (0: just enough for this mode), showing width x height with `pitch` bytes
+ * per line. BUSY once a display server owns the display. The kernel console moves to the new screen.
  */
-status_t   display_set_framebuffer(uint32_t index, uint64_t phys, uint32_t width, uint32_t height, uint32_t pitch);
+status_t   display_set_framebuffer(uint32_t index, uint64_t phys, uint64_t size, uint32_t width, uint32_t height,
+                                   uint32_t pitch);
 
 /*
  * A graphics driver offers its operations for display `index` (after display_set_framebuffer(), if it changed
  * the mode). second_phys: a second framebuffer of the same size for flipping, or 0. The capability flags of
- * the display follow from what is there.
+ * the display follow from what is there. ops == NULL: the display is a plain framebuffer again.
  */
 status_t   display_set_driver(uint32_t index, const display_ops_t *ops, void *driver_data, uint64_t second_phys);
+
+/*
+ * The modes display `index` can show now (at most JELLY_DISPLAY_MODE_MAX; the flags are set here). `current`:
+ * the entry being shown, or DISPLAY_NO_MODE. May be called at any time, also while the display is owned.
+ */
+status_t   display_set_modes(uint32_t index, const jelly_display_mode_t *modes, uint32_t count, uint32_t current);
+/* A monitor was unplugged or plugged in. */
+void       display_set_connected(uint32_t index, bool connected);
+
+/* For drivers that touch their hardware outside the operations (hot plug): the lock the operations run under. */
+void       display_lock(display_t *display);
+void       display_unlock(display_t *display);
 
 /* The operations for the display server (system calls); NOT_SUPPORTED where the driver has nothing. */
 status_t   display_cursor(uint32_t index, const jelly_cursor_t *cursor, const uint32_t *pixels);
@@ -81,6 +125,12 @@ status_t   display_wait_vblank(uint32_t index, uint64_t timeout_ns);
 status_t   display_flip(uint32_t index, uint32_t buffer);
 /* The second framebuffer as a memory object to map. */
 status_t   display_buffer(uint32_t index, uint32_t buffer, object_t **memory);
+/* The list of modes; a display without a driver has one: what it shows. */
+status_t   display_modes(uint32_t index, jelly_display_mode_t *modes, uint32_t max, uint32_t *count);
+/* Switch modes. The console follows if it has the screen; a display server learns of it through the event. */
+status_t   display_set_mode(uint32_t index, uint32_t mode);
+/* The display's event (a new reference): signaled after every change; the watcher resets it. */
+status_t   display_watch(uint32_t index, object_t **event);
 
 /* Give the framebuffer to a display server: a memory object to map (shared memory handle). */
 status_t   display_acquire(uint32_t index, object_t **memory);

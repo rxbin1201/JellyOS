@@ -478,3 +478,20 @@ status_t jelly_display_flip(uint32_t index, uint32_t buffer)
 {
     return (status_t)SYSCALL2(SYS_DISPLAY_FLIP, index, buffer);
 }
+
+/* --- Display modes and hot plug (ABI version 9) ------------------------------------------ */
+
+status_t jelly_display_modes(uint32_t index, jelly_display_mode_t *modes, uint32_t max, uint32_t *count)
+{
+    return (status_t)SYSCALL4(SYS_DISPLAY_MODES, index, modes, max, count);
+}
+
+status_t jelly_display_set_mode(uint32_t index, uint32_t mode)
+{
+    return (status_t)SYSCALL2(SYS_DISPLAY_SET_MODE, index, mode);
+}
+
+status_t jelly_display_watch(uint32_t index, jelly_handle_t *event)
+{
+    return (status_t)SYSCALL2(SYS_DISPLAY_WATCH, index, event);
+}

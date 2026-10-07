@@ -303,6 +303,12 @@ int wm_set_keymap(wm_connection_t *c, const char *name)
     return send_message(c, &m);
 }
 
+int wm_set_display_mode(wm_connection_t *c, int32_t width, int32_t height, uint32_t refresh_mhz)
+{
+    wm_message_t m = { .type = WM_SET_DISPLAY_MODE, .width = width, .height = height, .flags = refresh_mhz };
+    return send_message(c, &m);
+}
+
 int wm_notify(wm_connection_t *c, const char *title, const char *text)
 {
     wm_message_t m = { .type = WM_NOTIFY };
@@ -375,6 +381,14 @@ int wm_next_event(wm_connection_t *c, wm_event_t *event, window_t **window, uint
             c->notification_title[WM_TITLE_MAX - 1] = '\0';
             c->notification_text[WM_TEXT_MAX - 1] = '\0';
             event->type = WM_EVENT_NOTIFICATION;
+            w = NULL;
+            break;
+        case WM_SCREEN:
+            c->screen_width = m.width;
+            c->screen_height = m.height;
+            event->type = WM_EVENT_SCREEN;
+            event->x = m.width;
+            event->y = m.height;
             w = NULL;
             break;
         default:

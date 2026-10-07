@@ -115,6 +115,8 @@ struct gui_app {
     void            *on_notification_user;
     void           (*on_settings)(void *user);
     void            *on_settings_user;
+    void           (*on_screen)(void *user);
+    void            *on_screen_user;
 };
 
 struct gui_window {
@@ -1644,6 +1646,12 @@ void gui_on_notification(gui_app_t *app, void (*fn)(const char *title, const cha
     app->on_notification_user = user;
 }
 
+void gui_on_screen(gui_app_t *app, void (*fn)(void *user), void *user)
+{
+    app->on_screen = fn;
+    app->on_screen_user = user;
+}
+
 void gui_on_settings(gui_app_t *app, void (*fn)(void *user), void *user)
 {
     app->on_settings = fn;
@@ -1677,6 +1685,11 @@ static void dispatch(gui_app_t *app, const wm_event_t *e, window_t *surface)
     }
     if (e->type == WM_EVENT_SETTINGS) {
         apply_settings(app);
+        return;
+    }
+    if (e->type == WM_EVENT_SCREEN) {
+        if (app->on_screen)
+            app->on_screen(app->on_screen_user);
         return;
     }
 

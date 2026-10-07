@@ -72,6 +72,8 @@ typedef struct {
 } compositor_t;
 
 void           compositor_init(compositor_t *c, display_t *display);
+/* The display has another size: keep the windows reachable and paint everything again. */
+void           compositor_resize(compositor_t *c);
 
 /* Content rectangle and whole outer rectangle (with decorations, without shadow). */
 rect_t         compositor_content_rect(const comp_window_t *w);

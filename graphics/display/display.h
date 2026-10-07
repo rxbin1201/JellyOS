@@ -16,6 +16,11 @@
  *                         nothing half-drawn is ever visible
  *   hardware pointer      the pointer is a plane of its own and never
  *                         touches the picture (display_pointer_*)
+ *
+ * The mode of a display can change while it is open: somebody chose another
+ * one, or another monitor was plugged in. The framebuffers stay mapped (the
+ * driver made them large enough for every mode); display->watch is an event
+ * to wait on, and display_changed() then takes over the new size.
  */
 
 #ifndef GRAPHICS_DISPLAY_DISPLAY_H
@@ -46,10 +51,20 @@ typedef struct {
     volatile uint32_t   *buffers[2];     /* page flipping: both framebuffers */
     int                  front;          /* the one on the screen */
     display_frame_t      current, previous;
+
+    jelly_handle_t       watch;          /* signaled when the display changed: call display_changed() */
+    bool                 stale;          /* set by display_changed(): the framebuffers lost their picture */
 } display_t;
 
 /* Open display `index`; returns 0 or a status code. */
 int  display_open(uint32_t index, display_t *display);
+/*
+ * The display's event was signaled: read its state again. True if the size changed: the back buffer is a new
+ * one of the new size (empty), and everything has to be drawn again. Otherwise display->stale may be set: the
+ * mode was set anew at the same size (another refresh rate, another connector), the driver emptied the
+ * framebuffers, and the next frame must be shown whole (the back buffer still has the picture).
+ */
+bool display_changed(display_t *display);
 /* A rectangle of the back buffer changed and belongs to the frame being built. */
 void display_present(display_t *display, rect_t area);
 /* Show the frame. With vertical blank timing this returns when the frame is on the screen. */

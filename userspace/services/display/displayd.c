@@ -22,7 +22,15 @@
  * layout; the pointer goes to the window under it, and while a button is
  * held, the window that got the press keeps the pointer (grab).
  *
- * /etc/display.conf: keymap=us|de, autostart=PROGRAM (repeatable).
+ * The screen can change its size while everything runs: somebody chooses
+ * another mode (WM_SET_DISPLAY_MODE from the Settings program, or the
+ * `display` command straight at the kernel), or another monitor is plugged
+ * in. The display's event wakes the server; it takes over the new size,
+ * moves what was laid out along the screen's edges and tells every client
+ * (WM_SCREEN).
+ *
+ * /etc/display.conf: keymap=us|de, autostart=PROGRAM (repeatable),
+ * mode=WIDTHxHEIGHT[@HZ] (written when a mode is chosen).
  */
 
 #include <ctype.h>
@@ -367,6 +375,11 @@ static void resize_window(client_t *client, const wm_message_t *request)
     jelly_channel_send_handles(client->channel, &reply, sizeof(reply), &memory, 1);
 }
 
+static void broadcast_screen(void);
+static void display_check(void);
+static status_t set_mode(uint32_t width, uint32_t height, uint32_t refresh_mhz);
+static void save_mode(uint32_t width, uint32_t height, uint32_t refresh_mhz);
+
 static void broadcast_settings(void)
 {
     for (int c = 0; c < MAX_CLIENTS; c++) {
@@ -453,6 +466,19 @@ static void handle_request(client_t *client, const wm_message_t *m)
                 send_to(&clients[i], m);
         }
         break;
+    case WM_SET_DISPLAY_MODE: {
+        int32_t old_w = display.back.width, old_h = display.back.height;
+        status_t status = set_mode((uint32_t)m->width, (uint32_t)m->height, m->flags);
+        if (STATUS_IS_ERROR(status)) {
+            log_message("mode %dx%d: status %d", m->width, m->height, (int)status);
+        } else {
+            save_mode((uint32_t)m->width, (uint32_t)m->height, m->flags);
+            display_check();
+        }
+        if (display.back.width == old_w && display.back.height == old_h)
+            broadcast_screen(); /* the one who asked waits for an answer in any case */
+        break;
+    }
     }
 }
 
@@ -513,6 +539,132 @@ static void accept_clients(void)
 }
 
 /* --- Input ---------------------------------------------------------------------- */
+
+static void pointer_moved(void);
+
+/* --- Screen modes ------------------------------------------------------------------ */
+
+static void broadcast_screen(void)
+{
+    wm_message_t m = { .type = WM_SCREEN, .width = display.back.width, .height = display.back.height };
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].used)
+            send_to(&clients[i], &m);
+    }
+}
+
+/*
+ * The screen was old_w x old_h and has another size now. Windows without decorations were placed by their
+ * programs along the screen's edges (the taskbar, the login screen, menus): they keep their edges. Maximized
+ * windows fill the new work area; the others only have to stay reachable.
+ */
+static void screen_changed(int32_t old_w, int32_t old_h)
+{
+    int32_t width = display.back.width, height = display.back.height;
+
+    drag = sizing = NULL;
+    for (int i = 0; i < compositor.count; i++) {
+        comp_window_t *w = compositor.windows[i];
+        if (is_normal(w) && !(w->flags & WM_WINDOW_UNDECORATED))
+            continue;
+        int32_t x = w->x, y = w->y, w_w = w->content.width, w_h = w->content.height;
+        bool full_w = x == 0 && w_w == old_w, full_h = y == 0 && w_h == old_h;
+        if (!full_w && x + w_w == old_w)
+            x = width - w_w; /* at the right edge */
+        if (!full_h && y + w_h == old_h)
+            y = height - w_h; /* at the bottom edge */
+        if (!full_w && x + w_w > width)
+            x = width - w_w;
+        if (!full_h && y + w_h > height)
+            y = height - w_h;
+        compositor_move(&compositor, w, x < 0 ? 0 : x, y < 0 ? 0 : y);
+        if (full_w || full_h)
+            propose_size(w, full_w ? width : w_w, full_h ? height : w_h);
+    }
+    compositor_resize(&compositor); /* keeps the title bars of the other windows on the screen */
+    rect_t area = compositor_work_area(&compositor);
+    for (int i = 0; i < compositor.count; i++) {
+        comp_window_t *w = compositor.windows[i];
+        if (is_normal(w) && w->maximized) {
+            compositor_move(&compositor, w, area.x + BORDER_WIDTH, area.y + TITLE_BAR_HEIGHT);
+            propose_size(w, area.w - 2 * BORDER_WIDTH, area.h - TITLE_BAR_HEIGHT - BORDER_WIDTH);
+        }
+    }
+    if (pointer_x >= width)
+        pointer_x = width - 1;
+    if (pointer_y >= height)
+        pointer_y = height - 1;
+    pointer_moved();
+    broadcast_screen();
+    log_message("the screen is now %dx%d", width, height);
+}
+
+/* The display's event was signaled (or we changed something ourselves): look at the display again. */
+static void display_check(void)
+{
+    int32_t old_w = display.back.width, old_h = display.back.height;
+    uint32_t old_flags = display.info.flags;
+    bool resized = display_changed(&display);
+
+    if ((old_flags ^ display.info.flags) & JELLY_DISPLAY_DISCONNECTED)
+        log_message("monitor %s", (display.info.flags & JELLY_DISPLAY_DISCONNECTED) ? "disconnected" : "connected");
+    if (resized)
+        screen_changed(old_w, old_h);
+    if (display.stale) {
+        /* The same size, but the framebuffers were emptied: put the whole picture back. */
+        display.stale = false;
+        compositor_damage(&compositor, rect_make(0, 0, display.back.width, display.back.height));
+        if (compositor.hardware_pointer)
+            display_pointer_move(&display, pointer_x, pointer_y, true);
+    }
+}
+
+/* Switch to the mode of this size; refresh_mhz 0: the first in the list, which is the best. */
+static status_t set_mode(uint32_t width, uint32_t height, uint32_t refresh_mhz)
+{
+    jelly_display_mode_t modes[JELLY_DISPLAY_MODE_MAX];
+    uint32_t count = 0;
+    status_t status = jelly_display_modes(display.info.index, modes, JELLY_DISPLAY_MODE_MAX, &count);
+
+    if (STATUS_IS_ERROR(status))
+        return status;
+    for (uint32_t i = 0; i < count && i < JELLY_DISPLAY_MODE_MAX; i++) {
+        if (modes[i].width == width && modes[i].height == height &&
+            (!refresh_mhz || (modes[i].refresh_mhz + 500) / 1000 == (refresh_mhz + 500) / 1000))
+            return jelly_display_set_mode(display.info.index, i);
+    }
+    return STATUS_NOT_FOUND;
+}
+
+/* Keep the chosen mode for the next start: the mode= line of the configuration file. */
+static void save_mode(uint32_t width, uint32_t height, uint32_t refresh_mhz)
+{
+    static char text[4096];
+    char line[160];
+    size_t length = 0;
+    FILE *file = fopen(CONFIG_PATH, "r");
+
+    if (file) {
+        while (fgets(line, sizeof(line), file)) {
+            size_t n = strlen(line);
+            if (strncmp(line, "mode=", 5) != 0 && length + n < sizeof(text) - 64) {
+                memcpy(text + length, line, n);
+                length += n;
+            }
+        }
+        fclose(file);
+    }
+    if (length && text[length - 1] != '\n')
+        text[length++] = '\n';
+    length += (size_t)snprintf(text + length, 64, "mode=%ux%u@%u\n", width, height, (refresh_mhz + 500) / 1000);
+    file = fopen(CONFIG_PATH, "w");
+    if (!file || fwrite(text, 1, length, file) != length)
+        log_message("cannot save the mode in %s", CONFIG_PATH);
+    if (file)
+        fclose(file);
+}
+
+/* --- Pointer and keys ------------------------------------------------------------- */
 
 static void pointer_event(comp_window_t *w, uint32_t type, uint32_t button, int32_t wheel)
 {
@@ -758,6 +910,7 @@ static void handle_input(void)
 
 static char autostart[MAX_AUTOSTART][128];
 static int autostart_count;
+static uint32_t wanted_width, wanted_height, wanted_refresh; /* mode=WIDTHxHEIGHT[@HZ] */
 
 static void load_config(void)
 {
@@ -777,6 +930,11 @@ static void load_config(void)
                 log_message("unknown keymap '%s'", text + 7);
         } else if (!strncmp(text, "autostart=", 10) && autostart_count < MAX_AUTOSTART) {
             snprintf(autostart[autostart_count++], sizeof(autostart[0]), "%s", text + 10);
+        } else if (!strncmp(text, "mode=", 5)) {
+            char *end;
+            wanted_width = (uint32_t)strtoul(text + 5, &end, 10);
+            wanted_height = *end == 'x' ? (uint32_t)strtoul(end + 1, &end, 10) : 0;
+            wanted_refresh = *end == '@' ? (uint32_t)strtoul(end + 1, &end, 10) * 1000 : 0;
         }
     }
     fclose(file);
@@ -821,6 +979,13 @@ int main(void)
     }
 
     load_config();
+    if (wanted_width && wanted_height && (display.info.flags & JELLY_DISPLAY_MODES)) {
+        /* The mode chosen last time, if this monitor still has it. */
+        status_t wanted = set_mode(wanted_width, wanted_height, wanted_refresh);
+        if (STATUS_IS_ERROR(wanted))
+            log_message("mode %ux%u from %s: status %d", wanted_width, wanted_height, CONFIG_PATH, (int)wanted);
+    }
+    display_changed(&display);
     compositor_init(&compositor, &display);
     pointer_x = compositor.pointer_x;
     pointer_y = compositor.pointer_y;
@@ -834,19 +999,26 @@ int main(void)
         }
     }
     compositor_render(&compositor);
-    log_message("%ux%u, keymap %s, %s%s, waiting for clients", display.info.width, display.info.height, keymap_name(),
+log_message("%ux%u, keymap %s, %s%s%s, waiting for clients", display.info.width, display.info.height,
+                keymap_name(),
                 display.flip ? "page flipping" : display.vblank ? "vertical blank timing" : "plain framebuffer",
-                compositor.hardware_pointer ? ", hardware pointer" : "");
+                compositor.hardware_pointer ? ", hardware pointer" : "",
+                (display.info.flags & JELLY_DISPLAY_MODES) ? ", mode switching" : "");
     start_programs();
 
     for (;;) {
-        jelly_handle_t handles[2 + MAX_CLIENTS];
-        client_t *owners[2 + MAX_CLIENTS];
-        uint32_t count = 0, index;
+        jelly_handle_t handles[3 + MAX_CLIENTS];
+        client_t *owners[3 + MAX_CLIENTS];
+        uint32_t count = 0, index, first_client;
         handles[count] = input_queue;
         owners[count++] = NULL;
         handles[count] = service_channel;
         owners[count++] = NULL;
+        if (display.watch != JELLY_HANDLE_INVALID) {
+            handles[count] = display.watch;
+            owners[count++] = NULL;
+        }
+        first_client = count;
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (clients[i].used) {
                 handles[count] = clients[i].channel;
@@ -859,13 +1031,15 @@ int main(void)
         jelly_wait_many(handles, count, timeout, &index);
 
         /* Serve everything that is ready, not only what woke us. */
+        if (display.watch != JELLY_HANDLE_INVALID && jelly_wait(display.watch, 0) == STATUS_SUCCESS)
+            display_check();
         handle_input();
         if (repeat_key && jelly_clock_ns() >= repeat_at) { /* after handle_input(): the key may be up by now */
             key_event(repeat_key, true, true);
             repeat_at = jelly_clock_ns() + REPEAT_INTERVAL_NS;
         }
         accept_clients();
-        for (uint32_t i = 2; i < count; i++) {
+        for (uint32_t i = first_client; i < count; i++) {
             if (owners[i]->used)
                 serve_client(owners[i]);
         }

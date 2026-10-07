@@ -59,25 +59,52 @@ typedef struct display_ops {
     void     (*cursor_move)(display_t *, int32_t x, int32_t y, bool visible);
     status_t (*wait_vblank)(display_t *, uint64_t timeout_ns);
     status_t (*flip)(display_t *, uint32_t buffer);                /* show framebuffer 0 or 1 */
+    status_t (*set_mode)(display_t *, uint32_t mode, uint32_t *pitch); /* entry of the driver's list */
 } display_ops_t;
 
-status_t display_set_framebuffer(index, phys, width, height, pitch);         /* after a mode switch */
+status_t display_set_framebuffer(index, phys, size, width, height, pitch);   /* the driver's own memory */
 status_t display_set_driver(index, ops, driver_data, second_framebuffer_phys);
+status_t display_set_modes(index, modes, count, current);                    /* what the monitor can show */
+void     display_set_connected(index, connected);                            /* hot plug */
 ```
 
 Every operation is optional. From the ones that are there the display layer
-derives the flags userspace sees (`JELLY_DISPLAY_CURSOR`, `VBLANK`, `FLIP`;
-flipping also needs the second framebuffer), checks arguments and
-ownership, hands out the second framebuffer and restores the screen when a
-display server goes away. The system calls 76–79, the display library and
-the display server only know this interface.
+derives the flags userspace sees (`JELLY_DISPLAY_CURSOR`, `VBLANK`, `FLIP`,
+`MODES`; flipping also needs the second framebuffer, mode switching a list
+of modes), checks arguments and ownership, hands out the second
+framebuffer and restores the screen when a display server goes away. The
+operations run one at a time under the display's lock, which a driver also
+takes when it touches its hardware on its own (`display_lock()`). The
+system calls 76–82, the display library and the display server only know
+this interface.
+
+**Modes.** A driver that can switch modes allocates its framebuffers once,
+large enough for every mode, and tells the display layer their size. A
+mode switch then changes only width, height and pitch: the memory stays
+where it is, and a display server keeps its mapping. `display_set_mode()`
+
+1. takes the console off the screen if the console has it,
+2. calls the driver, which shows framebuffer 0 in the new mode or puts the
+   old mode back and returns an error,
+3. records the new geometry, lets the console lay out its text again (at
+   once, or when the display server gives the display back) and
+4. signals the display's event (`SYS_DISPLAY_WATCH`), which is how a
+   display server learns of it, whoever asked for the switch.
+
+The same event is signaled when the driver gives a new list of modes
+(another monitor) or reports the monitor gone or back.
 
 **A driver for another GPU family is one file**: find the device, set a
 mode, call `display_set_framebuffer()`, fill in the operations its hardware
-has, call `display_set_driver()`. Nothing above the driver changes; what it
-leaves out is done in software as before. The kernel test
-`display_driver_operations` runs the whole interface with a driver that
-exists only in the test.
+has, call `display_set_driver()` and `display_set_modes()`. Nothing above
+the driver changes; what it leaves out is done in software as before. There
+are two such drivers: [`intel_gpu.c`](../../drivers/graphics/intel_gpu.c)
+(everything, below) and [`bochs_gpu.c`](../../drivers/graphics/bochs_gpu.c)
+for the standard VGA card of QEMU, which has `set_mode` and nothing else —
+about 150 lines, and the reason mode switching is covered by `make test`.
+The kernel tests `display_driver_operations` and
+`display_modes_can_be_switched` run the whole interface with drivers that
+exist only in the tests.
 
 ### Input manager (README section 37)
 
@@ -109,7 +136,7 @@ exists only in the test.
 | Directory | Contents |
 |---|---|
 | `graphics/core` | `canvas_t`: 32-bit 0xAARRGGBB pixels with a clip rectangle. Rectangles, alpha blending ("source over"), rounded rectangles with 4×4 supersampled corners, outlines, gradients, lines, blitting, 1-bit masks, UTF-8 text with the 8×16 font at integer scales. No OS dependencies (host unit tests) |
-| `graphics/display` | Display abstraction for the server: acquire the display, draw into a back buffer in RAM, `display_present(rect)` names what changed, `display_commit()` shows the frame (converting the pixel format). Depending on the display's flags: a plain copy, a copy timed to the vertical blank, or a copy into the hidden framebuffer and a page flip. `display_pointer_image/move()` for a hardware pointer |
+| `graphics/display` | Display abstraction for the server: acquire the display, draw into a back buffer in RAM, `display_present(rect)` names what changed, `display_commit()` shows the frame (converting the pixel format). Depending on the display's flags: a plain copy, a copy timed to the vertical blank, or a copy into the hidden framebuffer and a page flip. `display_pointer_image/move()` for a hardware pointer. `display->watch` is the display's event; after it `display_changed()` takes over a new size (a new back buffer; the framebuffers stay mapped) |
 | `graphics/window` | Window protocol (`protocol.h`) and client library: connect, create windows, present, events |
 | `graphics/compositor` | Window stack, decorations, damage rectangles, pointer, composition |
 | `graphics/gui` | GUI toolkit |
@@ -125,6 +152,10 @@ Version 2 (Phase 10) adds window kinds, resizing, minimize and maximize,
 the window list for the taskbar, settings broadcasts, keyboard layouts and
 notifications. See [desktop.md](desktop.md) for the window manager and the
 toolkit additions.
+
+Version 3 (Phase 12) adds `WM_SCREEN` (server: the screen has another size)
+and `WM_SET_DISPLAY_MODE` (client: width, height and refresh rate of a mode
+from `SYS_DISPLAY_MODES`).
 
 
 Transport: a channel from `SYS_SERVICE_CONNECT("display")`. Every message is
@@ -149,7 +180,19 @@ Service `display` in `/etc/services.conf`, configured by `/etc/display.conf`:
 ```ini
 keymap=de               # us | de (German QWERTZ with AltGr: @ € { [ ] } \ ~ | µ ² ³)
 autostart=/bin/terminal # programs started with the server (repeatable)
+mode=1920x1080@60       # screen mode, if the driver can switch; written when one is chosen
 ```
+
+- **Screen modes:** the server waits on the display's event together with
+  input and clients. When the size changed (chosen in Settings with
+  `WM_SET_DISPLAY_MODE`, set with the `display` command, or another monitor
+  was plugged in) it takes a back buffer of the new size and repaints.
+  Windows without decorations keep the screen edges they were laid out
+  along: the taskbar stays at the bottom and gets the new width, the login
+  screen the new size. Maximized windows fill the new work area, the others
+  are kept reachable. Every client gets `WM_SCREEN` with the new size
+  (protocol version 3; `wm_screen_size()`, `gui_on_screen()`). A mode chosen
+  through the server is written to `mode=` and set again at the next start.
 
 - **Compositor:** a violet-blue gradient desktop with the JellyOS mark.
   Windows have a rounded title bar (violet when focused, grey otherwise),
@@ -208,7 +251,17 @@ The shell can start them from the console without waiting: `guidemo &`.
 ## QEMU
 
 `make run` adds a VirtIO keyboard and tablet. The QEMU window shows the
-desktop; the serial console stays on the terminal.
+desktop; the serial console stays on the terminal. QEMU's standard VGA card
+gets the driver `bochs-gpu`, so the screen mode can be changed there, too.
+
+## The `display` command and the Settings page
+
+`display` lists the displays, what their drivers offer and their modes;
+`display 1920x1080`, `display 2560x1440@60` or `display 3` (a number from
+the list) switches display 0 (root only). It talks to the kernel directly
+and so also works on the text console; a running display server follows.
+The page **Display** of the Settings program shows the same list; choosing
+an entry asks the display server, which also remembers the choice.
 
 ## Intel graphics driver (Phase 12)
 
@@ -266,8 +319,47 @@ driver interface (above):
 
 The display server then draws each frame into the framebuffer that is not
 shown and swaps: no tearing and no half-drawn windows, at the refresh rate
-of the monitor. `dmesg igpu` and `dmesg displayd` say what is in use.
+of the monitor. `dmesg igpu`, `dmesg displayd` and the `display` command say what is in use.
 
-Not yet: DisplayPort link training, changing the display clock, several
-screens, hot plug, mode changes while running, acceleration.
+**Modes while running.** The driver gives the display layer the list of the
+monitor's modes that the connection can carry, the largest and fastest
+first, and switches between them with the same steps as at the start (pipe
+off, timings, M/N values or PLL, pipe on). Its two framebuffers are
+allocated once for the largest mode (with more than 1 GiB of free memory
+for 3840x2160, so that a larger monitor plugged in later fits) and stay in
+place. If a mode does not come up, the mode before is put back.
+
+**Hot plug.** A kernel thread looks at the connection once a second:
+
+| Connection | Monitor there? | What happens when it comes back |
+| --- | --- | --- |
+| DisplayPort | It answers on the AUX channel (the read is its link status) | The link is trained again: a monitor that was unplugged or switched off has lost it, and the picture stays black without. The same happens when the monitor reports the link lost while staying connected |
+| HDMI | The port's hot plug pin (live state in the PCH) | Nothing is needed for the same monitor |
+
+While no monitor is on the port in use, the hot plug pins of the other
+ports (B, C, D) are looked at. A monitor there gets the picture: the old
+port is switched off completely, and the new one is brought up from
+nothing: its power well, the table of signal levels, a PLL (for HDMI at the
+pixel clock, for DisplayPort at the best link rate the monitor takes, with
+slower ones tried if training fails), for DisplayPort a trained link. Then
+the monitor's best mode is set. So the cable can be moved from DisplayPort
+to HDMI and back while the system runs. HDMI monitors on a port brought up
+this way are driven with DVI signalling (no info frames).
+
+In both cases the EDID is read again. If it is another monitor, the display
+gets its list of modes, and if the mode on the screen is not in it, the
+driver switches to the new monitor's best one. The display server and the
+console follow as with any mode switch.
+
+**Link training** (`dp_link_train()`): the port sends training pattern 1
+until the monitor has recovered the clock, then pattern 2 or 3 until every
+lane is equalized and the lanes are aligned; after each look at the signal
+the monitor asks for another voltage swing and pre-emphasis (DPCD
+0x206/0x207), which go into the port's buffer control and back to the
+monitor. Rate and number of lanes are the ones the firmware had chosen: the
+PLL is not touched.
+
+Not yet: changing the display clock, several screens at once, the embedded
+panel of a notebook, lane reversal and other board wiring that only the
+firmware's video BIOS table knows, acceleration.
 
