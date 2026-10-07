@@ -472,6 +472,8 @@ static status_t get_node(filesystem_t *fs, uint32_t dir_cluster, const fat_diren
     n->vnode.size = directory ? 0 : d->entry.size;
     n->vnode.inode = ((uint64_t)dir_cluster << 32) | d->index;
     n->vnode.mode = directory ? 0755 : (d->entry.attr & ATTR_READ_ONLY) ? 0444 : 0644;
+    if (f->device->removable) /* FAT knows no owners: what is on a stick belongs to whoever plugged it in */
+        n->vnode.mode |= directory ? 0022 : (d->entry.attr & ATTR_READ_ONLY) ? 0 : 0022;
     list_push_back(&f->nodes, &n->cache_node);
     *result = &n->vnode;
     return STATUS_SUCCESS;
@@ -1120,6 +1122,8 @@ static status_t fat_mount(block_device_t *device, filesystem_t **result)
     vnode_init(&root->vnode, fs, VNODE_DIRECTORY, &ops);
     root->fat = f;
     root->is_root = true;
+    if (device->removable)
+        root->vnode.mode |= 0022;
     root->first_cluster = f->root_cluster;
     root->vnode.inode = f->root_cluster;
     fs->root = &root->vnode;

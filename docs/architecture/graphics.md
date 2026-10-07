@@ -392,7 +392,35 @@ The second framebuffer and the pointer image lie in the GPU's video memory
 behind the firmware's framebuffer; the CPU reaches them through BAR 0, the
 GPU through its own address of that memory (`DCN_VM_FB_LOCATION_BASE`).
 
-The mode stays the firmware's. Not yet: switching modes (the pixel clock
-and the port's PHY are programmed through the firmware's AtomBIOS tables or
-the display microcontroller on this hardware), EDID, hot plug, several
-screens, acceleration.
+Over the AUX channel the driver reads what the monitor can do, which link
+the firmware trained, and the EDID. The AUX protocol (retries, DPCD, I2C
+for the EDID) and the EDID's timings are code shared by the drivers
+([`dp_aux.c`](../../drivers/graphics/dp_aux.c),
+[`edid.c`](../../drivers/graphics/edid.c)); a driver brings one function
+that sends a single AUX message with its hardware.
+
+**Switching modes** works on DisplayPort, for the monitor's modes that the
+link carries as the firmware trained it:
+
+1. the video stream to the monitor, the HUBP and the timing generator are
+   stopped;
+2. the new timing goes into the timing generator, the pixel clock into the
+   DisplayPort DTO (its phase register is the clock in Hz), the picture size
+   into plane, scaler and output, and the timing the monitor is told (MSA)
+   into the encoder;
+3. the parameters that tell the HUBP when to fetch data are scaled from the
+   firmware's values: times in reference clock cycles with the time a line
+   takes, the clock ratio with the pixel clock. Linux computes them with its
+   display mode library; the scaled values are an approximation;
+4. everything is started again. If fewer than three frames come in a
+   quarter of a second, or the pipe reports that it ran out of data, all
+   registers are written back.
+
+The framebuffers stay in place with their line length; a smaller mode shows
+their top left part.
+
+A faster link than the firmware's is not possible yet: the port's PHY is
+programmed through the firmware's AtomBIOS tables on this hardware. A
+3440x1440 monitor on a link trained for 60 Hz (2.7 Gbit/s per lane) cannot
+be switched to 100 Hz. Also not yet: HDMI modes, hot plug, several screens,
+acceleration.

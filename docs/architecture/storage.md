@@ -221,7 +221,9 @@ FAT32 supports reading and writing with long file names (VFAT):
   users of a file see the same size and clusters. Deleting an open file is
   refused (`BUSY`) because its clusters must not be reused.
 - FAT has no owners or permission bits: everything belongs to root, files are
-  0644 (0444 with the read-only attribute) and directories 0755. Programs on
+  0644 (0444 with the read-only attribute) and directories 0755. On removable
+  media (USB sticks) files and directories are writable for everybody (0666,
+  0777): what is on a stick belongs to whoever plugged it in. Programs on
   FAT volumes therefore cannot be executed; programs come from the initramfs.
 
 Not supported: FAT12/16, symbolic links (`NOT_SUPPORTED`), timestamps (a fixed

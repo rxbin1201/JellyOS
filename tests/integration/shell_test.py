@@ -506,6 +506,12 @@ def gui_steps(console, qmp, timeout):
     output = console.read_until(PROMPT, timeout)
     line = next((l for l in output.splitlines() if "fromgui" in l), "")
     check("the terminal runs commands as the user", "1000" in line, f"(ls -l /tmp: {output!r})")
+    # A USB stick belongs to whoever plugged it in: the user may write to its FAT volume.
+    qmp.type("touch /volumes/usb0p1/fromuser\n")
+    time.sleep(2.0)
+    console.send("ls /volumes/usb0p1")
+    output = console.read_until(PROMPT, timeout)
+    check("the user can write to a USB stick", "fromuser" in output, f"(ls /volumes/usb0p1: {output!r})")
 
     # --- guidemo (M8): focus, keyboard, mouse, themes, moving, closing
     console.send("guidemo &")

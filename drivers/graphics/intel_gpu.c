@@ -62,6 +62,8 @@
 #include "drivers/bus/pci/pci.h"
 #include "drivers/core/module.h"
 #include "drivers/graphics/display.h"
+#include "drivers/graphics/dp_aux.h"
+#include "drivers/graphics/edid.h"
 
 #include "core/boot.h"
 #include "core/cmdline.h"
@@ -89,6 +91,9 @@
 #define PIPE_DATA_N1(t)       (0x60034 + PIPE_OFF(t))
 #define PIPE_LINK_M1(t)       (0x60040 + PIPE_OFF(t)) /* DisplayPort: pixel clock : link clock */
 #define PIPE_LINK_N1(t)       (0x60044 + PIPE_OFF(t))
+#define TRANS_MSA_MISC(t)     (0x60410 + PIPE_OFF(t)) /* DisplayPort: what the monitor is told about the pixels */
+#define MSA_SYNC_CLOCK        (1u << 0)
+#define MSA_8_BPC             (1u << 5)
 #define TRANS_DDI_FUNC_CTL(t) (0x60400 + PIPE_OFF(t)) /* bit 31 on, 30:28 port, 26:24 mode, 17/16 sync polarity */
 #define PS_CTRL(p, i)         (0x68180 + 0x800u * (uint32_t)(p) + 0x100u * (uint32_t)(i)) /* pipe scaler */
 #define PS_WIN_POS(p, i)      (0x68170 + 0x800u * (uint32_t)(p) + 0x100u * (uint32_t)(i))
@@ -163,11 +168,9 @@
 #define DDI_BUF_LEVEL_MASK    (0xFu << 24) /* which entry of the port's signal level table */
 
 /* DisplayPort configuration data (DPCD) */
-#define DPCD_LINK_BW_SET      0x100
 #define DPCD_TRAINING_PATTERN 0x102
 #define DPCD_TRAINING_LANE0   0x103
 #define DPCD_DOWNSPREAD_CTRL  0x107
-#define DPCD_LANE_STATUS      0x202 /* 6 bytes: lanes 0-1, 2-3, alignment, sink status, adjust requests 0-1, 2-3 */
 #define DPCD_SET_POWER        0x600
 
 #define GMBUS_SW_CLR_INT      (1u << 31)
@@ -194,12 +197,10 @@
 #define HDMI_MAX_KHZ          300000 /* generation 9: HDMI up to 300 MHz pixel clock */
 #define MAX_MODES             24
 
-typedef struct {
-    uint32_t khz;                    /* pixel clock */
-    uint32_t ha, hso, hsw, ht;       /* active, sync offset, sync width, total */
-    uint32_t va, vso, vsw, vt;
-    bool     hpos, vpos, interlaced; /* sync polarity positive */
-} timing_t;
+/* Timings, the EDID and the protocol of the AUX channel are shared with the other drivers (edid.h, dp_aux.h). */
+typedef display_timing_t timing_t;
+#define timing_hz100 display_timing_hz100
+#define same_timing  display_timing_same
 
 /* Everything a mode is in the registers */
 typedef struct {
@@ -351,19 +352,6 @@ static int gmbus_read(igpu_t *g, uint32_t pin, uint8_t address, uint8_t index, u
     return result;
 }
 
-static bool edid_block_ok(const uint8_t *block)
-{
-    uint8_t sum = 0;
-    for (int i = 0; i < 128; i++)
-        sum = (uint8_t)(sum + block[i]);
-    return sum == 0;
-}
-
-static bool edid_header_ok(const uint8_t *edid)
-{
-    return edid[0] == 0 && edid[1] == 0xFF && edid[7] == 0;
-}
-
 /* EDID over DDC. Pin pairs: on 300-series chipsets port B, C, D = 1, 2, 3; older boards 5, 4, 6. Returns blocks. */
 static int edid_read_ddc(igpu_t *g, int port, uint8_t *edid)
 {
@@ -386,9 +374,17 @@ static int edid_read_ddc(igpu_t *g, int port, uint8_t *edid)
 
 /* --- Monitor data: DisplayPort AUX channel ------------------------------------------- */
 
+typedef struct {
+    igpu_t *g;
+    int     port;
+} aux_port_t;
+
 /* One AUX message. Returns the bytes received (rx[0] is the reply code), -1 no answer, -2 error, -3 channel stuck. */
-static int aux_once(igpu_t *g, int port, const uint8_t *tx, int tx_length, uint8_t *rx, int rx_max)
+static int aux_once(void *context, const uint8_t *tx, int tx_length, uint8_t *rx, int rx_max)
 {
+    aux_port_t *where = context;
+    igpu_t *g = where->g;
+    int port = where->port;
     uint32_t ctl = DP_AUX_CTL(port), status;
 
     if (!wait_bits(g, ctl, AUX_SEND_BUSY, 0, 10))
@@ -421,171 +417,44 @@ static int aux_once(igpu_t *g, int port, const uint8_t *tx, int tx_length, uint8
     return n < rx_max ? n : rx_max;
 }
 
-/* With retries for receive errors and DEFER (the monitor may put us off). -4: NACK. */
-static int aux_transfer(igpu_t *g, int port, const uint8_t *tx, int tx_length, uint8_t *rx, int rx_max, bool i2c)
-{
-    int timeouts = 0;
-
-    for (int tries = 0; tries < 50; tries++) {
-        int n = aux_once(g, port, tx, tx_length, rx, rx_max);
-        if (n == -1) {
-            if (++timeouts >= 3)
-                return -1;
-            continue;
-        }
-        if (n == -3)
-            return -3;
-        if (n < 0) {
-            sleep_ms(1);
-            continue;
-        }
-        uint8_t native = rx[0] & 0x30, i2c_reply = rx[0] & 0xC0;
-        if (native == 0x10 || (i2c && i2c_reply == 0x40))
-            return -4;
-        if (native == 0x20 || (i2c && i2c_reply == 0x80)) {
-            sleep_ms(1);
-            continue;
-        }
-        return n;
-    }
-    return -2;
-}
-
+/* Retries, DPCD access and the EDID are the shared code's; these only say which port. */
 static int dpcd_read(igpu_t *g, int port, uint32_t address, uint8_t *buffer, int length)
 {
-    uint8_t tx[4] = { (uint8_t)(0x9 << 4 | ((address >> 16) & 0xF)), (uint8_t)(address >> 8), (uint8_t)address,
-                      (uint8_t)(length - 1) };
-    uint8_t rx[20];
-    int n = aux_transfer(g, port, tx, 4, rx, 1 + length, false);
-
-    if (n < 1)
-        return n < 0 ? n : -2;
-    memcpy(buffer, rx + 1, (size_t)(n - 1));
-    return n - 1;
+    aux_port_t where = { g, port };
+    dp_aux_t aux = { &where, aux_once };
+    return dp_dpcd_read(&aux, address, buffer, length);
 }
 
 static bool dpcd_write(igpu_t *g, int port, uint32_t address, const uint8_t *data, int length)
 {
-    uint8_t tx[20] = { (uint8_t)(0x8 << 4 | ((address >> 16) & 0xF)), (uint8_t)(address >> 8), (uint8_t)address,
-                       (uint8_t)(length - 1) };
-    uint8_t rx[4];
-
-    memcpy(tx + 4, data, (size_t)length);
-    return aux_transfer(g, port, tx, 4 + length, rx, 4, false) >= 1;
+    aux_port_t where = { g, port };
+    dp_aux_t aux = { &where, aux_once };
+    return dp_dpcd_write(&aux, address, data, length);
 }
 
-/* EDID as I2C over AUX (address 0x50): write offset 0, read in pieces of 16 bytes, stop. Returns blocks. */
-static int edid_read_aux_once(igpu_t *g, int port, uint8_t *edid)
-{
-    uint8_t rx[20];
-    uint8_t start[5] = { 0x4 << 4, 0, 0x50, 0, 0 }; /* I2C write, middle of transaction: one byte, offset 0 */
-    int want = 128, got = 0;
-
-    if (aux_transfer(g, port, start, 5, rx, 20, true) < 1)
-        return 0;
-    while (got < want) {
-        int length = want - got > 16 ? 16 : want - got;
-        uint8_t read[4] = { 0x5 << 4, 0, 0x50, (uint8_t)(length - 1) }; /* I2C read, middle of transaction */
-        int n = aux_transfer(g, port, read, 4, rx, 1 + length, true);
-        if (n < 2)
-            break;
-        memcpy(edid + got, rx + 1, (size_t)(n - 1));
-        got += n - 1;
-        if (got == 128 && edid[126] && edid_header_ok(edid))
-            want = 256;
-    }
-    uint8_t stop[3] = { 0x1 << 4, 0, 0x50 }; /* address only, without "middle of transaction": stop */
-    aux_transfer(g, port, stop, 3, rx, 20, true);
-    if (got < 128 || !edid_header_ok(edid))
-        return 0;
-    return got >= 256 ? 2 : 1;
-}
-
-/* Right after power-on a monitor may answer incompletely: up to five attempts. */
 static int edid_read_aux(igpu_t *g, int port, uint8_t *edid)
 {
-    int blocks = 0;
-
-    for (int tries = 0; tries < 5; tries++) {
-        blocks = edid_read_aux_once(g, port, edid);
-        int want = blocks && edid[126] ? 2 : 1;
-        if (blocks >= want && edid_block_ok(edid) && (want < 2 || edid_block_ok(edid + 128)))
-            return blocks;
-        sleep_ms(20);
-    }
-    return blocks && edid_block_ok(edid) ? 1 : 0;
+    aux_port_t where = { g, port };
+    dp_aux_t aux = { &where, aux_once };
+    return dp_edid_read(&aux, edid);
 }
 
 /* --- Timings ------------------------------------------------------------------------- */
 
-/* A detailed timing descriptor (18 bytes); false for the other kinds of descriptors. */
-static bool timing_parse(const uint8_t *d, timing_t *t)
-{
-    t->khz = (uint32_t)(d[0] | d[1] << 8) * 10;
-    if (!t->khz)
-        return false;
-    t->ha = d[2] | (uint32_t)(d[4] & 0xF0) << 4;
-    t->ht = t->ha + (d[3] | (uint32_t)(d[4] & 0x0F) << 8);
-    t->va = d[5] | (uint32_t)(d[7] & 0xF0) << 4;
-    t->vt = t->va + (d[6] | (uint32_t)(d[7] & 0x0F) << 8);
-    t->hso = d[8] | (uint32_t)(d[11] & 0xC0) << 2;
-    t->hsw = d[9] | (uint32_t)(d[11] & 0x30) << 4;
-    t->vso = (uint32_t)(d[10] >> 4) | (uint32_t)(d[11] & 0x0C) << 2;
-    t->vsw = (uint32_t)(d[10] & 0xF) | (uint32_t)(d[11] & 0x03) << 4;
-    t->interlaced = d[17] >> 7;
-    bool separate = ((d[17] >> 3) & 3) == 3; /* digital separate sync; otherwise positive, as usual */
-    t->hpos = separate ? (d[17] >> 1) & 1 : true;
-    t->vpos = separate ? (d[17] >> 2) & 1 : true;
-    return t->ha && t->va && t->ht > t->ha && t->vt > t->va;
-}
-
-static uint32_t timing_hz100(const timing_t *t)
-{
-    return (uint32_t)((uint64_t)t->khz * 100000 / ((uint64_t)t->ht * t->vt));
-}
-
-/* The same mode: size, totals and (within 1 %) the pixel clock agree. The same size at another rate is another mode. */
-static bool same_timing(const timing_t *a, const timing_t *b)
-{
-    uint32_t difference = a->khz > b->khz ? a->khz - b->khz : b->khz - a->khz;
-    return a->ha == b->ha && a->va == b->va && a->ht == b->ht && a->vt == b->vt && difference <= a->khz / 100;
-}
-
 static void add_mode(igpu_t *g, const timing_t *t)
 {
-    for (uint32_t i = 0; i < g->mode_count; i++) {
-        if (same_timing(&g->modes[i], t))
-            return;
-    }
-    if (g->mode_count < MAX_MODES)
-        g->modes[g->mode_count++] = *t;
+    g->mode_count = display_timing_add(g->modes, g->mode_count, MAX_MODES, t);
 }
 
 /* The detailed timings of the base block and of CTA extension blocks: the modes the monitor itself names. */
 static void collect_modes(igpu_t *g, const uint8_t *edid, int blocks)
 {
-    for (int block = 0; block < blocks; block++) {
-        const uint8_t *e = edid + 128 * block;
-        uint32_t first = block == 0 ? 54 : e[2], end = block == 0 ? 126 : 127;
-        if (block > 0 && (e[0] != 0x02 || first < 4))
-            continue;
-        for (uint32_t i = first; i + 18 <= end; i += 18) {
-            timing_t t;
-            if (timing_parse(e + i, &t) && !t.interlaced && t.ha >= 640 && t.va >= 400)
-                add_mode(g, &t);
-        }
-    }
+    g->mode_count = edid_collect_timings(edid, blocks, g->modes, g->mode_count, MAX_MODES);
 }
 
 static uint32_t stride_of(const timing_t *t)
 {
     return (uint32_t)align_up((uint64_t)t->ha * 4, 64); /* the plane wants lines of a multiple of 64 bytes */
-}
-
-static bool better_mode(const timing_t *a, const timing_t *b)
-{
-    uint64_t area_a = (uint64_t)a->ha * a->va, area_b = (uint64_t)b->ha * b->va;
-    return area_a > area_b || (area_a == area_b && timing_hz100(a) > timing_hz100(b));
 }
 
 /*
@@ -617,13 +486,7 @@ static void modes_rebuild(igpu_t *g, bool with_current)
             g->modes[kept++] = *t;
     }
     g->mode_count = kept;
-    for (uint32_t i = 1; i < kept; i++) {
-        timing_t t = g->modes[i];
-        uint32_t k = i;
-        for (; k > 0 && better_mode(&t, &g->modes[k - 1]); k--)
-            g->modes[k] = g->modes[k - 1];
-        g->modes[k] = t;
-    }
+    display_timing_sort(g->modes, kept);
 }
 
 /* --- Reading the firmware's state ------------------------------------------------------ */
@@ -912,6 +775,12 @@ static void write_timings_and_plane(igpu_t *g, const hw_mode_t *m, bool boot_mod
         wr(g, PIPE_DATA_N1(p), m->data_n);
         wr(g, PIPE_LINK_M1(p), m->link_m);
         wr(g, PIPE_LINK_N1(p), m->link_n);
+        /*
+         * 24 bits per pixel, clocked with the link. The firmware sets this for a DisplayPort monitor only: on a
+         * transcoder it had used for HDMI the register says "18 bits", and the monitor shows nothing sensible.
+         */
+        if (!boot_mode)
+            wr(g, TRANS_MSA_MISC(p), MSA_SYNC_CLOCK | MSA_8_BPC);
     }
     wr(g, TRANS_DDI_FUNC_CTL(p), m->ddi_func);
     if (!boot_mode) {
@@ -1486,6 +1355,10 @@ static bool pll_link_rate(igpu_t *g, uint32_t code)
     wr(g, DDI_BUF_CTL(g->port), 0);
     wr(g, DP_TP_CTL(g->port), 0);
     pll_assign(g, 1 | code << 1);
+    /* The frequency registers are for HDMI; left over from an HDMI monitor they would overrule the link rate. */
+    wr(g, DPLL_CFGCR1(g->dpll), 0);
+    wr(g, DPLL_CFGCR2(g->dpll), 0);
+    (void)rd(g, DPLL_CFGCR2(g->dpll));
     wr(g, pll_ctl_reg(g->dpll), rd(g, pll_ctl_reg(g->dpll)) | ENABLE);
     bool locked = wait_bits(g, DPLL_STATUS, 1u << (g->dpll * 8), 1u << (g->dpll * 8), 5);
     wr(g, DPLL_CTRL2, rd(g, DPLL_CTRL2) & ~(1u << (g->port + 15)));

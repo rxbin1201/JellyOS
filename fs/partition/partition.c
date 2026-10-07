@@ -65,6 +65,7 @@ static block_device_t *new_partition(block_device_t *disk, unsigned number, uint
     p->sector_size = disk->sector_size;
     p->sector_count = count;
     p->read_only = disk->read_only;
+    p->removable = disk->removable;
     p->parent = disk;
     p->start_lba = start;
     p->partition_number = number;

@@ -307,6 +307,7 @@ static status_t identify(ums_t *u, char *model)
     }
     u->block.sector_size = SECTOR_SIZE;
     u->block.sector_count = last + 1;
+    u->block.removable = true;
     return STATUS_SUCCESS;
 }
 

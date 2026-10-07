@@ -40,6 +40,7 @@ typedef struct block_device {
     uint32_t             sector_size;
     uint64_t             sector_count;
     bool                 read_only;
+    bool                 removable;    /* a medium the user plugs in (USB stick): its files are everybody's */
     const block_ops_t   *ops;          /* whole disks */
     void                *driver_data;
 
