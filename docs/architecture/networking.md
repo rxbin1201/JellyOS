@@ -141,6 +141,15 @@ from the status register. A chipset port is left as the firmware configured
 it (MAC address, PHY, link); only the 82574L is reset. No offloads. I225 and
 I226 (2.5 Gbit) are a different family and not supported.
 
+**rtl8168** (`drivers/network/rtl8168.c`, Phase 12) drives
+Realtek's RTL8168/RTL8111 family, the network chip of most consumer
+mainboards: descriptor rings with an ownership bit, MSI, DMA below 4 GiB.
+The 8168G and later (including the 8111H) wake up in an "out of band"
+management mode, linked at 10 Mbit/s and handing nothing to the driver; the
+driver leaves it, sets FIFO sizes and the packet filter, opens the receive
+gate and negotiates the link again with every speed on offer. QEMU has no
+such device: the driver is only tested on real hardware (an RTL8111H).
+
 Which card becomes `eth0` depends on the order the drivers start in;
 networkd configures every interface by DHCP unless `/etc/network.conf` says
 otherwise, and retries every 10 seconds while a card has no link.

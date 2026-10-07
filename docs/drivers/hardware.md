@@ -79,6 +79,8 @@ are listed as block devices but not mounted. `dmesg` shows what was found.
 | VirtIO network | PARTIALLY_SUPPORTED | QEMU's virtual network card |
 | Intel Ethernet, e1000e family (82574L, I217, I218, I219) | PARTIALLY_SUPPORTED | The chipset ports of Intel mainboards. 82574L tested in QEMU; the chipset port of the ThinkCentre works (DHCP, ping, HTTP) |
 | Intel I225/I226 (2.5 Gbit), I210/I211, 10 Gbit cards | UNSUPPORTED | |
-| Realtek, Broadcom, Aquantia and other Ethernet | UNSUPPORTED | |
+| Realtek RTL8111H / RTL8168H | PARTIALLY_SUPPORTED | Works on a desktop mainboard (revision 0x541: DHCP, ping at 1000 Mbit/s). No automated test: QEMU does not emulate the chip |
+| Realtek RTL8168/RTL8111, older revisions (B ... F) | EXPERIMENTAL | Same driver, simpler start-up path; never tried |
+| Other Realtek (8125 2.5 Gbit, 8139), Broadcom, Aquantia | UNSUPPORTED | |
 | Wi-Fi | UNSUPPORTED | |
 | Bluetooth | UNSUPPORTED | |
