@@ -75,7 +75,8 @@ def network_steps(http_port, tcp_port, udp_port):
     """Milestone M7 over QEMU's user network (gateway 10.0.2.2 = the host's 127.0.0.1)."""
     return [
         # DHCP runs in the background (networkd); retry until the lease is there.
-        ("ifconfig eth0", ["inet 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3"], 30),
+        # (which card is eth0 depends on the order the drivers start in)
+        ("ifconfig", ["inet 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3"], 30),
         ("ping -c 2 -i 0.2 10.0.2.2", ["2 packets transmitted, 2 received"]),
         ("nslookup localhost 10.0.2.2", ["Address: 127.0.0.1", "Address: 10.0.2.2"]),
         (f"http http://10.0.2.2:{http_port}/hello.txt", [HOST_TEXT]),
@@ -85,6 +86,17 @@ def network_steps(http_port, tcp_port, udp_port):
         (f"echo jelly over udp | nc -u -w 2 10.0.2.2 {udp_port}", ["JELLY OVER UDP"]),
         ("http http://10.0.2.2:1/", ["Connection refused"]),
         ("svc status network", ["network", "running"]),
+    ]
+
+
+def intel_nic_steps(http_port):
+    """Phase 12: the Intel e1000e driver, as a second card on its own network (the host is 10.0.3.2 there)."""
+    return [
+        ("dmesg e1000:", ["Intel 82574L", "link up"]),
+        ("ifconfig", ["10.0.2.15/24", "inet 10.0.3.15/24 gateway 10.0.3.2"], 30),
+        ("ping -c 3 -i 0.2 10.0.3.2", ["3 packets transmitted, 3 received"]),
+        (f"http http://10.0.3.2:{http_port}/hello.txt", [HOST_TEXT]),
+        (f"http -o /tmp/big.bin http://10.0.3.2:{http_port}/big.bin; ls -l /tmp/big.bin", ["300000"]),
     ]
 
 
@@ -243,6 +255,8 @@ def start_host_servers():
     directory = tempfile.mkdtemp(prefix="jellyos-http-")
     with open(os.path.join(directory, "hello.txt"), "w") as f:
         f.write(HOST_TEXT + "\n")
+    with open(os.path.join(directory, "big.bin"), "wb") as f:
+        f.write(bytes((i * 7 + i // 251) % 256 for i in range(300000)))
 
     def handler(*args, **kwargs):
         return QuietHandler(*args, directory=directory, **kwargs)
@@ -593,7 +607,10 @@ def main():
     log = open("build/shell-test.log", "wb")
     steps = STEPS[:]
     if "virtio-net" in " ".join(args):
-        steps += network_steps(*start_host_servers())
+        ports = start_host_servers()
+        steps += network_steps(*ports)
+        if "e1000e" in " ".join(args):
+            steps += intel_nic_steps(ports[0])
     if "intel-hda" in " ".join(args):
         steps += audio_steps()
     if "nvme" in " ".join(args):

@@ -2,6 +2,7 @@
 
 #include "drivers/core/module.h"
 
+#include "core/cmdline.h"
 #include "core/export.h"
 #include "core/log.h"
 #include "core/string.h"
@@ -190,8 +191,32 @@ void device_unregister(device_t *device)
     klog_debug("device %s: removed", device->name);
 }
 
+/* "nodriver=a,b" on the kernel command line keeps drivers out: for hardware a driver does not get along with. */
+static bool driver_disabled(const char *name)
+{
+    char list[128];
+    size_t length = strlen(name);
+
+    if (!cmdline_value("nodriver", list, sizeof(list)))
+        return false;
+    for (const char *p = list; *p;) {
+        const char *end = p;
+        while (*end && *end != ',')
+            end++;
+        if ((size_t)(end - p) == length && memcmp(p, name, length) == 0)
+            return true;
+        p = *end ? end + 1 : end;
+    }
+    return false;
+}
+
 status_t driver_register(driver_t *driver)
 {
+    if (driver_disabled(driver->name)) {
+        klog_info("driver %s: disabled on the kernel command line (nodriver=)", driver->name);
+        driver->bus = NULL;
+        return STATUS_SUCCESS;
+    }
     bus_t *bus = bus_find(driver->bus_name);
     if (!bus || !driver->probe) {
         klog_error("driver %s: unknown bus '%s' or no probe function", driver->name, driver->bus_name);
@@ -215,6 +240,8 @@ status_t driver_register(driver_t *driver)
 
 void driver_unregister(driver_t *driver)
 {
+    if (!driver->bus)
+        return; /* never registered (nodriver=) */
     list_for_each(node, &driver->bus->devices) {
         device_t *device = container_of(node, device_t, bus_node);
         if (device->driver == driver)

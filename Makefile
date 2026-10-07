@@ -200,6 +200,8 @@ audio_test_hw = -audiodev wav,id=snd0,path=$(AUDIO_TEST_WAV) -audiodev none,id=s
 virtio_disk = -drive file=$(1),if=none,id=$(2),format=raw -device virtio-blk-pci,drive=$(2)
 # $(call virtio_nic,<id>): VirtIO NIC on QEMU's user network (NAT; gateway and host 10.0.2.2, DNS 10.0.2.3)
 virtio_nic  = -netdev user,id=$(1) -device virtio-net-pci,netdev=$(1)
+# Intel 82574L on a second user network (10.0.3.0/24; gateway and host 10.0.3.2)
+e1000_nic   = -netdev user,id=intelnet,net=10.0.3.0/24 -device e1000e,netdev=intelnet
 
 QEMU_FLAGS := $(QEMU_BASE) $(call qemu_disks,$(ESP),$(VARS_COPY)) $(usb_input) $(call audio_hw,$(AUDIO))
 
@@ -217,7 +219,7 @@ endif
 TEST_ESP     := $(BUILD)/test-esp
 TEST_VARS    := $(BUILD)/OVMF_VARS_test.fd
 TEST_TIMEOUT := 120
-TEST_CMDLINE := loglevel=info selftest=exit disks=rw
+TEST_CMDLINE := loglevel=info selftest=exit disks=rw nodriver=e1000
 
 # Test disk: GPT + FAT32 built from tests/storage/disk (tools/image_builder/mkdisk.sh)
 TEST_DISK       := $(BUILD)/test-disk.img
@@ -498,7 +500,7 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	    --wav $(AUDIO_TEST_WAV) -- \
 	    $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(SHELL_TEST_ESP),$(SHELL_TEST_VARS)) -display none \
 	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(usb_input_hub) $(audio_test_hw) \
-	    $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk) \
+	    $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk) $(e1000_nic) \
 	    -qmp unix:$(BUILD)/qmp.sock,server,nowait || { echo "make test: FAILED (shell test)"; exit 1; }
 	@if mtype -i $(TEST_DISK)@@1M ::/motd.txt | grep -q "Welcome to JellyOS"; then \
 	    echo "make test: host reads the file the shell copied"; \

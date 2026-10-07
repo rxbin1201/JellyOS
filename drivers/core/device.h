@@ -168,7 +168,10 @@ status_t  device_register(device_t *device, bus_t *bus, device_t *parent);
 /* The device is gone: detach its driver and take it out of the tree. It must have no children. */
 void      device_unregister(device_t *device);
 
-/* Add a driver and bind it to every matching unbound device. */
+/*
+ * Add a driver and bind it to every matching unbound device. A driver named in
+ * "nodriver=<name>[,<name>...]" on the kernel command line is skipped (success, nothing bound).
+ */
 status_t  driver_register(driver_t *driver);
 
 /* Detach all devices of the driver and remove it. */

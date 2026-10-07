@@ -133,6 +133,18 @@ programs can use a connection like a file.
 The e1000e (and real hardware NICs) follow in Phase 12, on the same
 `netif_ops_t` interface.
 
+**e1000** (`drivers/network/e1000.c`, Phase 12) drives Intel's e1000e
+family: the 82574L (QEMU's `e1000e`) and the Ethernet ports built into Intel
+chipsets (I217, I218, I219). Legacy descriptor rings of 256 entries with
+2 KiB buffers, one MSI interrupt that wakes the network thread, link state
+from the status register. A chipset port is left as the firmware configured
+it (MAC address, PHY, link); only the 82574L is reset. No offloads. I225 and
+I226 (2.5 Gbit) are a different family and not supported.
+
+Which card becomes `eth0` depends on the order the drivers start in;
+networkd configures every interface by DHCP unless `/etc/network.conf` says
+otherwise, and retries every 10 seconds while a card has no link.
+
 ## Configuration: networkd
 
 `/sbin/networkd` (service `network` in `/etc/services.conf`) configures

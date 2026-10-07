@@ -26,6 +26,9 @@ Discover ─▶ Match ─▶ (Load module) ─▶ Probe ─▶ Attach/Running �
 - `device_register()` adds a device and immediately looks for a matching driver.
 - `device_unregister()` removes a device that is gone (USB unplug): its driver's
   `remove` runs, then it leaves the tree.
+- `nodriver=<name>[,<name>...]` on the kernel command line keeps drivers from
+  registering at all (the names are those in the log, e.g. `nodriver=e1000,intel-hda`).
+  This is the way around a driver that does not get along with a machine.
 - `driver_register()` adds a driver and probes every unbound device that matches.
 - Before `probe`, the device manager claims all of the device's resources and
   puts it into D0. If `probe` fails, everything is released again.

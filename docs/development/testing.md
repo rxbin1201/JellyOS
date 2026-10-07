@@ -118,6 +118,13 @@ write changes exactly its sectors, and reads a file from the mounted FAT32
 partition of each disk. The integration test copies a file onto both disks
 from the shell; the host reads it back with `mtype`.
 
+**Intel Ethernet (Phase 12).** The integration run has an 82574L
+(`-device e1000e`) as a second card on its own user network, 10.0.3.0/24.
+The steps check the driver's log lines, that both cards got their DHCP
+lease, ping the gateway of the second network and fetch a small and a
+300 000-byte file over it. The kernel test run boots with `nodriver=e1000`:
+there the same card belongs to the MSI-X test module.
+
 **USB hubs and mass storage (Phase 12).** Both QEMU runs have a USB stick
 on a root port (SuperSpeed) and one behind a hub (full speed); in the
 integration run the tablet sits behind the hub as well, so every GUI step
