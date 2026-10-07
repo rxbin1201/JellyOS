@@ -116,9 +116,13 @@ adjacent entries of the same type are merged.
 | `BAD` | `EfiUnusableMemory` | Never |
 | `RESERVED` | Everything else, including MMIO | Never |
 
-The boot manager allocates its own memory with OS-loader memory types
-(`0x80000001` kernel, `0x80000002` boot data). These types survive in the
-firmware map and are translated exactly, so no range bookkeeping is needed.
+The boot manager allocates all its memory as `EfiLoaderData` and remembers
+the ranges of the kernel image and the modules itself; when it converts the
+firmware's map it splits the entries around them and marks them
+`KERNEL_AND_MODULES`. It does not use the OS-loader memory types
+(`0x80000000` and above) the UEFI specification offers for this: real
+firmware is not reliable with them (a Lenovo ThinkCentre hung in
+`ExitBootServices()`).
 
 ---
 

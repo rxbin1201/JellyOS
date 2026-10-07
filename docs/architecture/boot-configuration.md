@@ -34,6 +34,7 @@ cmdline="loglevel=info"
 | `recovery` | `Recovery` | Entry used for recovery requests and as the last automatic fallback |
 | `fallback_kernel` | `/boot/kernels/kernel-previous.elf` | Previous known-good kernel for rollback. An empty value disables rollback |
 | `max_attempts` | `3` | Failed boots (1–100) before rolling back, and again before recovery |
+| `resolution` | `max` | Screen mode set before the kernel starts. `max`: the monitor's native resolution (from its EDID) if the firmware offers it, otherwise the largest mode the monitor can show (at most 1920x1080 if the monitor does not identify itself). `keep`: the mode the firmware chose. `WIDTHxHEIGHT`: exactly this mode, if it exists. Only modes of the firmware's graphics driver (GOP) are available; a warning names the largest one if the native resolution is not among them |
 
 ### `[entry NAME]`
 

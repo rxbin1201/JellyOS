@@ -41,10 +41,8 @@ static wait_queue_t readers;
 
 static void put_raw(char c)
 {
-    while (!(arch_io_read8(COM1 + UART_LINE_STATUS) & LINE_STATUS_THRE))
-        ;
-    arch_io_write8(COM1 + UART_DATA, (uint8_t)c);
-    kconsole_mirror_char(c); /* the screen shows the console too */
+    arch_early_console_put(c); /* nothing without a serial port */
+    kconsole_mirror_char(c);   /* the screen shows the console too */
 }
 
 static void put_char(char c)
@@ -108,7 +106,8 @@ static void receive(char c)
 static void uart_interrupt(void *context)
 {
     (void)context;
-    while (arch_io_read8(COM1 + UART_LINE_STATUS) & LINE_STATUS_DATA)
+    /* Bounded: a broken port must not keep the handler busy forever. */
+    for (int i = 0; i < 256 && (arch_io_read8(COM1 + UART_LINE_STATUS) & LINE_STATUS_DATA); i++)
         receive((char)arch_io_read8(COM1 + UART_DATA));
 }
 
@@ -172,6 +171,11 @@ static status_t serial_console_init(void)
     uint32_t irq, gsi = 0;
 
     wait_queue_init(&readers);
+    if (!arch_early_console_present()) {
+        /* A PC without COM1: the kernel log is on the screen, programs on the console have no input. */
+        klog_info("console: no serial port, /dev/console has no input");
+        return devfs_register("console", &console_ops, 0620, NULL);
+    }
     status_t status = arch_irq_allocate(uart_interrupt, NULL, &irq);
     if (!STATUS_IS_ERROR(status))
         status = arch_irq_route_isa(COM1_IRQ, irq, &gsi);
@@ -180,7 +184,7 @@ static status_t serial_console_init(void)
     } else {
         arch_io_write8(COM1 + UART_MODEM_CTRL, arch_io_read8(COM1 + UART_MODEM_CTRL) | MODEM_OUT2);
         arch_io_write8(COM1 + UART_INT_ENABLE, INT_RECEIVED_DATA);
-        while (arch_io_read8(COM1 + UART_LINE_STATUS) & LINE_STATUS_DATA)
+        for (int i = 0; i < 64 && (arch_io_read8(COM1 + UART_LINE_STATUS) & LINE_STATUS_DATA); i++)
             arch_io_read8(COM1 + UART_DATA); /* drop stale input */
     }
 

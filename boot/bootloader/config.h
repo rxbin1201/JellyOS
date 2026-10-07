@@ -40,6 +40,7 @@ typedef struct {
     UINTN        timeout;                         /* seconds */
     menu_mode_t  menu;
     UINTN        max_attempts;                    /* failed boots before rollback */
+    char         resolution[16];                  /* "max", "keep" or "WIDTHxHEIGHT" */
     char         fallback_kernel[CONFIG_PATH_MAX]; /* previous known-good kernel, empty: none */
     UINTN        default_index;
     UINTN        recovery_index;                  /* CONFIG_NO_ENTRY if none */

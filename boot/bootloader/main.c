@@ -32,7 +32,7 @@
 #define BOOT_MANAGER_VERSION   L"0.3.0"
 
 /* Extra descriptors for allocations made after sizing the memory map. */
-#define MEMORY_MAP_HEADROOM    64
+#define MEMORY_MAP_HEADROOM    192
 
 /* Countdown when a failure forces the menu but the configuration has timeout=0. */
 #define FAILURE_MENU_TIMEOUT   10
@@ -323,6 +323,29 @@ static EFI_STATUS exit_boot_services(boot_attempt_t *a)
     return status;
 }
 
+/*
+ * Progress marks around ExitBootServices(), when nothing can be printed any
+ * more: the top edge of the screen is a bar of four segments, drawn straight
+ * into the framebuffer. On a machine that hangs during the handoff they show
+ * how far it got:
+ *   1  about to leave the firmware (the framebuffer works)
+ *   2  boot services exited          (red instead: ExitBootServices failed)
+ *   3  memory map converted, about to switch page tables and jump
+ *   4  drawn by the kernel as its very first action (kernel_main)
+ * The kernel clears the screen as soon as its own console works.
+ */
+static void progress_mark(const boot_framebuffer_t *fb, UINTN index, UINT32 color)
+{
+    if (!fb->phys_base || fb->bpp != 32 || fb->width < 64 || fb->height < 64)
+        return;
+    volatile UINT32 *pixels = (volatile UINT32 *)(UINTN)fb->phys_base;
+    UINTN stride = fb->pitch / 4, segment = fb->width / 4, left = (index - 1) * segment;
+    for (UINTN y = 0; y < 24; y++) {
+        for (UINTN x = left + 4; x < left + segment - 4; x++)
+            pixels[y * stride + x] = color;
+    }
+}
+
 __attribute__((noreturn)) static void halt(void)
 {
     for (;;)
@@ -356,9 +379,13 @@ static EFI_STATUS boot(EFI_HANDLE image, const menu_action_t *action)
     a.info->log_phys = (uint64_t)(UINTN)a.log_copy;
     a.info->log_length = log_length;
 
+    progress_mark(&a.info->framebuffer, 1, 0x00FFFFFF);
     status = exit_boot_services(&a);
-    if (EFI_ERROR(status))
+    if (EFI_ERROR(status)) {
+        progress_mark(&a.info->framebuffer, 2, 0x00FF0000); /* red (or blue, depending on the pixel format) */
         halt(); /* firmware services are unusable now, nothing can be reported */
+    }
+    progress_mark(&a.info->framebuffer, 2, 0x00FFFFFF);
 
     /* ---- No firmware boot services beyond this point ---- */
 
@@ -367,6 +394,7 @@ static EFI_STATUS boot(EFI_HANDLE image, const menu_action_t *action)
 
     if (a.tables.nx_supported)
         cpu_enable_nx();
+    progress_mark(&a.info->framebuffer, 3, 0x00FFFFFF);
 
     boot_handoff(paging_root(&a.tables),
                  direct_map(&a, a.stack_phys + BOOT_STACK_SIZE),
@@ -406,6 +434,9 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     boot_tracker_init(&tracker);
     config_load(image, &config);
+
+    /* Changing the mode clears the screen, so it happens before anything worth reading is on it. */
+    firmware_select_resolution(config.resolution);
     boot_tracker_set(&tracker, BOOT_CONFIGURATION_LOADED);
 
     boot_tracker_decide(&tracker, &config, &decision);

@@ -11,6 +11,7 @@
 #ifndef DRIVERS_GRAPHICS_DISPLAY_H
 #define DRIVERS_GRAPHICS_DISPLAY_H
 
+#include "core/boot.h"
 #include "core/object.h"
 
 #include <jelly/syscall.h>
@@ -39,6 +40,9 @@ static inline uint32_t display_color(const display_t *d, uint8_t r, uint8_t g, u
            (uint32_t)(g >> (8 - d->info.green_size)) << d->info.green_shift |
            (uint32_t)(b >> (8 - d->info.blue_size)) << d->info.blue_shift;
 }
+
+/* Early screen console on the boot framebuffer until fb_console_init() (drivers/graphics/early_fb.c) */
+void       early_fb_init(const boot_info_t *info);
 
 /* Framebuffer console (drivers/graphics/fb_console.c) */
 void       fb_console_init(display_t *display);

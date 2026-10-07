@@ -66,6 +66,11 @@ status_t vmm_init(const boot_info_t *info, const boot_memory_entry_t *entries, s
             status = map_direct_range(entries[i].base, entries[i].length, &direct_bytes);
     }
 
+    /* The boot framebuffer stays where the early screen console draws (drivers/graphics/early_fb.c). */
+    uint64_t unused = 0;
+    if (!STATUS_IS_ERROR(status) && info->framebuffer.phys_base && info->framebuffer.size)
+        status = map_direct_range(info->framebuffer.phys_base, info->framebuffer.size, &unused);
+
     if (!STATUS_IS_ERROR(status))
         status = map_kernel_section(info, __text_start, __text_end, VM_EXEC);
     if (!STATUS_IS_ERROR(status))

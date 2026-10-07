@@ -1,7 +1,7 @@
 /*
  * JellyOS Boot Manager - x86_64 4-level page tables for the kernel handoff.
  *
- * Tables are allocated as BOOT_EFI_MEMORY_BOOT_DATA and become
+ * Tables are allocated as boot data (BOOT_EFI_MEMORY_BOOT_DATA) and become
  * BOOTLOADER_RECLAIMABLE in the kernel's memory map.
  */
 

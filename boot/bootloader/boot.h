@@ -11,17 +11,30 @@
 #include <stdint.h>
 
 /*
- * Memory types for our own allocations. The UEFI specification reserves
- * 0x80000000-0xFFFFFFFF for OS loaders, so these show up unchanged in the
- * final memory map and can be translated into boot_memory_type_t.
+ * What our own allocations are for. These are not memory types of the
+ * firmware: everything is allocated as EfiLoaderData. The UEFI
+ * specification does reserve the types 0x80000000-0xFFFFFFFF for OS
+ * loaders, but real firmware is not reliable with them (a Lenovo
+ * ThinkCentre hung in ExitBootServices()). The boot manager remembers the
+ * kernel's ranges itself and marks them in the map it hands over
+ * (memory_map_convert()).
  */
 #define BOOT_EFI_MEMORY_KERNEL    ((EFI_MEMORY_TYPE)0x80000001) /* kernel image, modules */
 #define BOOT_EFI_MEMORY_BOOT_DATA ((EFI_MEMORY_TYPE)0x80000002) /* boot_info, page tables, stack */
 
+typedef struct {
+    uint64_t base;
+    uint64_t length;
+} boot_range_t;
+
+/* The ranges allocated as BOOT_EFI_MEMORY_KERNEL. */
+const boot_range_t *boot_kernel_ranges(UINTN *count);
+
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
 /*
- * Allocate zeroed, page-aligned physical memory. Returns NULL on failure.
+ * Allocate zeroed, page-aligned physical memory for one of the purposes
+ * above (or with a real firmware memory type). Returns NULL on failure.
  * Every allocation is recorded so a failed boot attempt can release them all.
  */
 void *boot_alloc_pages(UINTN pages, EFI_MEMORY_TYPE type);

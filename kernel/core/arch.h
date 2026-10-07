@@ -17,6 +17,9 @@ struct arch_interrupt_frame;
 /* Early console: usable before anything else is initialized. */
 void arch_early_console_init(void);
 void arch_early_console_write(const char *s);
+void arch_early_console_put(char c);
+/* False on machines without COM1 (nothing is written then). */
+bool arch_early_console_present(void);
 
 /*
  * Boot CPU bring-up in two steps around memory initialization:

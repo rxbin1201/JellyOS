@@ -18,7 +18,7 @@
 
 #define HID_MAX_FIELDS  48
 #define HID_MAX_USAGES  8  /* usage entries (single usages or ranges) per field */
-#define HID_MAX_REPORTS 8
+#define HID_MAX_REPORTS 32
 
 #define HID_FIELD_CONSTANT (1u << 0)
 #define HID_FIELD_VARIABLE (1u << 1) /* otherwise an array of usage indexes */

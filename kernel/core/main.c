@@ -218,14 +218,36 @@ __attribute__((noreturn)) static void kernel_stage2(void)
     thread_exit();
 }
 
+/*
+ * The fourth segment of the progress bar the boot manager draws
+ * (boot/bootloader/main.c): the kernel was entered. Drawn before anything
+ * else, with nothing but the pointer the boot manager passed.
+ */
+static void mark_kernel_entry(const boot_info_t *loader_info)
+{
+    if (!loader_info || loader_info->magic != BOOT_INFO_MAGIC)
+        return;
+    const boot_framebuffer_t *fb = &loader_info->framebuffer;
+    if (!fb->phys_base || fb->bpp != 32 || fb->width < 64 || fb->height < 64)
+        return;
+    volatile uint32_t *pixels = (volatile uint32_t *)(uintptr_t)(loader_info->hhdm_base + fb->phys_base);
+    uint32_t stride = fb->pitch / 4, segment = fb->width / 4;
+    for (uint32_t y = 0; y < 24; y++) {
+        for (uint32_t x = 3 * segment + 4; x < 4 * segment - 4; x++)
+            pixels[(uint64_t)y * stride + x] = 0x00FFFFFF;
+    }
+}
+
 void kernel_main(const boot_info_t *loader_info)
 {
+    mark_kernel_entry(loader_info);
     arch_early_console_init();
 
     if (!boot_accept(loader_info))
         panic("invalid or incompatible boot_info (magic, version or size)");
 
     const boot_info_t *info = boot_info();
+    early_fb_init(info); /* messages on the screen from here on */
     cmdline_init(boot_cmdline());
     apply_log_level();
 

@@ -46,6 +46,7 @@ static void apply_default_settings(boot_config_t *config, parser_t *p)
     config->timeout = 5;
     config->menu = MENU_AUTO;
     config->max_attempts = 3;
+    text_copy(config->resolution, sizeof(config->resolution), "max");
     text_copy(config->fallback_kernel, sizeof(config->fallback_kernel), DEFAULT_FALLBACK);
     text_copy(p->default_name, sizeof(p->default_name), DEFAULT_ENTRY);
     text_copy(p->recovery_name, sizeof(p->recovery_name), DEFAULT_RECOVERY);
@@ -195,6 +196,9 @@ static void parse_boot_key(parser_t *p, const char *key, const char *value)
             config->max_attempts = attempts;
         else
             warn_line(p, L"invalid max_attempts", value);
+    } else if (text_equal(key, "resolution")) {
+        if (!text_copy(config->resolution, sizeof(config->resolution), value))
+            warn_line(p, L"invalid resolution", value);
     } else {
         warn_line(p, L"unknown key", key);
     }

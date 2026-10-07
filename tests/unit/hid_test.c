@@ -256,8 +256,35 @@ static void test_malformed(void)
                           20));
 }
 
+/* Receivers of wireless sets describe many reports in one interface; the ones beyond our table are ignored. */
+static void test_many_report_ids(void)
+{
+    static hid_state_t s;
+    uint8_t descriptor[8 + 40 * 14 + 2], *p = descriptor;
+
+    memcpy(p, (uint8_t[]){ 0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x15, 0x81 }, 8); /* mouse; logical minimum -127 */
+    p += 8;
+    for (int id = 1; id <= 40; id++) {
+        /* report ID, X and Y, 8 bits each, relative */
+        memcpy(p, (uint8_t[]){ 0x85, (uint8_t)id, 0x09, 0x30, 0x09, 0x31, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06 },
+               14);
+        p += 14;
+    }
+    *p++ = 0xC0;
+    CHECK(hid_state_init(&s, descriptor, (size_t)(p - descriptor)));
+    CHECK(s.descriptor.report_count == HID_MAX_REPORTS);
+
+    feed(&s, (uint8_t[]){ 1, 3, 0xFE }, 3);
+    CHECK(event_count == 1 && events[0].type == JELLY_INPUT_MOUSE_MOVE && events[0].dx == 3 && events[0].dy == -2);
+    feed(&s, (uint8_t[]){ 32, 0xFF, 1 }, 3);
+    CHECK(event_count == 1 && events[0].dx == -1 && events[0].dy == 1);
+    feed(&s, (uint8_t[]){ 40, 5, 5 }, 3); /* described, but beyond the table */
+    CHECK(event_count == 0);
+}
+
 int main(void)
 {
+    test_many_report_ids();
     test_keyboard();
     test_mouse();
     test_tablet();

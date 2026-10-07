@@ -109,8 +109,15 @@ static status_t usb_hid_probe(device_t *device)
 
     status_t status = usb_control(usb, USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE, USB_REQUEST_GET_DESCRIPTOR,
                                   HID_DESCRIPTOR_REPORT << 8, number, report_descriptor, (uint16_t)length, &got);
-    if (!STATUS_IS_ERROR(status) && !hid_state_init(&hid->state, report_descriptor, got))
-        status = STATUS_NOT_SUPPORTED; /* nothing we have events for (or a broken descriptor) */
+    if (STATUS_IS_ERROR(status)) {
+        klog_warn("usb-hid: %s: %s: cannot read the report descriptor (%s)", device->name, usb->product,
+                  status_name(status));
+    } else if (!hid_state_init(&hid->state, report_descriptor, got)) {
+        /* Vendor-specific interfaces of receivers and keyboards end here; that is normal. */
+        klog_info("usb-hid: %s: %s: no keyboard, pointer or gamepad in its %u-byte report descriptor", device->name,
+                  usb->product, got);
+        status = STATUS_NOT_SUPPORTED;
+    }
     kfree(report_descriptor);
 
     size_t report_size = STATUS_IS_ERROR(status) ? 0 : hid_report_size(&hid->state.descriptor);

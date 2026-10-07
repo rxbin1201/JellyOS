@@ -8,8 +8,12 @@
 
 #define PIT_CMD_CH2_LOHI_MODE0 0xB0
 
-void pit_wait_us(uint32_t us)
+bool pit_wait_us(uint32_t us)
 {
+    /* A port read takes around a microsecond on hardware and never less than a few nanoseconds emulated. */
+    uint64_t limit = (uint64_t)us * 1000 + 1000000;
+    bool finished = true;
+
     if (us > PIT_MAX_WAIT_US)
         us = PIT_MAX_WAIT_US;
     uint32_t count = (uint32_t)((uint64_t)PIT_FREQUENCY_HZ * us / 1000000);
@@ -24,8 +28,14 @@ void pit_wait_us(uint32_t us)
 
     /* Gate high starts the count; output goes high when it reaches zero. */
     outb(PORT_B, port_b | 0x01);
-    while (!(inb(PORT_B) & 0x20))
+    for (uint64_t spins = 0; !(inb(PORT_B) & 0x20); spins++) {
+        if (spins == limit) {
+            finished = false;
+            break;
+        }
         __asm__ volatile("pause");
+    }
 
     outb(PORT_B, port_b);
+    return finished;
 }

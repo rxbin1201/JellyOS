@@ -441,7 +441,7 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	@cp $(BOOT_EFI) $(TEST_ESP)/EFI/BOOT/
 	@cp $(KERNEL_ESP) $(TEST_ESP)/boot/kernels/
 	@cp $(TEST_MODULES) $(TEST_ESP)/boot/modules/
-	@{ printf '[boot]\ntimeout=0\nmenu=hidden\nfallback_kernel=\n[entry Test]\n'; \
+	@{ printf '[boot]\ntimeout=0\nmenu=hidden\nresolution=keep\nfallback_kernel=\n[entry Test]\n'; \
 	   printf 'kernel=/boot/kernels/kernel-current.elf\ncmdline="$(TEST_CMDLINE)"\n'; \
 	   for m in $(notdir $(TEST_MODULES)); do printf 'module=/boot/modules/%s\n' $$m; done; \
 	 } > $(TEST_ESP)/boot/boot.cfg
@@ -467,7 +467,7 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	@cp $(BOOT_EFI) $(SHELL_TEST_ESP)/EFI/BOOT/
 	@cp $(KERNEL_ESP) $(SHELL_TEST_ESP)/boot/kernels/
 	@cp $(INITRAMFS) $(SHELL_TEST_ESP)/boot/initrd/current.img
-	@printf '[boot]\ntimeout=0\nmenu=hidden\nfallback_kernel=\n[entry Shell]\nkernel=/boot/kernels/kernel-current.elf\n' \
+	@printf '[boot]\ntimeout=0\nmenu=hidden\nresolution=keep\nfallback_kernel=\n[entry Shell]\nkernel=/boot/kernels/kernel-current.elf\n' \
 	    > $(SHELL_TEST_ESP)/boot/boot.cfg
 	@printf 'initrd=/boot/initrd/current.img\ncmdline="loglevel=info"\n' >> $(SHELL_TEST_ESP)/boot/boot.cfg
 	@cp $(OVMF_VARS) $(SHELL_TEST_VARS)

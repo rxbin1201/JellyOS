@@ -35,7 +35,8 @@ typedef struct {
 
 static void read_raw(rtc_time_t *t)
 {
-    while (update_in_progress())
+    /* An update takes about 2 ms; without an RTC the flag may read as set forever. */
+    for (uint32_t spins = 0; spins < 100000 && update_in_progress(); spins++)
         ;
     t->second = cmos(0x00);
     t->minute = cmos(0x02);
@@ -66,12 +67,13 @@ void rtc_init(void)
 {
     rtc_time_t a, b;
     /* Read until two reads agree, so no update happened in between. */
+    int tries = 0;
     read_raw(&a);
     do {
         b = a;
         read_raw(&a);
-    } while (a.second != b.second || a.minute != b.minute || a.hour != b.hour || a.day != b.day ||
-             a.month != b.month || a.year != b.year);
+    } while (++tries < 10 && (a.second != b.second || a.minute != b.minute || a.hour != b.hour || a.day != b.day ||
+                              a.month != b.month || a.year != b.year));
 
     uint8_t status_b = cmos(0x0B);
     bool pm = a.hour & 0x80;

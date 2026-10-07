@@ -54,7 +54,7 @@ static bool add_input(hid_descriptor_t *d, const globals_t *g, uint32_t item, co
 {
     uint32_t *bits = report_bits(d, g->report_id);
     if (!bits)
-        return false;
+        return true; /* more report IDs than we track (wireless receivers have many): this report is ignored */
     uint64_t total = (uint64_t)g->report_size * g->report_count;
     if (total > 65536)
         return false;

@@ -16,10 +16,7 @@ static boot_memory_type_t translate_type(UINT32 efi_type)
     case EfiLoaderData:
     case EfiBootServicesCode:
     case EfiBootServicesData:
-    case (UINT32)BOOT_EFI_MEMORY_BOOT_DATA:
         return BOOT_MEMORY_BOOTLOADER_RECLAIMABLE;
-    case (UINT32)BOOT_EFI_MEMORY_KERNEL:
-        return BOOT_MEMORY_KERNEL_AND_MODULES;
     case EfiRuntimeServicesCode:
     case EfiRuntimeServicesData:
         return BOOT_MEMORY_FIRMWARE_RUNTIME;
@@ -122,6 +119,46 @@ static void sort_entries(boot_memory_entry_t *entries, UINTN count)
     }
 }
 
+/*
+ * Mark [base, base + length) as kernel memory: the entries it overlaps are
+ * split so that exactly this range changes its type. The firmware knows
+ * the range only as loader data, possibly merged with its neighbours.
+ */
+static UINTN mark_kernel_range(boot_memory_entry_t *entries, UINTN count, UINTN capacity, uint64_t base,
+                               uint64_t length)
+{
+    uint64_t end = base + length;
+
+    for (UINTN i = 0; i < count; i++) {
+        boot_memory_entry_t e = entries[i];
+        uint64_t e_end = e.base + e.length;
+        if (e_end <= base || e.base >= end || e.type == BOOT_MEMORY_KERNEL_AND_MODULES)
+            continue;
+
+        uint64_t from = e.base > base ? e.base : base, to = e_end < end ? e_end : end;
+        boot_memory_entry_t parts[3];
+        UINTN n = 0;
+        if (from > e.base)
+            parts[n++] = (boot_memory_entry_t){ e.base, from - e.base, e.type, 0 };
+        parts[n++] = (boot_memory_entry_t){ from, to - from, BOOT_MEMORY_KERNEL_AND_MODULES, 0 };
+        if (e_end > to)
+            parts[n++] = (boot_memory_entry_t){ to, e_end - to, e.type, 0 };
+
+        if (count + n - 1 > capacity) {
+            /* No room to split: rather lose the neighbours than have the kernel's memory handed out. */
+            entries[i].type = BOOT_MEMORY_KERNEL_AND_MODULES;
+            continue;
+        }
+        for (UINTN k = count; k > i + 1; k--)
+            entries[k + n - 2] = entries[k - 1];
+        for (UINTN k = 0; k < n; k++)
+            entries[i + k] = parts[k];
+        count += n - 1;
+        i += n - 1;
+    }
+    return count;
+}
+
 UINTN memory_map_convert(efi_memory_map_t *map)
 {
     UINTN raw_count = map->size / map->desc_size;
@@ -140,6 +177,11 @@ UINTN memory_map_convert(efi_memory_map_t *map)
     }
 
     sort_entries(map->entries, count);
+
+    UINTN range_count;
+    const boot_range_t *ranges = boot_kernel_ranges(&range_count);
+    for (UINTN i = 0; i < range_count; i++)
+        count = mark_kernel_range(map->entries, count, map->entry_capacity, ranges[i].base, ranges[i].length);
 
     /* Merge adjacent regions of the same type. */
     UINTN merged = 0;

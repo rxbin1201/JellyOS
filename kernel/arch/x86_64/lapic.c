@@ -4,7 +4,10 @@
 #include "interrupt.h"
 #include "pit.h"
 
+#include "core/arch.h"
 #include "core/log.h"
+#include "core/string.h"
+#include "drivers/acpi/acpi.h"
 #include "memory/vmm.h"
 #include "time/clock.h"
 
@@ -131,27 +134,87 @@ status_t lapic_init(void)
     return STATUS_SUCCESS;
 }
 
-status_t lapic_timer_start(uint32_t hz)
+/*
+ * ACPI power management timer: 3.579545 MHz, 24 or 32 bits, at an I/O port
+ * named by the FADT. Present on practically every PC, also where the PIT is
+ * switched off.
+ */
+#define PM_TIMER_HZ 3579545u
+
+static bool pm_timer_wait_us(uint32_t us)
 {
-    /* Count down from the maximum for a known PIT interval. */
+    const acpi_header_t *fadt = acpi_find_table("FACP", 0);
+    if (!fadt || fadt->length < 116)
+        return false;
+    const uint8_t *raw = (const uint8_t *)fadt;
+    uint32_t port, flags;
+    memcpy(&port, raw + 76, sizeof(port));   /* PM_TMR_BLK */
+    memcpy(&flags, raw + 112, sizeof(flags));
+    if (!port || port > 0xFFFF)
+        return false;
+    uint32_t mask = (flags & (1u << 8)) ? 0xFFFFFFFF : 0x00FFFFFF; /* TMR_VAL_EXT */
+    uint32_t ticks = (uint32_t)((uint64_t)PM_TIMER_HZ * us / 1000000);
+
+    uint32_t start = arch_io_read32((uint16_t)port) & mask, now = start;
+    for (uint64_t spins = 0; ((now - start) & mask) < ticks; spins++) {
+        if (spins == (uint64_t)us * 1000 + 1000000)
+            return false; /* not counting */
+        now = arch_io_read32((uint16_t)port) & mask;
+    }
+    return true;
+}
+
+/* LAPIC timer ticks per second at divide-by-16, measured against a reference clock; 0 if it does not work. */
+static uint64_t measure_timer(bool (*wait_us)(uint32_t us))
+{
     write_reg(LAPIC_TIMER_DIVIDE, TIMER_DIVIDE_16);
     write_reg(LAPIC_LVT_TIMER, LVT_MASKED | VECTOR_LAPIC_TIMER);
     write_reg(LAPIC_TIMER_INITIAL, 0xFFFFFFFF);
-    pit_wait_us(CALIBRATION_US);
+    bool waited = wait_us(CALIBRATION_US);
     uint32_t elapsed = 0xFFFFFFFF - read_reg(LAPIC_TIMER_CURRENT);
     write_reg(LAPIC_TIMER_INITIAL, 0);
 
     uint64_t timer_hz = (uint64_t)elapsed * (1000000 / CALIBRATION_US);
+    /* Below 100 kHz the reference returned at once (a dead PIT can do that, too). */
+    return waited && timer_hz >= 100000 ? timer_hz : 0;
+}
+
+/* CPUID leaf 0x15: the core crystal clock, which drives the LAPIC timer on Intel processors. */
+static uint64_t timer_hz_from_cpuid(void)
+{
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0), "c"(0));
+    if (a < 0x15)
+        return 0;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x15), "c"(0));
+    return c / 16;
+}
+
+status_t lapic_timer_start(uint32_t hz)
+{
+    /* Count down from the maximum for a known interval of a reference clock. */
+    const char *reference = "PIT";
+    uint64_t timer_hz = measure_timer(pit_wait_us);
+    if (!timer_hz) {
+        reference = "ACPI PM timer";
+        timer_hz = measure_timer(pm_timer_wait_us);
+    }
+    if (!timer_hz) {
+        reference = "CPUID";
+        timer_hz = timer_hz_from_cpuid();
+    }
     uint64_t count = timer_hz / hz;
     if (count == 0 || count > 0xFFFFFFFF) {
-        klog_error("lapic: timer calibration failed (%u counts in %u us)", elapsed, CALIBRATION_US);
+        klog_error("lapic: timer calibration failed (no working PIT, ACPI PM timer or CPUID frequency)");
         return STATUS_DEVICE_ERROR;
     }
+    write_reg(LAPIC_TIMER_DIVIDE, TIMER_DIVIDE_16);
 
     clock_init(1000000000ull / hz);
     write_reg(LAPIC_LVT_TIMER, LVT_TIMER_PERIODIC | VECTOR_LAPIC_TIMER);
     write_reg(LAPIC_TIMER_INITIAL, (uint32_t)count);
 
-    klog_info("lapic: timer %lu kHz (divided), periodic at %u Hz", timer_hz / 1000, hz);
+    klog_info("lapic: timer %lu kHz (divided, measured with the %s), periodic at %u Hz", timer_hz / 1000, reference,
+              hz);
     return STATUS_SUCCESS;
 }
