@@ -21,6 +21,10 @@
  *                               plugged in)
  *   display_set_connected()     a monitor went away or came back
  *
+ * A driver that can switch the screen off (`power`) lets the monitor go to
+ * standby: display_set_power(). Any input switches it on again, which is
+ * done here, for every driver and whoever owns the display.
+ *
  * Each operation is optional; what a driver provides shows up as
  * JELLY_DISPLAY_* flags of the display, and the display server falls back
  * to software for the rest (system calls 76-82).
@@ -74,9 +78,17 @@ typedef struct {
      * The kernel has panicked and its last words are in framebuffer 0: put that on the screen, without the
      * pointer, now. Unlike everything above this runs with interrupts off and for the last time, perhaps in the
      * middle of another operation: no locks (whoever holds one will never run again), no sleeping, only
-     * polling. A driver whose screen always shows framebuffer 0 as it is needs none.
+     * polling. A driver whose screen always shows framebuffer 0 as it is needs none. A screen that was switched
+     * off comes on here, too: thread_sleep() and the clock work for that (clock_poll_from_now()), locks do not.
      */
     void     (*panic)(struct display *display);
+    /*
+     * Off: no signal to the monitor any more, so that it goes to standby; the mode, the framebuffers and what
+     * is in them stay. On: the picture again as it was, framebuffer 0 shown. An error for "off" means the
+     * screen is still on; "on" is done as well as the hardware allows (a monitor that went away meanwhile is
+     * the hot plug watcher's to deal with). While the screen is off no other operation is called.
+     */
+    status_t (*power)(struct display *display, bool on);
 } display_ops_t;
 
 typedef struct display {
@@ -125,6 +137,12 @@ status_t   display_set_driver(uint32_t index, const display_ops_t *ops, void *dr
 status_t   display_set_modes(uint32_t index, const jelly_display_mode_t *modes, uint32_t count, uint32_t current);
 /* A monitor was unplugged or plugged in. */
 void       display_set_connected(uint32_t index, bool connected);
+/*
+ * The screen off (the monitor goes to standby) or on again. NOT_SUPPORTED without a driver that can. A screen
+ * that is off comes on by itself with the next input event, with a change of the mode, when its display
+ * server goes away and for a kernel panic.
+ */
+status_t   display_set_power(uint32_t index, bool on);
 
 /* For drivers that touch their hardware outside the operations (hot plug): the lock the operations run under. */
 void       display_lock(display_t *display);

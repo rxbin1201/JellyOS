@@ -63,12 +63,14 @@ typedef struct display_ops {
     status_t (*flip)(display_t *, uint32_t buffer);                /* show framebuffer 0 or 1 */
     status_t (*set_mode)(display_t *, uint32_t mode, uint32_t *pitch); /* entry of the driver's list */
     void     (*panic)(display_t *);                                 /* framebuffer 0 on the monitor, now */
+    status_t (*power)(display_t *, bool on);                        /* the screen off (standby) and on again */
 } display_ops_t;
 
 status_t display_set_framebuffer(index, phys, size, width, height, pitch);   /* the driver's own memory */
 status_t display_set_driver(index, ops, driver_data, second_framebuffer_phys);
 status_t display_set_modes(index, modes, count, current);                    /* what the monitor can show */
 void     display_set_connected(index, connected);                            /* hot plug */
+status_t display_set_power(index, on);                                       /* the screen off and on */
 ```
 
 Every operation is optional. From the ones that are there the display layer
@@ -78,7 +80,7 @@ of modes), checks arguments and ownership, hands out the second
 framebuffer and restores the screen when a display server goes away. The
 operations run one at a time under the display's lock, which a driver also
 takes when it touches its hardware on its own (`display_lock()`). The
-system calls 76–82, the display library and the display server only know
+system calls 76–83, the display library and the display server only know
 this interface.
 
 **Modes.** A driver that can switch modes allocates its framebuffers once,
@@ -96,6 +98,43 @@ where it is, and a display server keeps its mapping. `display_set_mode()`
 
 The same event is signaled when the driver gives a new list of modes
 (another monitor) or reports the monitor gone or back.
+
+**The screen off.** A driver with the `power` operation
+(`JELLY_DISPLAY_POWER`) can stop the signal to the monitor, which then
+goes to standby by itself; the mode, the framebuffers and what is in them
+stay. `display_set_power(index, false)` (`SYS_DISPLAY_POWER`, root only)
+switches off and sets `JELLY_DISPLAY_OFF`. How the screen comes back is
+the display layer's business, the same for every driver and whoever owns
+the display:
+
+- **Input.** The input manager calls a hook for every event it is given.
+  With a screen off, something the user does on purpose wakes a kernel
+  thread that switches the screens on: a key or button going down, the
+  mouse moving. A key going *up* does not (the Enter key that sent
+  `display off` is released a moment later), nor the wobble of a gamepad's
+  stick, and nothing at all in the first half second: the hand that clicked
+  "off" is still on the mouse. A thread, because switching on takes a
+  driver's time (a DisplayPort link is trained).
+- A change of the mode, a display server that goes away, and a kernel
+  panic switch it on, too.
+
+While the screen is off the driver is asked for nothing else: flips,
+pointer moves and waits for a frame return `BUSY`. The display library
+keeps the frames it builds and shows the whole picture when the screen is
+back (the display's event tells it). The display server drops the input
+that arrives meanwhile, so the key that wakes the machine is not typed
+into the window that happens to have the focus. A driver's hot plug
+watcher leaves a port alone that is switched off.
+
+| Driver | off | on |
+| --- | --- | --- |
+| `intel-gpu` | A DisplayPort monitor is told to sleep (DPCD 0x600); planes, pipe, transcoder, port and the port's PLL off (not PLL 0, which makes the display clock) | PLL on, DisplayPort link trained, the pipe with the mode it had |
+| `amd-gpu` | The same for DisplayPort; stream, timing generator, and the transmitter by the video BIOS's table | DisplayPort: transmitter on, link trained; HDMI: PLL, a scrambled signal announced to the monitor anew; the pipe as it was. Only with the video BIOS's tables |
+| `virtio-gpu` | The scanout shows no resource (the host's window says that the output is not active); no frames are sent | The resource on the scanout again, one frame |
+| `bochs-gpu` | The VGA side of the card blanks the screen (attribute controller) | Unblanked |
+
+Switching off after a time without input is not done yet: that is power
+management (README section 39), which will use this.
 
 **Panic.** A kernel panic must be readable on the screen also while a
 desktop is on it; a frozen picture says nothing. The panic path
@@ -119,13 +158,23 @@ the panic path answers by leaving the screen alone.
 
 `panic` is the one operation that runs with interrupts off, for the last
 time and perhaps in the middle of another one. It takes no locks (whoever
-holds one will never run again) and does not sleep:
+holds one will never run again):
 
 | Driver | `panic` |
 | --- | --- |
-| `intel-gpu`, `amd-gpu` | Two register writes: the plane back to the first framebuffer, the cursor plane off |
-| `virtio-gpu` | One more frame from the first framebuffer. The thread that presents frames is gone and so are interrupts: a command that was still with the device is waited for by polling, then the frame is sent the same way |
-| `bochs-gpu`, plain framebuffer | None needed: the screen shows the one framebuffer as it is |
+| `intel-gpu`, `amd-gpu` | Two register writes: the plane back to the first framebuffer, the cursor plane off. A screen that was switched off is switched on first, the same way as for input |
+| `virtio-gpu` | One more frame from the first framebuffer. The thread that presents frames is gone and so are interrupts: a command that was still with the device is waited for by polling, then the frame is sent the same way; a scanout that was switched off gets its resource back first |
+| `bochs-gpu` | The screen unblanked, if it was switched off; it shows the one framebuffer as it is |
+| plain framebuffer | None needed |
+
+Switching a screen on takes time: PLLs lock, a DisplayPort link is
+trained. With interrupts off nothing would count that time, so the panic
+path makes the clock go on without the timer interrupt
+(`clock_poll_from_now()`): from then on every reading of the clock looks
+at the timer's counter itself and counts a tick when it has started over,
+and `thread_sleep()` waits by reading the clock. Code that waits by
+sleeping or by polling against the clock therefore still works in a
+panic; code that waits for a lock or an interrupt does not.
 
 `echo panic > /dev/crash` (with `crashtest=device` on the kernel command
 line, which is what makes the file exist; every user may write to it then; [`drivers/console/crash.c`](../../drivers/console/crash.c))
@@ -306,6 +355,13 @@ the list) switches display 0 (root only). It talks to the kernel directly
 and so also works on the text console; a running display server follows.
 The page **Display** of the Settings program shows the same list; choosing
 an entry asks the display server, which also remembers the choice.
+
+`display off` switches the screen off, so that the monitor goes to
+standby, until a key is pressed or the mouse moves (`display on` does it
+from a serial console). Root asks the kernel; other users ask the display
+server (`WM_SET_DISPLAY_POWER`), which is also what the button **Switch
+the screen off** on the Settings page does. Both are there only where the
+graphics driver can do it.
 
 ## The monitor's modes (EDID)
 

@@ -36,6 +36,9 @@
  *   - a hardware pointer (the cursor plane with a 64x64 ARGB image)
  *   - waiting for the vertical blank (the pipe's interrupt, delivered by MSI)
  *   - a second framebuffer and flipping between the two (PLANE_SURF)
+ *   - the screen off, so that the monitor goes to standby, and on again:
+ *     pipe, port and (if it is not the one that makes the display clock) PLL
+ *     off; on again like after a mode switch, DisplayPort with link training
  *   - the list of modes and switching between them while the system runs.
  *     The framebuffers are allocated once, large enough for every mode, so
  *     that they never move under a display server that has them mapped
@@ -265,6 +268,7 @@ typedef struct {
     hdmi_sink_t       sink;                    /* what the monitor on an HDMI port says about its input */
     bool              packets;                 /* the port is driven as HDMI (with info frames), not as DVI */
     bool              sound;                   /* the transcoder sends sound */
+    bool              off;                     /* the screen is switched off: the port sends nothing */
     uint32_t          cdclk_khz;
     uint16_t          device_id;
 
@@ -1163,8 +1167,14 @@ static void igpu_cursor_move(display_t *display, int32_t x, int32_t y, bool visi
 static display_ops_t igpu_ops;
 
 /* A panic: the first framebuffer, where the console draws, without the pointer. Register writes only. */
+static void screen_on(igpu_t *g);
+
 static void igpu_panic(display_t *display)
 {
+    igpu_t *g = igpu_of(display);
+
+    if (g->off)
+        screen_on(g);
     if (igpu_ops.flip)
         igpu_flip(display, 0);
     if (igpu_ops.cursor_move)
@@ -1444,7 +1454,9 @@ static bool link_change(igpu_t *g, uint32_t khz)
     int port = g->port;
     uint32_t old = g->link_khz;
 
-    klog_info("igpu: the link from %u.%02u to %u.%02u Gbit/s", old / 100000, old / 1000 % 100, khz / 100000, khz / 1000 % 100);
+    if (old != khz)
+        klog_info("igpu: the link from %u.%02u to %u.%02u Gbit/s", old / 100000, old / 1000 % 100, khz / 100000,
+                  khz / 1000 % 100);
     wr(g, TRANS_CLK_SEL(g->pipe), 0);
     wr(g, DDI_BUF_CTL(port), rd(g, DDI_BUF_CTL(port)) & ~ENABLE);
     wr(g, DP_TP_CTL(port), rd(g, DP_TP_CTL(port)) & ~(ENABLE | DP_TP_TRAIN_MASK));
@@ -1611,6 +1623,43 @@ static void output_off(igpu_t *g)
     }
 }
 
+/* --- The screen off and on --------------------------------------------------------------- */
+
+/*
+ * On again: the port's PLL and, for DisplayPort, the link (the monitor is woken by the training), then the
+ * pipe with the mode it had and the first framebuffer. Takes no lock and waits only by sleeping and polling:
+ * a panic calls it, too.
+ */
+static void screen_on(igpu_t *g)
+{
+    g->off = false;
+    if (g->surfaces[0])
+        g->active.plane_surf = g->surfaces[0];
+    if (g->dp && !link_change(g, g->link_khz))
+        klog_warn("igpu: the DisplayPort link does not come back (the watcher tries again)");
+    picture_back(g);
+}
+
+/*
+ * Off: everything of the port, as if nothing were plugged in; a DisplayPort monitor is told to sleep first. The
+ * monitor sees no signal and goes to standby. What the driver knows about the mode stays for screen_on().
+ */
+static status_t igpu_power(display_t *display, bool on)
+{
+    igpu_t *g = igpu_of(display);
+    uint8_t sleep = 2;
+
+    if (on) {
+        screen_on(g);
+        return STATUS_SUCCESS;
+    }
+    if (g->dp)
+        dpcd_write(g, g->port, DPCD_SET_POWER, &sleep, 1);
+    output_off(g);
+    g->off = true;
+    return STATUS_SUCCESS;
+}
+
 /*
  * A monitor is on `port`, which is not lit (another port than before, or a
  * retry). Find out what it is, switch the old port off and prepare this one
@@ -1748,6 +1797,10 @@ static void hotplug_thread(void *argument)
 
         sleep_ms(1000);
         display_lock(d);
+        if (g->off) {
+            display_unlock(d); /* nothing to watch on a port that is switched off */
+            continue;
+        }
         if (g->dp) {
             present = dpcd_read(g, g->port, DPCD_LANE_STATUS, status, 6) == 6;
             link_ok = present && dp_link_good(status, g->lanes);
@@ -1958,6 +2011,7 @@ static bool takeover(igpu_t *g, const timing_t *t)
     }
     igpu_ops.set_mode = igpu_set_mode;
     igpu_ops.panic = igpu_panic;
+    igpu_ops.power = igpu_power;
     display_set_driver(0, &igpu_ops, g, g->surfaces[1] ? g->framebuffers[1] : 0);
     publish_modes(g);
 

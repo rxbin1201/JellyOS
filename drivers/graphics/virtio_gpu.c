@@ -181,6 +181,7 @@ typedef struct {
     uint32_t        width, height;
     uint32_t        front;        /* the framebuffer that is presented */
     bool            flip_pending; /* `front` changed and has not been presented yet */
+    bool            off;          /* the screen is switched off: the scanout shows nothing, no frames are sent */
     uint64_t        frames;       /* presented so far */
     wait_queue_t    frame;        /* woken after each one */
 
@@ -450,6 +451,28 @@ static status_t vgpu_wait_vblank(display_t *display, uint64_t timeout_ns)
     return g->failed ? STATUS_DEVICE_ERROR : status;
 }
 
+/*
+ * The screen off: the scanout shows no resource, which is what the card has for "no signal" (the host's
+ * window says that the output is not active). On: the resource again, and a frame from the first framebuffer.
+ */
+static status_t vgpu_power(display_t *display, bool on)
+{
+    vgpu_t *g = display->driver_data;
+
+    mutex_lock(&g->lock);
+    status_t status = on ? scanout_set(g, g->screen, g->width, g->height) : scanout_set(g, 0, 0, 0);
+    if (!STATUS_IS_ERROR(status) || on) {
+        g->off = !on;
+        if (on) {
+            g->front = 0;
+            g->flip_pending = false;
+            present(g);
+        }
+    }
+    mutex_unlock(&g->lock);
+    return status;
+}
+
 /* The host's output changed (its window has another size, or is gone or back): passed on like another monitor. */
 static void host_changed(vgpu_t *g, display_t *d)
 {
@@ -488,7 +511,8 @@ static void present_thread(void *argument)
         thread_sleep(next - now);
 
         mutex_lock(&g->lock);
-        present(g);
+        if (!g->off)
+            present(g);
         uint64_t flags = arch_interrupts_save();
         g->flip_pending = false;
         g->frames++;
@@ -611,6 +635,15 @@ static void vgpu_panic(display_t *display)
 
     if (g->failed || !g->screen || (g->in_flight && !panic_answer(g)))
         return;
+    if (g->off) {
+        /* The screen was switched off: the scanout gets its resource back first. */
+        gpu_scanout_t *scanout = request(g, CMD_SET_SCANOUT, sizeof(*scanout));
+        scanout->rect = (gpu_rect_t){ 0, 0, g->width, g->height };
+        scanout->resource = g->screen;
+        if (!panic_command(g, sizeof(*scanout)))
+            return;
+        g->off = false;
+    }
     g->front = 0;
     gpu_transfer_t *copy = request(g, CMD_TRANSFER_TO_HOST_2D, sizeof(*copy));
     copy->rect = (gpu_rect_t){ 0, 0, g->width, g->height };
@@ -640,7 +673,8 @@ static void vgpu_panic(display_t *display)
     }
 }
 
-static display_ops_t vgpu_ops = { .wait_vblank = vgpu_wait_vblank, .set_mode = vgpu_set_mode, .panic = vgpu_panic };
+static display_ops_t vgpu_ops = { .wait_vblank = vgpu_wait_vblank, .set_mode = vgpu_set_mode, .panic = vgpu_panic,
+                                  .power = vgpu_power };
 
 /* --- Start --------------------------------------------------------------------------- */
 

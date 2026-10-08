@@ -30,4 +30,11 @@ size_t   input_read(object_t *queue, jelly_input_event_t *events, size_t count);
 
 uint32_t input_device_count(void);
 
+/*
+ * `hook` is called for every event that is reported, with its type and value, in interrupt context: for what
+ * follows from "the user did something" (a screen that was switched off comes on again). One hook; NULL for
+ * none.
+ */
+void     input_set_activity_hook(void (*hook)(uint32_t type, int32_t value));
+
 #endif

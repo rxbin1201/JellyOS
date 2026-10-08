@@ -309,6 +309,12 @@ int wm_set_display_mode(wm_connection_t *c, int32_t width, int32_t height, uint3
     return send_message(c, &m);
 }
 
+int wm_set_display_power(wm_connection_t *c, bool on)
+{
+    wm_message_t m = { .type = WM_SET_DISPLAY_POWER, .flags = on ? 1 : 0 };
+    return send_message(c, &m);
+}
+
 int wm_notify(wm_connection_t *c, const char *title, const char *text)
 {
     wm_message_t m = { .type = WM_NOTIFY };

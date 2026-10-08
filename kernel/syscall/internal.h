@@ -78,6 +78,8 @@ status_t sys_display_flip(const uint64_t *a);
 status_t sys_display_modes(const uint64_t *a);
 status_t sys_display_set_mode(const uint64_t *a);
 status_t sys_display_watch(const uint64_t *a);
+/* The screen off and on, ABI 10 (graphics_syscalls.c) */
+status_t sys_display_power(const uint64_t *a);
 /* Audio devices, ABI 7 (audio_syscalls.c) */
 status_t sys_audio_info(const uint64_t *a);
 status_t sys_audio_open(const uint64_t *a);

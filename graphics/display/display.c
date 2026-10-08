@@ -150,6 +150,8 @@ void display_commit(display_t *d)
 {
     if (!d->current.full && d->current.count == 0)
         return;
+    if (d->info.flags & JELLY_DISPLAY_OFF)
+        return; /* nobody sees it: the frame waits */
 
     if (d->flip) {
         /*
@@ -159,11 +161,14 @@ void display_commit(display_t *d)
         int hidden = 1 - d->front;
         copy_frame(d, d->buffers[hidden], &d->previous);
         copy_frame(d, d->buffers[hidden], &d->current);
-        if (jelly_display_flip(d->info.index, (uint32_t)hidden) == STATUS_SUCCESS) {
+        status_t flipped = jelly_display_flip(d->info.index, (uint32_t)hidden);
+        if (flipped == STATUS_SUCCESS) {
             /* Until the swap has happened the old front is still being shown: wait before drawing into it. */
             jelly_display_vblank(d->info.index, VBLANK_TIMEOUT_NS);
             d->front = hidden;
             d->previous = d->current;
+        } else if (flipped == STATUS_BUSY) {
+            return; /* the screen was switched off this moment (display_changed() will tell): the frame waits */
         } else {
             /* The driver changed its mind: show the frame the plain way from now on. */
             d->flip = false;

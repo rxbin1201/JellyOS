@@ -190,6 +190,17 @@ static uint64_t timer_hz_from_cpuid(void)
     return c / 16;
 }
 
+/* The timer counts down and starts again at the top: a count above the last one seen is a new period. */
+bool lapic_timer_poll(void)
+{
+    static uint32_t last;
+    uint32_t now = read_reg(LAPIC_TIMER_CURRENT);
+    bool wrapped = now > last;
+
+    last = now;
+    return wrapped;
+}
+
 status_t lapic_timer_start(uint32_t hz)
 {
     /* Count down from the maximum for a known interval of a reference clock. */

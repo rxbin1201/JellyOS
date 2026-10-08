@@ -443,6 +443,7 @@ static const syscall_fn table[SYS_COUNT] = {
     [SYS_DISPLAY_MODES]    = sys_display_modes,
     [SYS_DISPLAY_SET_MODE] = sys_display_set_mode,
     [SYS_DISPLAY_WATCH]    = sys_display_watch,
+    [SYS_DISPLAY_POWER]    = sys_display_power,
 };
 
 uint64_t syscall_dispatch(uint64_t number, const uint64_t args[6])

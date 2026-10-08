@@ -61,6 +61,8 @@ enum {
     /* version 3 */
     WM_SCREEN,             /* server: width, height = the screen's new size */
     WM_SET_DISPLAY_MODE,   /* client: width, height, flags = refresh rate in mHz (0: the fastest) -> WM_SCREEN */
+    /* version 4 */
+    WM_SET_DISPLAY_POWER,  /* client: flags = 0: the screen off (any input switches it on again), 1: on */
 };
 
 /* WM_CREATE_WINDOW flags */

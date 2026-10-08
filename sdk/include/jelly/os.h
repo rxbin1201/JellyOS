@@ -14,6 +14,7 @@
 #include <jelly/status.h>
 #include <jelly/syscall.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Basics */
@@ -138,6 +139,9 @@ status_t jelly_display_modes(uint32_t index, jelly_display_mode_t *modes, uint32
 status_t jelly_display_set_mode(uint32_t index, uint32_t mode);
 /* An event that is signaled when the display's size, modes or connection change; reset it with jelly_event_reset(). */
 status_t jelly_display_watch(uint32_t index, jelly_handle_t *event);
+/* --- The screen off and on (ABI version 10) --- */
+/* Off: the monitor gets no signal and goes to standby. Any input switches it on again (the kernel does that). */
+status_t jelly_display_power(uint32_t index, bool on);
 
 /* --- Audio devices (ABI version 7); applications use the audio server instead: audio/client/audio.h --- */
 status_t jelly_audio_info(uint32_t index, jelly_audio_info_t *info);

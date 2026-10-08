@@ -12,12 +12,17 @@
 #include "core/log.h"
 #include "core/panic.h"
 #include "core/string.h"
+#include "input/input.h"
 #include "ipc/ipc.h"
 #include "memory/layout.h"
 #include "memory/mmu.h"
 #include "memory/vmm.h"
+#include "scheduler/thread.h"
+#include "scheduler/wait.h"
+#include "time/clock.h"
 
-#define DRIVER_FLAGS (JELLY_DISPLAY_CURSOR | JELLY_DISPLAY_VBLANK | JELLY_DISPLAY_FLIP | JELLY_DISPLAY_MODES)
+#define DRIVER_FLAGS (JELLY_DISPLAY_CURSOR | JELLY_DISPLAY_VBLANK | JELLY_DISPLAY_FLIP | JELLY_DISPLAY_MODES | \
+                      JELLY_DISPLAY_POWER)
 
 static display_t displays[DISPLAY_MAX];
 static uint32_t count;
@@ -148,6 +153,8 @@ static void update_flags(display_t *d)
         flags |= JELLY_DISPLAY_FLIP;
     if (ops && ops->set_mode && d->mode_count)
         flags |= JELLY_DISPLAY_MODES;
+    if (ops && ops->power)
+        flags |= JELLY_DISPLAY_POWER;
     d->info.flags = flags;
 }
 
@@ -171,11 +178,12 @@ status_t display_set_driver(uint32_t index, const display_ops_t *ops, void *driv
     update_flags(d);
     changed(d);
     mutex_unlock(&d->lock);
-    klog_info("display: %u: driver provides%s%s%s%s%s", index,
+    klog_info("display: %u: driver provides%s%s%s%s%s%s", index,
               (d->info.flags & JELLY_DISPLAY_CURSOR) ? " a hardware pointer" : "",
               (d->info.flags & JELLY_DISPLAY_VBLANK) ? " vertical blank timing" : "",
               (d->info.flags & JELLY_DISPLAY_FLIP) ? " page flipping" : "",
               (d->info.flags & JELLY_DISPLAY_MODES) ? " mode switching" : "",
+              (d->info.flags & JELLY_DISPLAY_POWER) ? " screen off" : "",
               (d->info.flags & DRIVER_FLAGS) ? "" : " nothing");
     return STATUS_SUCCESS;
 }
@@ -231,6 +239,10 @@ status_t display_cursor(uint32_t index, const jelly_cursor_t *cursor, const uint
     if (!(d->info.flags & JELLY_DISPLAY_CURSOR))
         return STATUS_NOT_SUPPORTED;
     mutex_lock(&d->lock);
+    if (d->info.flags & JELLY_DISPLAY_OFF) {
+        mutex_unlock(&d->lock);
+        return STATUS_BUSY;
+    }
     if (cursor->flags & JELLY_CURSOR_IMAGE)
         status = pixels ? d->ops->cursor_image(d, pixels) : STATUS_INVALID_ARGUMENT;
     if (!STATUS_IS_ERROR(status))
@@ -247,6 +259,8 @@ status_t display_wait_vblank(uint32_t index, uint64_t timeout_ns)
         return STATUS_NOT_FOUND;
     if (!(d->info.flags & JELLY_DISPLAY_VBLANK))
         return STATUS_NOT_SUPPORTED;
+    if (d->info.flags & JELLY_DISPLAY_OFF)
+        return STATUS_BUSY; /* no frames */
     return d->ops->wait_vblank(d, timeout_ns); /* without the lock: it sleeps */
 }
 
@@ -261,7 +275,7 @@ status_t display_flip(uint32_t index, uint32_t buffer)
     if (buffer > 1)
         return STATUS_INVALID_ARGUMENT;
     mutex_lock(&d->lock);
-    status_t status = d->ops->flip(d, buffer);
+    status_t status = (d->info.flags & JELLY_DISPLAY_OFF) ? STATUS_BUSY : d->ops->flip(d, buffer);
     mutex_unlock(&d->lock);
     return status;
 }
@@ -282,6 +296,117 @@ status_t display_buffer(uint32_t index, uint32_t buffer, object_t **memory)
     if (buffer != 1)
         return STATUS_INVALID_ARGUMENT; /* buffer 0 is what SYS_DISPLAY_ACQUIRE hands out */
     return shm_create_device(d->second_phys, d->info.size, buffer_released, d, memory);
+}
+
+/* --- The screen off and on ---------------------------------------------------------------- */
+
+/* A screen that was just switched off stays off for this long whatever comes in: the hand is still on the mouse. */
+#define WAKE_GRACE_NS 500000000ull
+
+static volatile uint32_t off_count; /* displays that are switched off */
+static volatile uint64_t off_since; /* when the last one went off */
+static volatile bool wake_wanted;
+static wait_queue_t wake_queue;
+static thread_t *waker;
+
+/* The driver's part and the flag. The display's lock is held. */
+static status_t power_locked(display_t *d, bool on)
+{
+    bool is_on = !(d->info.flags & JELLY_DISPLAY_OFF);
+
+    if (on == is_on)
+        return STATUS_SUCCESS;
+    /* (A driver that left while its screen was off: nothing to switch, the screen counts as on.) */
+    status_t status = d->ops && d->ops->power ? d->ops->power(d, on) : on ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+    if (STATUS_IS_ERROR(status) && !on)
+        return status; /* still on */
+    uint64_t saved = arch_interrupts_save();
+    if (on) {
+        d->info.flags &= ~JELLY_DISPLAY_OFF;
+        off_count--;
+    } else {
+        d->info.flags |= JELLY_DISPLAY_OFF;
+        off_count++;
+        off_since = clock_monotonic_ns();
+    }
+    arch_interrupts_restore(saved);
+    changed(d);
+    klog_info("display: %u: the screen is %s", d->info.index, on ? "on again" : "off");
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Every input event comes by here (interrupt context). With a screen off, something the user does on purpose
+ * wakes the waker: a key or button going down, the mouse moving. Not a key or button going up (the Enter key
+ * that sent the command to switch off is released a moment later), and not the wobble of a gamepad's stick.
+ */
+static void input_activity(uint32_t type, int32_t value)
+{
+    if (!off_count || wake_wanted)
+        return;
+    bool deliberate = type == JELLY_INPUT_KEY_DOWN || type == JELLY_INPUT_MOUSE_MOVE || type == JELLY_INPUT_MOUSE_WHEEL ||
+                      ((type == JELLY_INPUT_MOUSE_BUTTON || type == JELLY_INPUT_GAMEPAD_BUTTON) && value != 0);
+    if (deliberate && clock_monotonic_ns() - off_since >= WAKE_GRACE_NS) {
+        wake_wanted = true;
+        wait_queue_wake_all(&wake_queue, STATUS_SUCCESS);
+    }
+}
+
+/* Switching a screen on takes a driver's time (a DisplayPort link is trained): a thread does it. */
+static void wake_thread(void *argument)
+{
+    (void)argument;
+    for (;;) {
+        uint64_t saved = arch_interrupts_save();
+        while (!wake_wanted)
+            wait_queue_block_uninterruptible(&wake_queue, wait_deadline(~0ull));
+        wake_wanted = false;
+        arch_interrupts_restore(saved);
+        for (uint32_t i = 0; i < count; i++) {
+            if (displays[i].info.flags & JELLY_DISPLAY_OFF)
+                display_set_power(i, true);
+        }
+    }
+}
+
+/* Without the thread that switches a screen on again none is switched off. */
+static bool waker_ready(void)
+{
+    static mutex_t lock;
+    static bool lock_ready;
+
+    uint64_t saved = arch_interrupts_save();
+    if (!lock_ready) {
+        mutex_init(&lock);
+        wait_queue_init(&wake_queue);
+        lock_ready = true;
+    }
+    arch_interrupts_restore(saved);
+    mutex_lock(&lock);
+    if (!waker && !STATUS_IS_ERROR(thread_create_kernel("display-wake", wake_thread, NULL, THREAD_PRIORITY_KERNEL, &waker))) {
+        input_set_activity_hook(input_activity);
+        thread_start(waker);
+    }
+    mutex_unlock(&lock);
+    return waker != NULL;
+}
+
+status_t display_set_power(uint32_t index, bool on)
+{
+    display_t *d = display_get(index);
+
+    if (!d)
+        return STATUS_NOT_FOUND;
+    if (!(d->info.flags & JELLY_DISPLAY_POWER))
+        return STATUS_NOT_SUPPORTED;
+    if (!on && !waker_ready())
+        return STATUS_OUT_OF_MEMORY;
+    mutex_lock(&d->lock);
+    status_t status = power_locked(d, on);
+    mutex_unlock(&d->lock);
+    if (STATUS_IS_ERROR(status))
+        klog_warn("display: %u: the screen cannot be switched off (%s)", index, status_name(status));
+    return status;
 }
 
 /* --- Modes ---------------------------------------------------------------------------- */
@@ -327,6 +452,7 @@ status_t display_set_mode(uint32_t index, uint32_t mode)
         return STATUS_SUCCESS;
     }
     const jelly_display_mode_t *m = &d->modes[mode];
+    power_locked(d, true); /* a mode is something to look at */
     /* The console keeps off the screen while its size is in the air; a display server is told afterwards. */
     bool console = index == 0 && !d->acquired;
     if (console)
@@ -404,7 +530,8 @@ static void release(void *context)
     display_t *d = context;
 
     mutex_lock(&d->lock);
-    /* Back to what the kernel console draws on, without a pointer on top. */
+    /* Back to what the kernel console draws on, without a pointer on top, and visible. */
+    power_locked(d, true);
     if (d->info.flags & JELLY_DISPLAY_FLIP)
         d->ops->flip(d, 0);
     if (d->info.flags & JELLY_DISPLAY_CURSOR)

@@ -495,3 +495,10 @@ status_t jelly_display_watch(uint32_t index, jelly_handle_t *event)
 {
     return (status_t)SYSCALL2(SYS_DISPLAY_WATCH, index, event);
 }
+
+/* --- The screen off and on (ABI version 10) ---------------------------------------------- */
+
+status_t jelly_display_power(uint32_t index, bool on)
+{
+    return (status_t)SYSCALL2(SYS_DISPLAY_POWER, index, on ? 1 : 0);
+}

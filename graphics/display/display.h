@@ -21,6 +21,10 @@
  * one, or another monitor was plugged in. The framebuffers stay mapped (the
  * driver made them large enough for every mode); display->watch is an event
  * to wait on, and display_changed() then takes over the new size.
+ *
+ * The screen can be switched off (JELLY_DISPLAY_OFF in display->info.flags,
+ * also told by display->watch). Frames built meanwhile are kept, not shown;
+ * when the screen is back, display->stale asks for the whole picture.
  */
 
 #ifndef GRAPHICS_DISPLAY_DISPLAY_H

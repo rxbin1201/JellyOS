@@ -1,6 +1,6 @@
 # JellyOS System Call ABI
 
-**ABI version:** 9 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67); version 6 adds the desktop calls (68–70); version 7 adds audio devices (71–75) and the gamepad input events; version 8 adds the display driver calls (76–79) and the display flags `CURSOR`, `VBLANK` and `FLIP`; version 9 adds display modes and hot plug (80–82), the display flags `MODES` and `DISCONNECTED` and the fields `refresh_mhz` and `generation` of `jelly_display_info_t`.
+**ABI version:** 10 (`JELLY_SYSCALL_ABI_VERSION`). Version 1 has calls 0–22; version 2 adds the file calls 23–40 and status codes 16–20; version 3 adds programs, pipes and power (41–45), the `MANAGE` right and the file types `DEVICE` and `PIPE`; version 4 adds networking (46–58) and status codes 21–25; version 5 adds graphics and input (59–67); version 6 adds the desktop calls (68–70); version 7 adds audio devices (71–75) and the gamepad input events; version 8 adds the display driver calls (76–79) and the display flags `CURSOR`, `VBLANK` and `FLIP`; version 9 adds display modes and hot plug (80–82), the display flags `MODES` and `DISCONNECTED` and the fields `refresh_mhz` and `generation` of `jelly_display_info_t`. Version 10 adds switching the screen off (83) and the display flags `POWER` and `OFF`.
 **Headers:** [`sdk/include/jelly/syscall.h`](../../sdk/include/jelly/syscall.h) (numbers, rights, flags), [`sdk/include/jelly/status.h`](../../sdk/include/jelly/status.h) (errors), [`sdk/include/jelly/os.h`](../../sdk/include/jelly/os.h) (libos wrappers)
 
 ## Calling convention (x86_64)
@@ -260,6 +260,21 @@ monitor. `generation` counts every such change.
 | 80 | `SYS_DISPLAY_MODES` | `index, jelly_display_mode_t *modes, max, uint32_t *count` | up to `max` modes; `*count` = how many there are | For everyone. A display without a driver has one mode: what it shows. At most 32 |
 | 81 | `SYS_DISPLAY_SET_MODE` | `index, mode` | | Root only. `mode` = position in the list. Framebuffer 0 is shown afterwards. `NOT_SUPPORTED` without `MODES`, `DEVICE_ERROR` if the mode does not come up (the one before is back) |
 | 82 | `SYS_DISPLAY_WATCH` | `index, jelly_handle_t *event` | event handle (`WAIT`, `SIGNAL`) | Root only. Signaled after every change of mode, list of modes or connection, also by another program or by the driver itself (another monitor). The watcher resets it (`SYS_EVENT_RESET`) and reads `SYS_DISPLAY_INFO` again |
+
+### The screen off and on (ABI version 10)
+
+A display with the flag `JELLY_DISPLAY_POWER` has a driver that can stop
+the signal to the monitor, which then goes to standby. While the screen is
+off, `JELLY_DISPLAY_OFF` is set, and flips, pointer moves and waits for a
+frame return `BUSY`; the framebuffers stay mapped and keep their contents.
+The kernel switches the screen on again when a key or a button goes down
+or the mouse moves (not in the first half second), when the mode is
+changed, when the display's owner goes away, and for a panic. Both
+changes signal the event of `SYS_DISPLAY_WATCH` and count in `generation`.
+
+| Nr | Name | Arguments | Result | Notes |
+|---|---|---|---|---|
+| 83 | `SYS_DISPLAY_POWER` | `index, on` | | Root only. `on` = 0: off, else on. `NOT_SUPPORTED` without `POWER`; an error for "off" means the screen is still on |
 
 ```c
 typedef struct {

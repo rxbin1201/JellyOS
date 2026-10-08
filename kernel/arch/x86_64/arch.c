@@ -48,6 +48,11 @@ unsigned arch_cpu_id(void)
     return lapic_id();
 }
 
+bool arch_timer_poll(void)
+{
+    return lapic_timer_poll();
+}
+
 void arch_switch_stack(uint64_t stack_top, void (*entry)(void))
 {
     __asm__ volatile(

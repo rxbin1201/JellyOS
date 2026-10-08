@@ -8,6 +8,7 @@
 #include "memory/vmm.h"
 #include "process/process.h"
 #include "scheduler/scheduler.h"
+#include "time/clock.h"
 
 static uint64_t next_tid = 1;
 
@@ -162,6 +163,13 @@ void thread_kill(thread_t *t)
 
 status_t thread_sleep(uint64_t ns)
 {
+    if (clock_is_polled()) {
+        /* A panic: nothing is scheduled any more, and the clock moves only while it is read. */
+        uint64_t end = clock_monotonic_ns() + ns;
+        while (clock_monotonic_ns() < end)
+            __asm__ volatile("pause");
+        return STATUS_SUCCESS;
+    }
     uint64_t flags = arch_interrupts_save();
     status_t status = wait_queue_block(NULL, wait_deadline(ns));
     arch_interrupts_restore(flags);

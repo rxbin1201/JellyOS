@@ -4,6 +4,7 @@
 #include "core/arch.h"
 #include "core/format.h"
 #include "core/log.h"
+#include "time/clock.h"
 
 #include <stdarg.h>
 
@@ -32,6 +33,8 @@ static void panic_common(const struct arch_interrupt_frame *frame, const char *r
         kconsole_write("\n*** nested panic, halting ***\n", 31);
         arch_halt();
     }
+
+    clock_poll_from_now(); /* the timer interrupt will not come any more; whoever shows the report may have to wait */
 
     /*
      * The serial port gets every line as it is written. The screen may belong to a display server: the text is

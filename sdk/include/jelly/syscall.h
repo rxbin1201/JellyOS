@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define JELLY_SYSCALL_ABI_VERSION 9
+#define JELLY_SYSCALL_ABI_VERSION 10
 
 typedef uint32_t jelly_handle_t;
 #define JELLY_HANDLE_INVALID 0u
@@ -113,6 +113,8 @@ enum {
     SYS_DISPLAY_MODES    = 80, /* (uint32_t index, jelly_display_mode_t *modes, uint32_t max, uint32_t *count) */
     SYS_DISPLAY_SET_MODE = 81, /* (uint32_t index, uint32_t mode)                            root only */
     SYS_DISPLAY_WATCH    = 82, /* (uint32_t index, jelly_handle_t *event)                    root only; signaled on changes */
+    /* ABI version 10: the screen off and on */
+    SYS_DISPLAY_POWER    = 83, /* (uint32_t index, uint32_t on)                              root only */
     SYS_COUNT
 };
 
@@ -297,6 +299,9 @@ typedef struct {
 /* ABI version 9 */
 #define JELLY_DISPLAY_MODES       (1u << 4) /* the mode can be changed: SYS_DISPLAY_SET_MODE */
 #define JELLY_DISPLAY_DISCONNECTED (1u << 5) /* the driver sees no monitor */
+/* ABI version 10 */
+#define JELLY_DISPLAY_POWER       (1u << 6) /* the screen can be switched off: SYS_DISPLAY_POWER */
+#define JELLY_DISPLAY_OFF         (1u << 7) /* it is off: no signal to the monitor until it is switched on or input comes */
 
 #define JELLY_DISPLAY_MODE_MAX    32
 #define JELLY_MODE_CURRENT        (1u << 0) /* the mode being shown */
@@ -331,7 +336,7 @@ typedef struct {
     uint64_t size;            /* bytes of the framebuffer mapping (stays when the mode changes) */
     /* ABI version 9 */
     uint32_t refresh_mhz;     /* frames per 1000 seconds; 0 if unknown */
-    uint32_t generation;      /* counts changes of geometry, modes and connection (see SYS_DISPLAY_WATCH) */
+    uint32_t generation;      /* counts changes of geometry, modes, connection and power (see SYS_DISPLAY_WATCH) */
 } jelly_display_info_t;
 
 /* Standardized input events (README section 37). Key codes: <jelly/input.h>. */

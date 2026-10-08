@@ -76,6 +76,8 @@ static bool list_changed;
 static int32_t pointer_x, pointer_y;
 static uint32_t buttons, modifiers;
 static comp_window_t *grab, *hover, *drag, *sizing;
+static uint32_t repeat_key; /* the key that is held down and repeats, 0 if none */
+static uint64_t repeat_at;
 static int32_t drag_dx, drag_dy;
 static window_part_t pressed_part;
 static comp_window_t *pressed_window;
@@ -479,6 +481,13 @@ static void handle_request(client_t *client, const wm_message_t *m)
             broadcast_screen(); /* the one who asked waits for an answer in any case */
         break;
     }
+    case WM_SET_DISPLAY_POWER: {
+        status_t status = jelly_display_power(display.info.index, m->flags != 0);
+        if (STATUS_IS_ERROR(status))
+            log_message("screen %s: status %d", m->flags ? "on" : "off", (int)status);
+        display_check();
+        break;
+    }
     }
 }
 
@@ -608,6 +617,11 @@ static void display_check(void)
 
     if ((old_flags ^ display.info.flags) & JELLY_DISPLAY_DISCONNECTED)
         log_message("monitor %s", (display.info.flags & JELLY_DISPLAY_DISCONNECTED) ? "disconnected" : "connected");
+    if ((old_flags ^ display.info.flags) & JELLY_DISPLAY_OFF) {
+        log_message("the screen is %s", (display.info.flags & JELLY_DISPLAY_OFF) ? "off" : "on again");
+        repeat_key = 0;
+        drag = sizing = NULL;
+    }
     if (resized)
         screen_changed(old_w, old_h);
     if (display.stale) {
@@ -831,8 +845,6 @@ static void key_event(uint32_t key, bool down, bool repeat)
 #define REPEAT_DELAY_NS    400000000ull
 #define REPEAT_INTERVAL_NS 33000000ull
 
-static uint32_t repeat_key;
-static uint64_t repeat_at;
 
 static void gamepad_event(const jelly_input_event_t *e)
 {
@@ -855,6 +867,12 @@ static void handle_input(void)
     jelly_input_event_t events[32];
     size_t count;
     while (jelly_input_read(input_queue, events, 32, &count) == STATUS_SUCCESS && count) {
+        /*
+         * While the screen is off, what comes in is for the kernel alone, which switches the screen on: a key
+         * pressed to wake the machine is not typed into the window that happens to have the focus.
+         */
+        if (display.info.flags & JELLY_DISPLAY_OFF)
+            continue;
         for (size_t i = 0; i < count; i++) {
             jelly_input_event_t *e = &events[i];
             switch (e->type) {

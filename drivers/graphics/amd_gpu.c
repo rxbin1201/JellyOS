@@ -425,6 +425,7 @@ typedef struct {
     bool              scrambled;               /* the signal is a scrambled one (above 340 MHz) */
     bool              encoder_table;           /* the video BIOS has the table that sets an encoder's stream side up */
     bool              sound;                   /* sound is switched on in the signal */
+    bool              off;                     /* the screen is switched off: the transmitter is off */
     uint32_t          sound_seen[4];           /* what was last reported of its state */
 
     /* Interrupts */
@@ -1052,11 +1053,19 @@ static void amdgpu_cursor_move(display_t *display, int32_t x, int32_t y, bool vi
 
 static display_ops_t amdgpu_ops;
 
-/* A panic: the first framebuffer, where the console draws, without the pointer. Register writes only. */
+static void screen_on(amdgpu_t *g);
+
+/*
+ * A panic: the first framebuffer, where the console draws, without the pointer. Register writes only, unless
+ * the screen was switched off: then it is brought back first, as far as that goes without anything else
+ * running.
+ */
 static void amdgpu_panic(display_t *display)
 {
     amdgpu_t *g = amdgpu_of(display);
 
+    if (g->off)
+        screen_on(g);
     if (amdgpu_ops.flip)
         surface_show(g, g->framebuffers[0]);
     if (amdgpu_ops.cursor_move)
@@ -2169,6 +2178,51 @@ static bool link_restore(amdgpu_t *g, uint32_t rate)
     return ok;
 }
 
+/* --- The screen off and on --------------------------------------------------------------- */
+
+/*
+ * On again, with the mode it had and the first framebuffer: DisplayPort gets its link trained again (the
+ * transmitter was off), HDMI its PLL, and a scrambled signal is announced to the monitor anew. Takes no lock
+ * and waits only by sleeping and polling: a panic calls it, too.
+ */
+static void screen_on(amdgpu_t *g)
+{
+    g->off = false;
+    if (g->displayport) {
+        surface_show(g, g->framebuffers[0]);
+        g->flip_pending = false;
+        if (!link_restore(g, g->link_khz))
+            klog_warn("amdgpu: the DisplayPort link does not come back (the watcher tries again)");
+    } else {
+        tmds_restart(g);
+    }
+}
+
+/*
+ * Off: the stream, the timing generator and the transmitter (the video BIOS's table), as when a connector is
+ * left; a DisplayPort monitor is told to sleep first. The monitor sees no signal and goes to standby.
+ */
+static status_t amdgpu_power(display_t *display, bool on)
+{
+    amdgpu_t *g = amdgpu_of(display);
+
+    if (on) {
+        screen_on(g);
+        return STATUS_SUCCESS;
+    }
+    if (g->displayport && g->aux_engine >= 0) {
+        aux_engine_t where = { g, g->aux_engine };
+        dp_aux_t aux = { &where, aux_once };
+        uint8_t sleep = 2;
+        dp_dpcd_write(&aux, 0x600, &sleep, 1);
+    }
+    pipe_stop(g); /* HDMI: with the transmitter */
+    if (g->displayport && g->phy_on)
+        transmitter(g, TRANSMITTER_DISABLE, 0, g->link_khz);
+    g->off = true;
+    return STATUS_SUCCESS;
+}
+
 static bool mode_listed(const amdgpu_t *g, const display_timing_t *t)
 {
     for (uint32_t i = 0; i < g->mode_count; i++) {
@@ -2299,6 +2353,10 @@ static void hotplug_thread(void *argument)
             klog_error("amdgpu: the display engine's registers do not answer any more: nothing further is tried");
             display_unlock(d);
             kmsg_logfile_write();
+            continue;
+        }
+        if (g->off) {
+            display_unlock(d); /* nothing to watch on a connector that is switched off */
             continue;
         }
         if (hpd_pins(g) != pins) {
@@ -2678,6 +2736,8 @@ static status_t amdgpu_probe(device_t *device)
                   g->displayport ? "the link or the pixel clock is not known"
                                  : "HDMI: the pixel clock on the screen or the video BIOS's table for it is not known");
     amdgpu_ops.panic = amdgpu_panic;
+    if (switchable && g->atom_ready)
+        amdgpu_ops.power = amdgpu_power; /* the transmitter is switched by the video BIOS's table */
     status = display_set_driver(0, &amdgpu_ops, g, amdgpu_ops.flip ? g->aperture + g->framebuffers[1] : 0);
     if (!STATUS_IS_ERROR(status))
         publish_modes(g, d, switchable, true);

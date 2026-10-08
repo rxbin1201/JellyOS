@@ -41,6 +41,13 @@ uint32_t input_device_count(void)
     return devices;
 }
 
+static void (*activity_hook)(uint32_t type, int32_t value);
+
+void input_set_activity_hook(void (*hook)(uint32_t type, int32_t value))
+{
+    activity_hook = hook;
+}
+
 void input_report(uint32_t device, uint32_t type, uint32_t code, int32_t value, int32_t dx, int32_t dy, int32_t x,
                   int32_t y, uint32_t flags)
 {
@@ -68,6 +75,8 @@ void input_report(uint32_t device, uint32_t type, uint32_t code, int32_t value, 
         q->count++;
         object_notify(&q->object);
     }
+    if (activity_hook)
+        activity_hook(type, value);
     arch_interrupts_restore(saved);
 }
 

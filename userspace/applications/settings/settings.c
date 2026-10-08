@@ -302,6 +302,23 @@ static void mode_chosen(widget_t *list, void *user)
     wm_set_display_mode(gui_connection(app), (int32_t)m->width, (int32_t)m->height, m->refresh_mhz);
 }
 
+static void screen_off(widget_t *button, void *user)
+{
+    (void)button;
+    (void)user;
+    say("screen off");
+    wm_set_display_power(gui_connection(app), false);
+}
+
+/* The button that sends the monitor to standby, where the graphics driver can do that. */
+static void add_screen_off(const jelly_display_info_t *info)
+{
+    if (!(info->flags & JELLY_DISPLAY_POWER))
+        return;
+    gui_add(content, gui_button("Switch the screen off", screen_off, NULL));
+    gui_add(content, dim("A key or the mouse switches it on again."));
+}
+
 static void show_display(void)
 {
     jelly_display_info_t info;
@@ -324,6 +341,7 @@ static void show_display(void)
     if (!(info.flags & JELLY_DISPLAY_MODES) ||
         jelly_display_modes(0, screen_modes, JELLY_DISPLAY_MODE_MAX, &screen_mode_count) != STATUS_SUCCESS) {
         gui_add(content, dim("The graphics driver of this computer cannot change the mode."));
+        add_screen_off(&info);
         return;
     }
     if (screen_mode_count > JELLY_DISPLAY_MODE_MAX)
@@ -347,6 +365,7 @@ static void show_display(void)
     gui_list_on_select(list, mode_chosen, NULL);
     gui_add(content, list);
     gui_add(content, dim("The choice is kept for the next start."));
+    add_screen_off(&info);
 }
 
 /* --- Sections ------------------------------------------------------------------- */

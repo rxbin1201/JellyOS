@@ -104,6 +104,9 @@ void     arch_user_access_end(void);
 
 unsigned arch_cpu_id(void);
 
+/* With interrupts off: has a period of the timer passed since the last call? (See clock_poll_from_now().) */
+bool     arch_timer_poll(void);
+
 /* Print registers and a stack trace. frame may be NULL (current context). */
 void     arch_dump_state(const struct arch_interrupt_frame *frame);
 

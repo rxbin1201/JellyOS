@@ -16,6 +16,7 @@
 #include "memory/heap.h"
 #include "memory/layout.h"
 #include "memory/pmm.h"
+#include "scheduler/thread.h"
 
 #include <jelly/input.h>
 #include <jelly/syscall.h>
@@ -479,6 +480,101 @@ KTEST(display_modes_can_be_switched)
     /* The real screen back. */
     KASSERT(display_set_mode(0, 0) == STATUS_SUCCESS);
     KEXPECT(d->info.width == width && d->info.height == height && d->info.pitch == pitch);
+    object_release(event);
+    real_driver_restore();
+}
+
+/* --- The screen off and on ------------------------------------------------------------------ */
+
+static struct {
+    int  offs, ons;
+    bool fails;
+} fake_power;
+
+static status_t fake_power_set(display_t *display, bool on)
+{
+    (void)display;
+    if (fake_power.fails)
+        return STATUS_DEVICE_ERROR;
+    if (on)
+        fake_power.ons++;
+    else
+        fake_power.offs++;
+    return STATUS_SUCCESS;
+}
+
+KTEST(display_screen_goes_off_and_comes_back)
+{
+    static const display_ops_t plain = { .set_mode = fake_set_mode };
+    static const display_ops_t ops = { .set_mode = fake_set_mode, .power = fake_power_set };
+    display_t *d = display_get(0);
+    object_t *event, *memory;
+
+    if (!d || d->info.width < 640 || d->info.height < 480)
+        return;
+    real_driver_save(d);
+    memset(&fake_power, 0, sizeof(fake_power));
+    fake_modes.fails = false;
+    fake_modes.list[0] = (jelly_display_mode_t){ d->info.width, d->info.height, 60000, JELLY_MODE_PREFERRED };
+    fake_modes.list[1] = (jelly_display_mode_t){ 640, 480, 75000, 0 };
+    fake_modes.pitch[0] = d->info.pitch;
+    fake_modes.pitch[1] = 640 * 4;
+
+    /* A driver that cannot: said so, by the flag and by the call. */
+    KASSERT(display_set_driver(0, &plain, NULL, 0) == STATUS_SUCCESS);
+    KEXPECT(!(d->info.flags & JELLY_DISPLAY_POWER) && display_set_power(0, false) == STATUS_NOT_SUPPORTED);
+    KEXPECT(display_set_power(99, false) == STATUS_NOT_FOUND);
+
+    /* Off: the driver is asked once, the flag and the watcher's event tell. */
+    KASSERT(display_set_driver(0, &ops, NULL, 0) == STATUS_SUCCESS);
+    KASSERT(display_set_modes(0, fake_modes.list, 2, 0) == STATUS_SUCCESS);
+    KEXPECT((d->info.flags & JELLY_DISPLAY_POWER) && !(d->info.flags & JELLY_DISPLAY_OFF));
+    KASSERT(display_watch(0, &event) == STATUS_SUCCESS);
+    event_reset(event);
+    KEXPECT(display_set_power(0, true) == STATUS_SUCCESS && fake_power.ons == 0); /* it is on */
+    KEXPECT(display_set_power(0, false) == STATUS_SUCCESS && fake_power.offs == 1);
+    KEXPECT((d->info.flags & JELLY_DISPLAY_OFF) && event_is_signaled(event));
+    KEXPECT(display_set_power(0, false) == STATUS_SUCCESS && fake_power.offs == 1);
+
+    /*
+     * Input brings it back, a moment later (a thread does it): not in the first half second, when the hand
+     * that switched it off is still on the mouse, and not a key that goes up.
+     */
+    event_reset(event);
+    input_report(0, JELLY_INPUT_MOUSE_MOVE, 0, 0, 1, 1, 0, 0, 0);
+    thread_sleep(20000000);
+    KEXPECT((d->info.flags & JELLY_DISPLAY_OFF) && fake_power.ons == 0);
+    thread_sleep(600000000);
+    input_report(0, JELLY_INPUT_KEY_UP, JELLY_KEY_A, 0, 0, 0, 0, 0, 0);
+    input_report(0, JELLY_INPUT_MOUSE_BUTTON, 1, 0, 0, 0, 0, 0, 0);
+    thread_sleep(20000000);
+    KEXPECT((d->info.flags & JELLY_DISPLAY_OFF) && fake_power.ons == 0);
+    input_report(0, JELLY_INPUT_KEY_DOWN, JELLY_KEY_A, 1, 0, 0, 0, 0, 0);
+    for (int i = 0; i < 200 && (d->info.flags & JELLY_DISPLAY_OFF); i++)
+        thread_sleep(1000000);
+    KEXPECT(!(d->info.flags & JELLY_DISPLAY_OFF) && fake_power.ons == 1 && event_is_signaled(event));
+    /* Input while the screen is on asks the driver for nothing. */
+    input_report(0, JELLY_INPUT_MOUSE_MOVE, 0, 0, 1, 1, 0, 0, 0);
+    thread_sleep(5000000);
+    KEXPECT(fake_power.ons == 1 && fake_power.offs == 1);
+
+    /* A driver that cannot switch off right now: the screen stays on. */
+    fake_power.fails = true;
+    KEXPECT(display_set_power(0, false) == STATUS_DEVICE_ERROR && !(d->info.flags & JELLY_DISPLAY_OFF));
+    fake_power.fails = false;
+
+    /* A change of the mode is something to look at: on first. */
+    KASSERT(display_set_power(0, false) == STATUS_SUCCESS);
+    KASSERT(display_set_mode(0, 1) == STATUS_SUCCESS);
+    KEXPECT(!(d->info.flags & JELLY_DISPLAY_OFF) && fake_power.ons == 2 && d->info.width == 640);
+    KASSERT(display_set_mode(0, 0) == STATUS_SUCCESS);
+
+    /* A display server that goes away with the screen off leaves it on for the console. */
+    KASSERT(display_acquire(0, &memory) == STATUS_SUCCESS);
+    KASSERT(display_set_power(0, false) == STATUS_SUCCESS);
+    object_release(memory);
+    KEXPECT(!(d->info.flags & JELLY_DISPLAY_OFF) && fake_power.ons == 3 && !d->acquired);
+
     object_release(event);
     real_driver_restore();
 }

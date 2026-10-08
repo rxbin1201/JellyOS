@@ -243,13 +243,21 @@ switch while a display server owns the display (its mapping keeps its
 size; the console lays itself out again afterwards), hot plug and a new
 list of modes.
 
+`display_screen_goes_off_and_comes_back` covers switching the screen off
+with a driver made for the test: the flag and the event, that input brings
+the screen back (a key going down; not the mouse in the first half second,
+not a key or button going up), a driver that cannot switch off, and that a
+change of the mode and a display server that goes away switch it on.
+
 In QEMU the driver `bochs-gpu` gives the standard VGA card real mode
 switching. The integration test uses it with the desktop running: the
 `display` command lists the modes, a mode is chosen with the keyboard on
 the Display page of Settings (1920x1080; the display server writes it to
 `/etc/display.conf`), another one with `display 1024x768`, and `display 0`
 goes back. After each switch a screenshot must have the new size, with the
-maximized window filling it and the taskbar at the new bottom edge.
+maximized window filling it and the taskbar at the new bottom edge. Then
+`display off`: the screenshot is black all over, moving the mouse switches
+the screen on again, and the desktop is back.
 
 A third boot checks the driver `virtio-gpu`: the same system with
 `-vga none -device virtio-vga`, and `shell_test.py --gpu` (log:
@@ -268,15 +276,17 @@ side of the card, so they show what the driver presented:
   each the host's picture has the new size and the taskbar is at its
   bottom edge
 - no command to the card failed
-- a kernel panic while the desktop is on the screen
-  (`echo panic > /dev/crash`, typed into the terminal window as the user,
-  in a mode other than the one the system started in): the screenshot afterwards has only the two colours of the
-  kernel console, with a report of several lines. The panic ends this run;
-  the script stops QEMU
+- the screen off (`display off`): the host's picture is not the desktop
+  any more; a key switches it on again, and the desktop is back
+- a kernel panic while the desktop has the screen and the screen is
+  switched off (`display off`, then `echo panic > /dev/crash`, in a mode
+  other than the one the system started in): the screenshot afterwards has
+  only the two colours of the kernel console, with a report of several
+  lines. The panic ends this run; the script stops QEMU
 
 Not covered by any automated test, because QEMU has no such device: the
-Intel and AMD drivers' mode switching, DisplayPort link training and hot
-plug, and the sound of a monitor on AMD and Intel graphics (by hand: `volume output
+Intel and AMD drivers' mode switching, DisplayPort link training, hot
+plug and switching the screen off and on, and the sound of a monitor on AMD and Intel graphics (by hand: `volume output
 N` for "Monitor sound", then `tone -f 440 -d 3000`). Of the VirtIO GPU driver, a change of the host's window is not
 covered (the tests run without one).
 

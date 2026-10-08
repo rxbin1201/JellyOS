@@ -672,6 +672,25 @@ def gui_steps(console, qmp, timeout):
     console.send("")
     console.read_until(PROMPT, timeout)
 
+    # --- The screen off and on: the card shows nothing until the mouse moves. (Not at once: for half a second
+    #     after it went off the screen stays off, whatever comes in.)
+    console.send("display off")
+    if expect("the screen is switched off with the display command", "] the screen is off"):
+        time.sleep(1.0)
+        shot = qmp.screenshot()
+        colors = {shot.color(x, y) for x in range(3, qmp.width, 97) for y in range(3, qmp.height, 53)}
+        check("nothing is on the screen", colors == {0}, f"(colours: {sorted(f'{c:06x}' for c in colors)[:8]})")
+        qmp.move(600, 400)
+        expect("moving the mouse switches it on again", "] the screen is on again")
+        time.sleep(1.5)
+        shot = qmp.screenshot()
+        check("the desktop is back",
+              (qmp.width, qmp.height) == (1280, 800) and shot.color(4, 797) == taskbar_corner and
+              shot.color(640, 6) == TITLE_FOCUSED,
+              f"({qmp.width}x{qmp.height}, taskbar {shot.color(4, 797):06x}, title bar {shot.color(640, 6):06x})")
+    console.send("")
+    console.read_until(PROMPT, timeout)
+
     # --- Log out: back to the login
     qmp.click(*LAUNCHER)
     expect("the launcher opens (log out)", "desktop: launcher open")
@@ -776,6 +795,26 @@ def gpu_steps(console, qmp, timeout):
     console.read_until(PROMPT, timeout)
     driver_log("no command of the driver failed")
 
+    # --- The screen off and on: the scanout shows no resource until a key is pressed, and that key is not typed
+    #     into the terminal.
+    console.send("display off")
+    if expect("the screen is switched off with the display command", "] the screen is off"):
+        time.sleep(1.0)
+        shot = qmp.screenshot()
+        check("the host's picture is not the desktop any more", shot.color(4, qmp.height - 3) != taskbar_corner,
+              f"({shot.color(4, qmp.height - 3):06x})")
+        qmp.key("x")
+        expect("a key switches it on again", "] the screen is on again")
+        time.sleep(1.5)
+        shot = qmp.screenshot()
+        check("the desktop is back",
+              (qmp.width, qmp.height) == (1280, 800) and shot.color(4, 797) == taskbar_corner and
+              shot.color(400, 64) == TITLE_FOCUSED,
+              f"({qmp.width}x{qmp.height}, taskbar {shot.color(4, 797):06x}, title bar {shot.color(400, 64):06x})")
+    console.send("")
+    console.read_until(PROMPT, timeout)
+    driver_log("no command of the driver failed after that")
+
     # --- A kernel panic while the desktop has the screen: the console takes it back for the last words.
     #     (The display server flips between two framebuffers and uses the card's pointer; the kernel's
     #     thread that presents frames no longer runs.)
@@ -787,9 +826,13 @@ def gpu_steps(console, qmp, timeout):
     shot = qmp.screenshot()
     check("before the panic the desktop is on the screen", shot.color(512, 758) == DARK_BACKGROUND,
           f"({shot.color(512, 758):06x})")
-    qmp.click(400, 64)  # the terminal's window: the user's shell, as at a real machine
-    qmp.type("echo panic > /dev/crash\n")
-    if expect("the kernel panics when the user asks for it", "*** system halted ***"):
+    #     And the screen is switched off: the panic has to bring it back for its report.
+    console.send("display off")
+    expect("the screen is off before the panic", "] the screen is off")
+    console.read_until(PROMPT, timeout)
+    time.sleep(1.0)
+    console.send("echo panic > /dev/crash")
+    if expect("the kernel panics when it is asked to", "*** system halted ***"):
         time.sleep(1.0)
         shot = qmp.screenshot()
         colors = {shot.color(x, y) for x in range(3, qmp.width, 7) for y in range(3, qmp.height, 5)}

@@ -4,13 +4,14 @@
  * registers.
  *
  * The firmware lights it like any other card and JellyOS shows the UEFI
- * framebuffer on it. This driver adds the one thing the card can do beyond
- * that: switching modes. It is the smallest example of a graphics driver
+ * framebuffer on it. This driver adds the two things the card can do beyond
+ * that: switching modes and showing nothing (the screen "off", as far as an
+ * emulated card has one). It is the smallest example of a graphics driver
  * behind the display layer's interface (drivers/graphics/display.h), and it
  * makes mode switching testable in QEMU:
  *
  *   display_set_framebuffer()   all of the video memory instead of one mode's worth
- *   display_set_driver()        display_ops_t with set_mode only
+ *   display_set_driver()        display_ops_t with set_mode and power
  *   display_set_modes()         a list of common sizes that fit the video memory
  *
  * The card has no vertical blank interrupt and no pointer plane; the
@@ -42,6 +43,12 @@
 #define DISPI_ENABLED     0x01
 #define DISPI_LFB         0x40
 #define DISPI_MMIO_OFFSET 0x500
+/* The card is a VGA card as well: its ports 0x3C0 to 0x3DF, also in BAR 2 from 0x400 on, a byte each */
+#define VGA_MMIO_OFFSET   0x400
+#define VGA_ATTRIBUTE     0x3C0 /* index; bit 5 clear: the screen shows nothing */
+#define VGA_MISC_WRITE    0x3C2 /* bit 0: colour (the status register is at 0x3DA) */
+#define VGA_STATUS        0x3DA /* reading it makes the attribute port take an index next */
+#define VGA_SCREEN_ON     0x20
 #define DISPI_PORT_INDEX  0x1CE
 #define DISPI_PORT_DATA   0x1CF
 
@@ -49,6 +56,7 @@
 
 typedef struct {
     volatile uint16_t   *mmio; /* NULL: I/O ports */
+    volatile uint8_t    *vga;  /* the VGA ports in BAR 2; NULL: I/O ports */
     jelly_display_mode_t modes[JELLY_DISPLAY_MODE_MAX];
     uint32_t             mode_count;
     uint32_t             current;
@@ -100,7 +108,38 @@ static status_t bochs_set_mode(display_t *display, uint32_t mode, uint32_t *pitc
     return STATUS_SUCCESS;
 }
 
-static const display_ops_t bochs_ops = { .set_mode = bochs_set_mode };
+static void vga_write(bochs_t *b, uint16_t port, uint8_t value)
+{
+    if (b->vga)
+        b->vga[port - VGA_ATTRIBUTE] = value;
+    else
+        arch_io_write8(port, value);
+}
+
+/* Blank or not (as Linux's bochs driver does it): the mode and the video memory stay. */
+static void screen(bochs_t *b, bool on)
+{
+    vga_write(b, VGA_MISC_WRITE, 0x01);
+    if (b->vga)
+        (void)b->vga[VGA_STATUS - VGA_ATTRIBUTE];
+    else
+        (void)arch_io_read8(VGA_STATUS);
+    vga_write(b, VGA_ATTRIBUTE, on ? VGA_SCREEN_ON : 0);
+}
+
+static status_t bochs_power(display_t *display, bool on)
+{
+    screen(display->driver_data, on);
+    return STATUS_SUCCESS;
+}
+
+/* A panic's report is in the framebuffer, which is what the card shows: only a blank screen is in the way. */
+static void bochs_panic(display_t *display)
+{
+    screen(display->driver_data, true);
+}
+
+static const display_ops_t bochs_ops = { .set_mode = bochs_set_mode, .power = bochs_power, .panic = bochs_panic };
 
 static void add_mode(bochs_t *b, uint32_t width, uint32_t height, uint64_t memory)
 {
@@ -133,8 +172,10 @@ static status_t bochs_probe(device_t *device)
         return status;
     if (pci->bars[2].phys && !pci->bars[2].io && pci->bars[2].size >= DISPI_MMIO_OFFSET + 0x20) {
         volatile uint8_t *registers = (volatile uint8_t *)vmm_map_mmio(pci->bars[2].phys, PAGE_SIZE, VM_UNCACHED);
-        if (registers)
+        if (registers) {
             b->mmio = (volatile uint16_t *)(registers + DISPI_MMIO_OFFSET);
+            b->vga = registers + VGA_MMIO_OFFSET;
+        }
     }
     uint16_t id = dispi_read(b, DISPI_ID);
     if ((id & 0xFFF0) != 0xB0C0) {

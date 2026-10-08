@@ -354,6 +354,13 @@ status_t sys_display_set_mode(const uint64_t *a)
     return display_set_mode((uint32_t)a[0], (uint32_t)a[1]);
 }
 
+status_t sys_display_power(const uint64_t *a)
+{
+    if (!is_root())
+        return STATUS_ACCESS_DENIED;
+    return display_set_power((uint32_t)a[0], a[1] != 0);
+}
+
 status_t sys_display_watch(const uint64_t *a)
 {
     object_t *event;
