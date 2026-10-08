@@ -65,6 +65,11 @@
  *
  * QEMU has no such device: this driver can only be tested on real hardware.
  *
+ * The other half of the GPU, the engines that execute commands, is
+ * intel_gt.c: started from here once the screen is ours, with the registers
+ * and room in the graphics address space lent to it. Nothing draws with it
+ * yet.
+ *
  * Not yet: changing the display clock (CDCLK), several screens at once,
  * the embedded panel of a notebook (port A), any kind of acceleration.
  */
@@ -75,6 +80,7 @@
 #include "drivers/graphics/dp_aux.h"
 #include "drivers/graphics/edid.h"
 #include "drivers/graphics/hdmi.h"
+#include "drivers/graphics/intel_gt.h"
 
 #include "core/boot.h"
 #include "core/cmdline.h"
@@ -269,6 +275,8 @@ typedef struct {
     bool              packets;                 /* the port is driven as HDMI (with info frames), not as DVI */
     bool              sound;                   /* the transcoder sends sound */
     bool              off;                     /* the screen is switched off: the port sends nothing */
+    intel_gt_t       *gt;                      /* the engines that execute commands (intel_gt.c), NULL if not up */
+    uint32_t          gt_next;                 /* the next free entry of their part of the graphics address space */
     uint32_t          cdclk_khz;
     uint16_t          device_id;
 
@@ -2030,6 +2038,40 @@ static bool takeover(igpu_t *g, const timing_t *t)
     return true;
 }
 
+/* --- The engines -------------------------------------------------------------------------- */
+
+/* Memory for intel_gt.c, from the half of the graphics address space above the framebuffers. */
+static uint32_t gt_memory(void *context, uint32_t pages, uint64_t *phys)
+{
+    igpu_t *g = context;
+    uint32_t address = graphics_memory_alloc(g, (uint64_t)pages * PAGE_SIZE, g->gt_next, phys);
+
+    if (address)
+        g->gt_next += pages;
+    return address;
+}
+
+/*
+ * The GPU's engines (intel_gt.c): woken and tried out. What they could do is not used yet; that they run is in
+ * the log. "igpugt=off" leaves them alone.
+ */
+static void engines_start(igpu_t *g)
+{
+    intel_gt_host_t host = { .regs = g->regs, .context = g, .alloc = gt_memory };
+    char option[8];
+
+    if (cmdline_value("igpugt", option, sizeof(option)) && strcmp(option, "off") == 0) {
+        klog_info("igpu: the GPU's engines are left alone (igpugt=off)");
+        return;
+    }
+    g->gt_next = g->ggtt_entries / 2;
+    if (STATUS_IS_ERROR(intel_gt_start(&host, &g->gt)))
+        return;
+    klog_info("igpu: the GPU executes commands: render engine %s, blitter %s (not used for drawing yet)",
+              intel_gt_engine_works(g->gt, INTEL_ENGINE_RENDER) ? "yes" : "no",
+              intel_gt_engine_works(g->gt, INTEL_ENGINE_BLITTER) ? "yes" : "no");
+}
+
 /* "igpu=native" or "igpu=WIDTHxHEIGHT[@HZ]": the mode to switch to, NULL if there is none. */
 static const timing_t *choose_mode(igpu_t *g, const char *option)
 {
@@ -2148,7 +2190,8 @@ static status_t igpu_probe(device_t *device)
     if (!wanted)
         return STATUS_SUCCESS;
     /* Also if the screen already shows this mode: the driver's own framebuffers are what the extras build on. */
-    takeover(g, wanted);
+    if (takeover(g, wanted))
+        engines_start(g);
 
     /*
      * "igpulink=162000" (or 270000): the link slower than the firmware trained it, if the mode on the screen fits.

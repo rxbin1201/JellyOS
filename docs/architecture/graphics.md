@@ -524,6 +524,35 @@ panel of a notebook, lane reversal and other board wiring that only the
 firmware's video BIOS table knows, more than two channels of sound,
 acceleration.
 
+### The engines (the GT)
+
+A GPU of this kind is two machines. The display engine, above, puts a
+picture on a monitor. The other one executes commands, and it is what
+could draw the picture: Intel calls it the GT.
+[`drivers/graphics/intel_gt.c`](../../drivers/graphics/intel_gt.c) is its
+ground floor (after i915's `gt/` directory): it is woken, two of its
+engines are brought up, and commands can be given to them and waited for.
+**Nothing draws with it yet.** Hardware acceleration is the last step of
+the README's order for graphics and a priority of Phase 14; this is what
+it will stand on. The display driver starts it once the screen is its own
+and lends it the registers and room in the graphics address space;
+`igpugt=off` leaves it out.
+
+| | |
+| --- | --- |
+| Awake | The GT sleeps whenever nobody uses it, and its registers are then not there. A driver holds it awake by setting a bit per power domain ("forcewake") and waiting for the acknowledgement. Set once and kept: no power saving of the GT yet |
+| Engines | Each executes one kind of commands from a ring buffer: the **render** engine (3D; the only one that can blend) and the **blitter** (copies and fills rectangles). Each is reset first, since the firmware never used it |
+| Memory | The GPU reads everything through translation tables. The global one (GGTT) is the display driver's: the framebuffers are in its second quarter, the engines' status pages, contexts and rings in its upper half. A context also has an address space of its own (PPGTT), four levels of tables like the CPU's; for now one in which every address leads to the same scratch page |
+| Contexts | An engine runs a *context*: its ring and its complete register state, in an image that the hardware loads and saves (2 pages for the blitter, 22 for the render engine). The image begins with register writes at fixed places. The first load is told to leave the engine's state as it is; the save that follows fills the image with the hardware's own values, which later loads restore |
+| Submission | A context is handed to an engine by writing its descriptor to the engine's submit port ("execlists"). The engine runs it until its ring is empty, switches it out and says so in a small buffer of status events. Only then is the image the driver's again: the next commands go into the ring, the new tail into the image, the descriptor to the port |
+| Done | Every submission ends with a command that writes a sequence number into the engine's status page; `intel_gt_run()` returns when the number is there and the context is switched out. By polling for now; the engine's interrupt is a next step |
+
+At its start each engine is tried out: about 700 submissions, among them a
+command that stores a value, and once around the whole ring. The result
+is in the log (`dmesg igpu`); an engine that does not get through is
+reported with its registers and not used, and the display goes on as
+before.
+
 
 ## AMD graphics driver (Phase 12)
 

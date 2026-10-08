@@ -99,6 +99,7 @@ Set in `cmdline=` of an entry:
 | `igpu=native` / `igpu=WIDTHxHEIGHT[@HZ]` | Intel graphics: switch to the monitor's own or the given mode ([graphics.md](graphics.md)). The default entry has `igpu=native`; the entry `FirmwareGrafik` does not |
 | `igpuhdmi=off` | Intel graphics: drive an HDMI monitor as DVI (pixels only, no info frames), as the firmware does |
 | `igpusound=off` | Intel graphics: no sound in the signal for the monitor |
+| `igpugt=off` | Intel graphics: leave the GPU's engines (the part that executes commands) alone; only the display is driven |
 | `igpulink=162000` / `igpulink=270000` | Intel graphics, DisplayPort: start with a slower link than the firmware trained (for testing that the driver brings up a faster one when a mode needs it) |
 | `amdgpu=native` / `amdgpu=on` | AMD graphics of Ryzen 4000/5000 G: the kernel's driver, with or without a switch to the monitor's best mode at the start ([graphics.md](graphics.md)). Further words after a comma leave parts out or add a trace (`amdgpu=native,trace`) |
 | `fbconsole=0` | No kernel console on the screen |
