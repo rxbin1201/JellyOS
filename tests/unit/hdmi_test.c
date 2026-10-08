@@ -197,6 +197,24 @@ int main(void)
     scdc.there = false;
     CHECK(!hdmi_scdc_configure(&ddc, true) && !hdmi_scdc_scrambling_seen(&ddc) && hdmi_scdc_locked(&ddc) == -1);
 
+    /* --- The description of the monitor's sound for an audio codec ------------------------ */
+
+    uint8_t eld[HDMI_ELD_SIZE];
+    memset(edid, 0, sizeof(edid));
+    edid[8] = 0x10;
+    edid[9] = 0xAC; /* "DEL" */
+    edid[10] = 0x34;
+    edid[11] = 0x12;
+    hdmi_eld(edid, false, eld);
+    CHECK(eld[0] == 0x10 && HDMI_ELD_SIZE % 4 == 0 && 4 + 4 * eld[2] == HDMI_ELD_SIZE);
+    CHECK((eld[4] >> 5) == 3 && (eld[4] & 0x1F) == 0);       /* no name: the sound's kinds follow the header */
+    CHECK((eld[5] >> 4) == 1 && ((eld[HDMI_ELD_KIND] >> 2) & 3) == 0); /* one kind of sound, HDMI */
+    CHECK(eld[7] == 0x01);
+    CHECK(eld[16] == 0x10 && eld[17] == 0xAC && eld[18] == 0x34 && eld[19] == 0x12);
+    CHECK(eld[20] == 0x09 && eld[21] == 0x07 && eld[22] == 0x01 && eld[23] == 0);
+    hdmi_eld(edid, true, eld);
+    CHECK(((eld[HDMI_ELD_KIND] >> 2) & 3) == 1 && (eld[5] >> 4) == 1);
+
     printf("unit: hdmi: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

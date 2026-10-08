@@ -445,9 +445,28 @@ slower than the firmware trained it, right after the driver took the
 screen, if the mode on the screen fits. It is for trying the above on a
 machine whose firmware always trains the fastest link.
 
+**Sound.** A monitor whose EDID says it plays sound (basic audio) gets it
+in the signal, on HDMI (not on a port driven as DVI) and on DisplayPort.
+The samples come from the HD Audio codec inside the GPU (see
+[audio.md](audio.md#the-sound-of-a-monitor)); the display engine has the
+other end of it, a set of registers per transcoder (after i915's
+`hsw_audio_codec_enable()`):
+
+| | |
+| --- | --- |
+| Sound on | A bit per transcoder. With it the codec's pin for the port reports "something plugged in", which is how the audio driver finds the pin to play to |
+| The description | What the monitor is, in the form HD Audio codecs want (*ELD*): written word by word into the codec's memory for it, then marked valid. [`hdmi.c`](../../drivers/graphics/hdmi.c) makes it for every driver: manufacturer and product from the EDID, HDMI or DisplayPort, two channels of PCM at 32, 44.1 and 48 kHz |
+| The clock | HDMI: the hardware picks N by the pixel clock and measures CTS; only at 297 MHz the N the standard wants is given. DisplayPort: M and N for 48 kHz are given, 512 * 48000 to the link rate |
+
+It is switched on whenever the pipe starts and off before it stops. A
+firmware that drives an HDMI monitor as DVI at the very mode that is
+wanted would leave nothing to switch: then the port is started again once,
+as HDMI. `igpusound=off` leaves the sound out.
+
 Not yet: changing the display clock, several screens at once, the embedded
 panel of a notebook, lane reversal and other board wiring that only the
-firmware's video BIOS table knows, acceleration.
+firmware's video BIOS table knows, more than two channels of sound,
+acceleration.
 
 
 ## AMD graphics driver (Phase 12)

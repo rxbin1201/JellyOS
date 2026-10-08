@@ -23,6 +23,10 @@
  *         monitor that is an HDMI one gets HDMI with the AVI info frame
  *         (hdmi.c), others DVI
  *     If the pipe does not come up, the firmware's mode is restored.
+ *   - a monitor that plays sound gets it in the signal: the transcoder is
+ *     told to send what the HD Audio codec of the GPU delivers, and that
+ *     codec is told what the monitor is (drivers/audio/intel_hda.c does the
+ *     codec's side)
  *
  * Without the option nothing is changed: the driver only reports (dmesg igpu).
  *
@@ -158,6 +162,19 @@
 #define GMBUS3                0xC510C
 #define GMBUS5                0xC5120
 #define SOUTH_DSPCLK_GATE_D   0xC2020
+/* Sound for the monitor: the display side of the GPU's HD Audio codec, per transcoder */
+#define AUD_CONFIG(t)         (0x65000 + 0x100u * (uint32_t)(t)) /* the numbers of the sound's clock the transcoder sends */
+#define AUD_M_CTS(t)          (0x65028 + 0x100u * (uint32_t)(t)) /* the other number: bits 19:0, 20 "given here", 21 "it is M" */
+#define AUD_ELD_DATA(t)       (0x65050 + 0x100u * (uint32_t)(t)) /* the monitor's description for the codec, word by word */
+#define AUD_ELD_CTL(t)        (0x650B4 + 0x100u * (uint32_t)(t)) /* bits 9:5: where the next word goes */
+#define AUD_PIN_ELD           0x650C0 /* four bits per transcoder: bit 0 description valid, bit 2 sound on */
+#define AUD_N_DISPLAYPORT     (1u << 29) /* AUD_CONFIG: the number is DisplayPort's N (else HDMI's) */
+#define AUD_N_GIVEN           (1u << 28) /* the number is the one here (else the hardware's own) */
+#define AUD_N_MASK            (0xFFu << 20 | 0xFFFu << 4)
+#define AUD_N(n)              ((((uint32_t)(n) >> 12) & 0xFF) << 20 | ((uint32_t)(n) & 0xFFF) << 4)
+#define AUD_HDMI_CLOCK_MASK   (0xFu << 16) /* which of the standard pixel clocks */
+#define AUD_ELD_VALID(t)      (1u << ((uint32_t)(t) * 4))
+#define AUD_OUTPUT(t)         (4u << ((uint32_t)(t) * 4))
 
 #define ENABLE                (1u << 31)
 #define PIPE_RUNNING          (1u << 30)
@@ -247,6 +264,7 @@ typedef struct {
     uint32_t          ddi_base;                /* TRANS_DDI_FUNC_CTL of the port in use, without sync polarity */
     hdmi_sink_t       sink;                    /* what the monitor on an HDMI port says about its input */
     bool              packets;                 /* the port is driven as HDMI (with info frames), not as DVI */
+    bool              sound;                   /* the transcoder sends sound */
     uint32_t          cdclk_khz;
     uint16_t          device_id;
 
@@ -863,11 +881,84 @@ static void hdmi_packets(igpu_t *g, const hw_mode_t *m)
     klog_debug("igpu: HDMI info frame: %ux%u, video code %u", t.ha, t.va, frame[7]);
 }
 
+/*
+ * Sound for the monitor (after i915's hsw_audio_codec_enable()). The GPU has an HD Audio codec whose samples
+ * the transcoders can send along with the picture; the HD Audio driver plays into it like into any codec. This
+ * side says three things:
+ *
+ *   - the transcoder is to send sound: the codec's pin for the port then reports "something plugged in"
+ *   - what the monitor is, as the codec's description of it (ELD, hdmi_eld()): the audio driver reads there
+ *     whether it plays to an HDMI or a DisplayPort monitor
+ *   - the numbers of the sound's clock. HDMI: the hardware picks N by the pixel clock and measures CTS; at 297
+ *     MHz the N the standard wants is given. DisplayPort: M and N for 48 kHz, 512 * 48000 : link rate
+ *
+ * Only for a monitor whose EDID says it plays sound, and not on a port driven as DVI. "igpusound=off" leaves
+ * it out. The pipe runs.
+ */
+static void sound_on(igpu_t *g, const hw_mode_t *m)
+{
+    static const uint32_t clocks[] = { 25175, 25200, 27000, 27027, 54000, 54054, 74176, 74250, 148352, 148500 };
+    uint32_t t = (uint32_t)g->pipe, khz = g->hdmi ? hdmi_pll_khz(m->cfgcr1, m->cfgcr2) : 0, n = 0;
+    uint32_t config = rd(g, AUD_CONFIG(t)) & ~(AUD_N_DISPLAYPORT | AUD_N_GIVEN | AUD_HDMI_CLOCK_MASK);
+    uint32_t m_cts = rd(g, AUD_M_CTS(t)) & ~(0xFFFFFu | 3u << 20);
+    uint8_t eld[HDMI_ELD_SIZE];
+    hdmi_sink_t sink;
+    char option[8];
+
+    hdmi_sink_read(g->edid, g->edid_blocks, &sink);
+    if (!sink.basic_audio || (g->hdmi && DDI_MODE(m->ddi_func) != 0) ||
+        (cmdline_value("igpusound", option, sizeof(option)) && strcmp(option, "off") == 0))
+        return;
+
+    /* Sound on, the description not valid while it is written (from its first word on). */
+    wr(g, AUD_PIN_ELD, (rd(g, AUD_PIN_ELD) | AUD_OUTPUT(t)) & ~AUD_ELD_VALID(t));
+    wr(g, AUD_ELD_CTL(t), rd(g, AUD_ELD_CTL(t)) & ~(0x1Fu << 5));
+    hdmi_eld(g->edid, g->dp, eld);
+    for (uint32_t i = 0; i < HDMI_ELD_SIZE; i += 4)
+        wr(g, AUD_ELD_DATA(t), eld[i] | (uint32_t)eld[i + 1] << 8 | (uint32_t)eld[i + 2] << 16 | (uint32_t)eld[i + 3] << 24);
+    wr(g, AUD_PIN_ELD, rd(g, AUD_PIN_ELD) | AUD_ELD_VALID(t));
+
+    if (g->dp) {
+        n = g->link_khz / 48; /* 3375, 5625 or 11250 */
+        config = (config & ~AUD_N_MASK) | AUD_N_DISPLAYPORT | AUD_N_GIVEN | AUD_N(n);
+        m_cts |= 512 | 3u << 20;
+    } else {
+        uint32_t index = 1; /* a pixel clock that is not in the list: as 25.2 MHz, which is what i915 does */
+        for (uint32_t i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
+            if (khz + 1 >= clocks[i] && khz <= clocks[i] + 1)
+                index = i;
+        }
+        config |= index << 16;
+        n = khz + 2 >= 297000 && khz <= 297002 ? 5120 : khz + 2 >= 296703 && khz <= 296705 ? 5824 : 0;
+        if (n)
+            config = (config & ~AUD_N_MASK) | AUD_N_GIVEN | AUD_N(n);
+    }
+    wr(g, AUD_CONFIG(t), config);
+    wr(g, AUD_M_CTS(t), m_cts);
+    g->sound = true;
+    klog_info("igpu: sound for the monitor (%s): pins 0x%x, clock numbers 0x%x 0x%x", g->dp ? "DisplayPort" : "HDMI",
+              rd(g, AUD_PIN_ELD), rd(g, AUD_CONFIG(t)), rd(g, AUD_M_CTS(t)));
+}
+
+/* Before the pipe stops (after i915's hsw_audio_codec_disable()): the codec's pin reports "nothing there". */
+static void sound_off(igpu_t *g)
+{
+    uint32_t t = (uint32_t)g->pipe;
+
+    if (!g->sound)
+        return;
+    wr(g, AUD_CONFIG(t), (rd(g, AUD_CONFIG(t)) & ~(AUD_N_DISPLAYPORT | AUD_N_MASK)) | AUD_N_GIVEN |
+                             (g->dp ? AUD_N_DISPLAYPORT : 0));
+    wr(g, AUD_PIN_ELD, rd(g, AUD_PIN_ELD) & ~(AUD_ELD_VALID(t) | AUD_OUTPUT(t)));
+    g->sound = false;
+}
+
 /* Planes, pipe and transcoder off. DisplayPort: the link stays up and sends idle patterns. */
 static void pipe_off(igpu_t *g)
 {
     int p = g->pipe;
 
+    sound_off(g);
     wr(g, PLANE_CTL(p), g->plane_ctl & ~ENABLE);
     wr(g, PLANE_SURF(p), rd(g, PLANE_SURF(p)));
     wr(g, CUR_CTL(p), 0);
@@ -926,6 +1017,8 @@ static bool pipe_on(igpu_t *g, const hw_mode_t *m, bool boot_mode)
         wr(g, DDI_BUF_CTL(g->port), g->buf_ctl | ENABLE);
         sleep_ms(1);
     }
+    if (ok)
+        sound_on(g, m);
     return ok;
 }
 
@@ -1731,6 +1824,11 @@ static void hotplug_thread(void *argument)
                         hdmi_sink_update(g);
                     modes_rebuild(g, false);
                     new_monitor = true;
+                    if (g->hdmi && g->lit) {
+                        /* (DisplayPort: with the pipe, below.) Another monitor may play sound or not. */
+                        sound_off(g);
+                        sound_on(g, &g->active);
+                    }
                 }
                 if (g->dp) {
                     link_restore(g);
@@ -1778,6 +1876,10 @@ static bool takeover(igpu_t *g, const timing_t *t)
     uint32_t stride = stride_of(t), base = g->ggtt_entries / 4;
     bool unchanged = same_timing(t, &g->current);
     uint64_t needed = 0, roomy = align_up(3840ull * 4 * 2160, PAGE_SIZE);
+
+    /* A firmware that drives an HDMI monitor as DVI: the port is started again, as HDMI (info frames, sound). */
+    if (unchanged && g->hdmi && g->packets && DDI_MODE(g->boot.ddi_func) != 0)
+        unchanged = false;
     pmm_stats_t memory;
 
     if ((g->plane_ctl & (7u << 10)) || ((g->plane_ctl >> 24) & 0xF) != 4) {
@@ -1827,6 +1929,7 @@ static bool takeover(igpu_t *g, const timing_t *t)
         wait_frame(g);
         g->active = mode;
         g->lit = true;
+        sound_on(g, &mode);
     } else if (!switch_timing(g, t, &g->boot, true)) {
         pmm_free_pages(g->framebuffers[0], pages);
         g->surfaces[0] = 0;

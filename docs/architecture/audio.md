@@ -46,7 +46,8 @@ handle stops both directions.
 
 - **Controller:** reset, CORB/RIRB rings for codec commands (responses are
   polled; each one is acknowledged in RIRBSTS), one output and one input
-  stream descriptor, MSI interrupt.
+  stream descriptor for the sound card and one more output stream for the
+  sound of a monitor (see below), MSI interrupt.
 - **Codecs:** the driver reads every codec's widget tree and searches paths
   along the connection lists (through mixers and selectors):
   output pin (line out, speaker, headphones) → DAC, and ADC → input pin
@@ -66,26 +67,28 @@ detection, other formats, suspend.
 
 A monitor on HDMI or DisplayPort gets its sound in the picture's signal.
 For HD Audio that is a codec like any other, a digital one that is part of
-the graphics chip, on a controller of its own or next to the analog codec:
-a converter and a pin for each place the graphics side can send sound to.
-Two drivers have to do their part:
+the graphics chip: converters, and a pin for each place the graphics side
+can send sound to. Two drivers have to do their part:
 
-- **The HD Audio driver** takes the first pin of such a codec that is wired
-  to a connector, with its converter, and gives it the playback stream (two
-  channels of 16 bits at 48 kHz, which every such codec and every monitor
-  with loudspeakers takes). The controller becomes a sound device of its
-  own, "Monitor sound", marked `JELLY_AUDIO_MONITOR`. The codec is told
-  again at every start of a playback, because the graphics side may have
-  switched the sound on in between.
-- **The graphics driver** tells its end of the codec what the monitor takes,
-  makes the sound's clock from the pixel clock, and lets its encoder put
-  the samples between the pixels (see
-  [graphics.md](graphics.md#amd-graphics-driver-phase-12)).
+- **The HD Audio driver** gives one converter of such a codec a playback
+  stream of its own (two channels of 16 bits at 48 kHz, which every such
+  codec and every monitor with loudspeakers takes) and turns the pins to
+  it. The codec becomes a sound device of its own, "Monitor sound", marked
+  `JELLY_AUDIO_MONITOR`: the only device of its controller, or the second
+  one next to the sound card's codec. The codec is told again at every
+  start of a playback, because the graphics side may have switched the
+  sound on in between, or the monitor may be on another connector now.
+- **The graphics driver** tells its end of the codec what the monitor is,
+  sees to the sound's clock, and lets the samples into the signal (see
+  [graphics.md](graphics.md)).
 
-Today for the codec of AMD graphics (1002:aa01), whose graphics side the
-AMD driver does. What is particular to it, as in Linux's `patch_hdmi.c`:
+Two codecs so far, each as Linux's `patch_hdmi.c` treats it:
 
-- Its pin has eight channel slots of the signal, and each is off until it
+**AMD graphics (1002:aa01).** The GPU has an HD Audio controller of its
+own for it. Each pin has its own converter; the first pin that is wired to
+a connector is taken, which is the GPU's audio endpoint 0.
+
+- The pin has eight channel slots of the signal, and each is off until it
   is given a channel of the stream (vendor verbs 0x777..., 0x785...): left
   and right go to slots 0 and 1.
 - AMD's HDMI controllers are listed as reading their buffers past the CPU's
@@ -93,9 +96,32 @@ AMD driver does. What is particular to it, as in Linux's `patch_hdmi.c`:
   out of the caches first (`clflush`), and the stream gets the traffic
   priority bit. Linux maps the buffers write-combining instead.
 
-Codecs the driver finds no way through are written to the log with their
-widgets (`dmesg hda`): Intel's and NVIDIA's digital codecs, whose graphics
-side is not done yet.
+**Intel graphics of generation 9 (8086:2809, 8086:280b).** The codec sits
+on the sound card's controller, as a second codec.
+
+- Out of reset it shows one pin and one converter. A verb to its vendor
+  widget (node 8, verb 0x781) brings out all three pins, for the GPU's
+  ports B, C and D, and three converters; the widget tree is read again
+  afterwards.
+- Every pin can play every converter, but a pin with no monitor on its
+  port gives zeros as its connection list. So the lists are not asked:
+  every pin has the three converters, in their order. The driver uses the
+  first converter.
+  At the start of a playback it asks each pin whether something is plugged
+  in, which the pin says while the graphics driver has sound switched on
+  for a monitor on that port: those pins are turned to the converter, the
+  others to another one.
+- The codec itself sends the **audio info frame** to the monitor, from
+  bytes written with the standard's verbs (0x730 to 0x732); the stream's
+  channels are put into the signal's slots with verb 0x734. The info frame
+  has another header on DisplayPort than on HDMI. Which of the two the
+  monitor is on, the driver reads in the description of the monitor that
+  the graphics driver left with the pin (ELD, verb 0xF2F): the two drivers
+  need not know each other.
+
+Other digital codecs (NVIDIA's, Intel's of other generations) are written
+to the log with their widgets (`dmesg hda`); their graphics side is not
+done.
 
 ## Audio server and mixer
 

@@ -14,12 +14,13 @@
  * to the audio server's mixer.
  *
  * The sound of a monitor on HDMI or DisplayPort is a codec, too: a digital
- * one, part of the graphics chip, with a converter and a pin for each
- * place the graphics side can send sound to. The driver takes the first
- * such pair: the stream goes to the converter, and the graphics driver
- * puts what arrives there into the picture's signal (for AMD graphics:
- * its audio endpoint 0, see drivers/graphics/amd_gpu.c). A controller with
- * such a codec becomes an audio device of its own, "Monitor sound".
+ * one, part of the graphics chip, with converters and a pin for each place
+ * the graphics side can send sound to. A stream of its own goes to one
+ * converter, and the graphics driver puts what arrives there into the
+ * picture's signal (drivers/graphics/amd_gpu.c, intel_gpu.c). Such a codec
+ * becomes an audio device of its own, "Monitor sound": the only one of
+ * its controller (AMD: the GPU has an HD Audio controller for it) or the
+ * second one, next to the sound card's codec (Intel).
  *
  * The format is fixed: 48 kHz, 16 bits, stereo. Each stream buffer has
  * FRAGMENTS periods of 10 ms; playback keeps the next period filled ahead
@@ -27,7 +28,8 @@
  *
  * Tested with QEMU's codecs (hda-output, hda-micro, hda-duplex). Not yet:
  * jack detection, other sample formats, suspend; of the digital codecs
- * only AMD's (1002:aa01).
+ * only AMD's (1002:aa01) and Intel's of generation 9 graphics (8086:2809,
+ * 8086:280b).
  */
 
 #include "audio/device/audio_device.h"
@@ -105,6 +107,23 @@
 #define ATI_SET_SLOT_ODD     0x785 /* slot 1 (0x786: 3, ...) when every channel is mapped by itself */
 #define ATI_SLOT_ON          0x01
 #define ATI_SET_CHANNEL_MODE 0x789 /* 1: every channel is mapped by itself */
+/* The codec of Intel graphics (vendor 8086): a vendor widget that switches the whole codec */
+#define INTEL_VENDOR_WIDGET  0x08
+#define INTEL_GET_VENDOR     0xF81
+#define INTEL_SET_VENDOR     0x781
+#define INTEL_ALL_PINS       0x01  /* all three pins and converters, not only the first */
+#define INTEL_DP12           0x02  /* DisplayPort 1.2 */
+/* Digital pins: the audio info frame the codec sends to the monitor, and where the stream's channels go */
+#define VERB_GET_POWER       0xF05
+#define VERB_GET_DIGITAL     0xF0D
+#define VERB_SET_DIGITAL3    0x73E /* a digital converter: bits 3:0 the coding (0: as the stream says) */
+#define VERB_SET_DIP_INDEX   0x730 /* packet << 5 | byte */
+#define VERB_SET_DIP_DATA    0x731
+#define VERB_SET_DIP_SEND    0x732 /* 0xC0: in every frame; 0: not at all */
+#define VERB_SET_CHANNEL_SLOT 0x734 /* stream channel << 4 | slot of the signal; channel 0xF: none */
+#define PIN_SENSE_THERE      (1u << 31)
+#define PIN_SENSE_ELD        (1u << 30)
+#define ELD_KIND             5     /* the description's byte that says in bits 3:2: 0 HDMI, 1 DisplayPort */
 #define VERB_GET_PIN_SENSE   0xF09 /* bit 31: something is plugged in; digital pins, bit 30: its description is valid */
 #define VERB_GET_ELD_SIZE    0xF2E /* with payload 8: bytes of the monitor's description (ELD) the pin holds */
 #define VERB_GET_ELD_BYTE    0xF2F /* payload: which byte; bit 31 of the answer: valid */
@@ -154,6 +173,10 @@
 
 #define TAG_PLAYBACK 1
 #define TAG_CAPTURE  2
+#define TAG_MONITOR  3 /* the playback stream of a monitor's sound */
+
+#define MAX_SINK_PINS 4
+#define NO_SELECT     0xFF
 
 #define MAX_WIDGETS     96
 #define MAX_CONNECTIONS 16
@@ -191,7 +214,20 @@ typedef struct {
     uint64_t          handled;  /* fragments filled (playback) or delivered (capture) */
 } hda_stream_t;
 
+typedef struct hda hda_t;
+
+/* One sound device of a controller: its streams, and what the audio layer sees of it. */
 typedef struct {
+    hda_t         *hda;
+    uint32_t       flags;   /* JELLY_AUDIO_PLAYBACK, _CAPTURE: what its codecs do */
+    hda_stream_t   out, in;
+    audio_device_t audio;
+} hda_card_t;
+
+#define CARD_ANALOG  0 /* the sound card: jacks, loudspeakers, microphones */
+#define CARD_MONITOR 1 /* the sound of a monitor */
+
+struct hda {
     device_t         *device;
     volatile uint8_t *regs;
     uint32_t          irq;
@@ -199,16 +235,19 @@ typedef struct {
     mutex_t           lock;     /* verbs */
     dma_buffer_t      rings;    /* CORB at 0, RIRB at half a page */
     uint32_t          corb_size, rirb_size, rirb_read;
-    hda_stream_t      out, in;
-    audio_device_t    audio;
-    bool              monitor;  /* the output is a digital codec: the sound of a monitor */
+    hda_card_t        cards[2];
+    /* The codec of the monitor's sound: one converter, and the pins it can feed */
     struct {
-        uint8_t  address, pin, converter; /* of the codec, and the pair of widgets in use */
+        uint8_t  address, converter;
+        uint8_t  pins[MAX_SINK_PINS];
+        uint8_t  select[MAX_SINK_PINS]; /* the converter's place in the pin's connection list (NO_SELECT: no choice) */
+        uint8_t  idle[MAX_SINK_PINS];   /* another converter's place: for a pin that is not to play */
+        uint32_t pin_count;
         uint32_t revision;
-        bool     amd, pin_amp, pin_select, power;
+        bool     amd, intel, pin_amp, power;
     } sink;
     bool              no_snoop; /* the controller reads its buffers past the CPU's caches (AMD's HDMI controllers) */
-} hda_t;
+};
 
 /* --- Registers ------------------------------------------------------------------- */
 
@@ -540,88 +579,207 @@ static uint32_t setup_codec(hda_t *hda, hda_codec_t *codec, bool want_playback, 
     return flags;
 }
 
+/* AMD's codec, as Linux's patch_hdmi.c: nothing mixed down, channels mapped one by one, the default ramp. */
+static void amd_pin(hda_t *hda, const hda_codec_t *codec, uint8_t pin)
+{
+    bool single = (hda->sink.revision & 0xFF00) >= 0x0300;
+
+    verb(hda, codec, pin, ATI_SET_DOWNMIX, 0);
+    if (single) {
+        verb(hda, codec, pin, ATI_SET_CHANNEL_MODE, 1);
+        verb(hda, codec, hda->sink.converter, ATI_SET_RAMP_RATE, 180);
+    }
+    verb(hda, codec, pin, ATI_SET_ALLOCATION, 0);
+    /*
+     * The eight channel slots of the signal: each one is off until it is given a channel of the stream.
+     * Front left and right are slots 0 and 1; the other six stay silent. (Older codecs map pairs.)
+     */
+    for (uint32_t slot = 0; slot < 8; slot++) {
+        uint32_t setup = slot < CHANNELS ? slot << 4 | ATI_SLOT_ON : 0;
+        if (!(slot & 1))
+            verb(hda, codec, pin, ATI_SET_SLOT_PAIR + slot / 2, setup);
+        else if (single)
+            verb(hda, codec, pin, ATI_SET_SLOT_ODD + slot / 2, setup);
+    }
+}
+
 /*
- * Tell the monitor's codec (again) what it is to do: the pin on, the converter fed by the playback stream
- * with two channels of 16 bits at 48 kHz. Thread context.
+ * A pin by the standard's own verbs (Intel's codec; Linux's patch_hdmi.c, hdmi_setup_audio_infoframe()): the
+ * stream's two channels into the signal's first two slots, and the audio info frame, which the codec sends to
+ * the monitor: two channels, front left and right, everything else "as the stream says". It has another
+ * header for DisplayPort than for HDMI, and which of the two the monitor is on stands in the description of
+ * it that the graphics driver left with the pin (ELD).
+ */
+static void standard_pin(hda_t *hda, const hda_codec_t *codec, uint8_t pin, uint32_t sense)
+{
+    bool dp = (sense & PIN_SENSE_ELD) && ((verb(hda, codec, pin, VERB_GET_ELD_BYTE, ELD_KIND) >> 2) & 3) == 1;
+    uint8_t hdmi_frame[9] = { 0x84, 0x01, 0x0A, 0, CHANNELS - 1 }, dp_frame[9] = { 0x84, 0x1B, 0x11 << 2, CHANNELS - 1 };
+    const uint8_t *frame = dp ? dp_frame : hdmi_frame;
+
+    uint8_t sum = 0;
+
+    for (uint32_t i = 0; i < sizeof(hdmi_frame); i++)
+        sum = (uint8_t)(sum + hdmi_frame[i]);
+    hdmi_frame[3] = (uint8_t)-sum; /* all its bytes add up to 0 */
+    for (uint32_t slot = 0; slot < 8; slot++)
+        verb(hda, codec, pin, VERB_SET_CHANNEL_SLOT, (slot < CHANNELS ? slot : 0xFu) << 4 | slot);
+    verb(hda, codec, pin, VERB_SET_DIP_INDEX, 0);
+    verb(hda, codec, pin, VERB_SET_DIP_SEND, 0x00);
+    verb(hda, codec, pin, VERB_SET_DIP_INDEX, 0);
+    for (uint32_t i = 0; i < sizeof(hdmi_frame); i++)
+        verb(hda, codec, pin, VERB_SET_DIP_DATA, frame[i]);
+    verb(hda, codec, pin, VERB_SET_DIP_INDEX, 0);
+    verb(hda, codec, pin, VERB_SET_DIP_SEND, 0xC0);
+    klog_debug("hda: monitor sound: pin %u plays to %s monitor (sense 0x%x)", pin, dp ? "a DisplayPort" : "an HDMI", sense);
+}
+
+/*
+ * Tell the monitor's codec (again) what it is to do: the pins on, the converter fed by the playback stream
+ * with two channels of 16 bits at 48 kHz. At every start of a playback: the graphics side may have switched
+ * the sound on since, or the monitor may be on another connector now. Thread context.
+ *
+ * Intel's codec has a pin for each port of the GPU, all able to play the one converter. A pin reports
+ * "something plugged in" while the graphics driver has sound switched on for a monitor there: those pins
+ * play, the others are turned to another converter.
  */
 static void monitor_program(hda_t *hda)
 {
     hda_codec_t codec = { .address = hda->sink.address }; /* (for verb(): only the address is looked at) */
-    uint8_t pin = hda->sink.pin, converter = hda->sink.converter;
+    uint8_t converter = hda->sink.converter;
+    uint32_t playing = 0;
 
-    if (hda->sink.power) {
+    if (hda->sink.power)
         verb(hda, &codec, converter, VERB_SET_POWER, 0);
-        verb(hda, &codec, pin, VERB_SET_POWER, 0);
-    }
-    if (hda->sink.amd) {
-        /* As Linux's patch_hdmi.c: nothing mixed down, channels mapped one by one, the default ramp. */
-        bool single = (hda->sink.revision & 0xFF00) >= 0x0300;
+    for (uint32_t i = 0; i < hda->sink.pin_count; i++) {
+        uint8_t pin = hda->sink.pins[i];
+        uint32_t sense = PIN_SENSE_THERE;
 
-        verb(hda, &codec, pin, ATI_SET_DOWNMIX, 0);
-        if (single) {
-            verb(hda, &codec, pin, ATI_SET_CHANNEL_MODE, 1);
-            verb(hda, &codec, converter, ATI_SET_RAMP_RATE, 180);
+        if (hda->sink.power && (verb(hda, &codec, pin, VERB_GET_POWER, 0) & 0xF0)) {
+            verb(hda, &codec, pin, VERB_SET_POWER, 0);
+            thread_sleep(40000000); /* (as Linux waits for Intel's pins) */
         }
-        verb(hda, &codec, pin, ATI_SET_ALLOCATION, 0);
-        /*
-         * The eight channel slots of the signal: each one is off until it is given a channel of the stream.
-         * Front left and right are slots 0 and 1; the other six stay silent. (Older codecs map pairs.)
-         */
-        for (uint32_t slot = 0; slot < 8; slot++) {
-            uint32_t setup = slot < CHANNELS ? slot << 4 | ATI_SLOT_ON : 0;
-            if (!(slot & 1))
-                verb(hda, &codec, pin, ATI_SET_SLOT_PAIR + slot / 2, setup);
-            else if (single)
-                verb(hda, &codec, pin, ATI_SET_SLOT_ODD + slot / 2, setup);
+        if (hda->sink.intel) {
+            sense = verb(hda, &codec, pin, VERB_GET_PIN_SENSE, 0);
+            if (!(sense & PIN_SENSE_THERE)) {
+                if (hda->sink.idle[i] != NO_SELECT)
+                    verb(hda, &codec, pin, VERB_SET_SELECT, hda->sink.idle[i]);
+                continue;
+            }
         }
+        if (hda->sink.select[i] != NO_SELECT)
+            verb(hda, &codec, pin, VERB_SET_SELECT, hda->sink.select[i]);
+        if (hda->sink.amd)
+            amd_pin(hda, &codec, pin);
+        else
+            standard_pin(hda, &codec, pin, sense);
+        if (hda->sink.pin_amp)
+            verb4(hda, &codec, pin, VERB4_SET_AMP, AMP_OUTPUT | AMP_LEFT | AMP_RIGHT);
+        verb(hda, &codec, pin, VERB_SET_PIN_CONTROL, 0x40); /* out */
+        playing++;
     }
-    if (hda->sink.pin_select)
-        verb(hda, &codec, pin, VERB_SET_SELECT, 0);
-    if (hda->sink.pin_amp)
-        verb4(hda, &codec, pin, VERB4_SET_AMP, AMP_OUTPUT | AMP_LEFT | AMP_RIGHT);
-    verb(hda, &codec, pin, VERB_SET_PIN_CONTROL, 0x40); /* out */
+    if (!playing)
+        klog_debug("hda: monitor sound: no pin of the codec has a monitor that takes sound (is the graphics driver on?)");
     verb(hda, &codec, converter, VERB_SET_CHANNELS, CHANNELS - 1);
+    if (hda->sink.intel) /* plain PCM, whatever was there */
+        verb(hda, &codec, converter, VERB_SET_DIGITAL3, (verb(hda, &codec, converter, VERB_GET_DIGITAL, 0) >> 16) & 0xF0);
     verb(hda, &codec, converter, VERB_SET_DIGITAL, 0x01);
-    verb(hda, &codec, converter, VERB_SET_STREAM, TAG_PLAYBACK << 4);
+    verb(hda, &codec, converter, VERB_SET_STREAM, TAG_MONITOR << 4);
     verb4(hda, &codec, converter, VERB4_SET_FORMAT, FORMAT_48K_16_STEREO);
 }
 
 /*
- * The sound of a monitor: a digital codec of a graphics chip. Its first output pin that is wired to a
- * connector, with the converter that feeds it, gets the playback stream: two channels of 16 bits at 48 kHz,
- * which every such codec and every monitor with loudspeakers takes. Only for codecs whose graphics side this
- * system drives; the others would be outputs that never sound.
+ * The sound of a monitor: a digital codec of a graphics chip. One converter of it gets a playback stream of
+ * two channels of 16 bits at 48 kHz, which every such codec and every monitor with loudspeakers takes. Only
+ * for codecs whose graphics side this system drives; the others would be outputs that never sound.
+ *
+ *   AMD    a converter for each pin: the first pin that is wired to a connector, which is the GPU's audio
+ *          endpoint 0, and its converter
+ *   Intel  (generation 9 graphics) three pins, for the GPU's ports B, C and D, that all can play any of
+ *          three converters: the first converter, and all the pins. Out of reset the codec shows only one
+ *          pin and one converter; a verb to its vendor widget brings out the rest, and the tree is read again.
+ *          A pin with no monitor on its port gives zeros as its connection list, so the lists are not asked:
+ *          every pin has all the converters, in their order (Linux's intel_haswell_fixup_connect_list())
  */
 static uint32_t setup_monitor_codec(hda_t *hda, hda_codec_t *codec)
 {
     uint32_t id = parameter(hda, codec, 0, 0);
-    bool amd = (id >> 16) == 0x1002;
+    bool amd = (id >> 16) == 0x1002, intel = id == 0x80862809 || id == 0x8086280B;
 
-    if (!amd)
+    if (!amd && !intel)
         return 0;
-    for (uint32_t i = 0; i < codec->widget_count; i++) {
-        hda_widget_t *pin = &codec->widgets[i];
-        if (WCAP_TYPE(pin->caps) != WIDGET_PIN || !(pin->caps & WCAP_DIGITAL) || !(pin->pin_caps & PINCAP_OUTPUT) ||
-            !connected(pin) || !pin->connection_count)
-            continue;
-        hda_widget_t *converter = widget(codec, pin->connections[0]);
-        if (!converter || WCAP_TYPE(converter->caps) != WIDGET_OUTPUT)
-            continue;
-        hda->sink.address = codec->address;
-        hda->sink.pin = pin->nid;
-        hda->sink.converter = converter->nid;
-        hda->sink.revision = parameter(hda, codec, 0, 2);
-        hda->sink.amd = amd;
-        hda->sink.pin_amp = pin->caps & WCAP_OUT_AMP;
-        hda->sink.pin_select = pin->connection_count > 1;
-        hda->sink.power = (pin->caps | converter->caps) & WCAP_POWER;
-        hda->monitor = true;
-        monitor_program(hda);
-        klog_info("hda: codec %u: the sound of a monitor: pin %u <- converter %u", codec->address, pin->nid,
-                  converter->nid);
-        return JELLY_AUDIO_PLAYBACK;
+    if (intel) {
+        uint32_t all = INTEL_ALL_PINS | INTEL_DP12, state = verb(hda, codec, INTEL_VENDOR_WIDGET, INTEL_GET_VENDOR, 0);
+        if ((state & all) != all) {
+            uint8_t address = codec->address;
+            uint32_t before = codec->widget_count;
+
+            verb(hda, codec, INTEL_VENDOR_WIDGET, INTEL_SET_VENDOR, state | all);
+            thread_sleep(10000000);
+            memset(codec, 0, sizeof(*codec));
+            codec->address = address;
+            if (!read_codec(hda, codec))
+                return 0;
+            klog_debug("hda: codec %u: all pins of Intel's codec brought out (0x%x -> 0x%x): %u widgets, were %u", address,
+                       state & 0xFF, verb(hda, codec, INTEL_VENDOR_WIDGET, INTEL_GET_VENDOR, 0) & 0xFF,
+                       codec->widget_count, before);
+        }
+        report_codec(hda, codec);
     }
-    return 0;
+
+    memset(&hda->sink, 0, sizeof(hda->sink));
+    if (intel) {
+        uint8_t converters[MAX_CONNECTIONS];
+        uint32_t count = 0;
+
+        for (uint32_t i = 0; i < codec->widget_count && count < MAX_CONNECTIONS; i++) {
+            if (WCAP_TYPE(codec->widgets[i].caps) == WIDGET_OUTPUT && (codec->widgets[i].caps & WCAP_DIGITAL))
+                converters[count++] = codec->widgets[i].nid;
+        }
+        for (uint32_t i = 0; i < codec->widget_count; i++) {
+            hda_widget_t *pin = &codec->widgets[i];
+            if (WCAP_TYPE(pin->caps) != WIDGET_PIN || !(pin->caps & WCAP_DIGITAL) || !count)
+                continue;
+            pin->connection_count = (uint8_t)count;
+            memcpy(pin->connections, converters, count);
+        }
+    }
+    for (uint32_t i = 0; i < codec->widget_count && hda->sink.pin_count < MAX_SINK_PINS; i++) {
+        hda_widget_t *pin = &codec->widgets[i];
+        uint32_t place = 0;
+
+        if (WCAP_TYPE(pin->caps) != WIDGET_PIN || !(pin->caps & WCAP_DIGITAL) || !(pin->pin_caps & PINCAP_OUTPUT) ||
+            !pin->connection_count || (amd && !connected(pin)))
+            continue;
+        if (!hda->sink.pin_count) {
+            hda_widget_t *converter = widget(codec, pin->connections[0]);
+            if (!converter || WCAP_TYPE(converter->caps) != WIDGET_OUTPUT)
+                continue;
+            hda->sink.converter = converter->nid;
+            hda->sink.power = converter->caps & WCAP_POWER;
+        }
+        while (place < pin->connection_count && pin->connections[place] != hda->sink.converter)
+            place++;
+        if (place == pin->connection_count)
+            continue; /* a pin this converter does not reach */
+        uint32_t n = hda->sink.pin_count++;
+        hda->sink.pins[n] = pin->nid;
+        hda->sink.select[n] = pin->connection_count > 1 ? (uint8_t)place : NO_SELECT;
+        hda->sink.idle[n] = pin->connection_count > 1 ? (place ? 0 : 1) : NO_SELECT;
+        hda->sink.pin_amp = hda->sink.pin_amp || (pin->caps & WCAP_OUT_AMP);
+        hda->sink.power = hda->sink.power || (pin->caps & WCAP_POWER);
+        if (amd)
+            break;
+    }
+    if (!hda->sink.pin_count)
+        return 0;
+    hda->sink.address = codec->address;
+    hda->sink.revision = parameter(hda, codec, 0, 2);
+    hda->sink.amd = amd;
+    hda->sink.intel = intel;
+    monitor_program(hda);
+    klog_info("hda: codec %u: the sound of a monitor: converter %u -> %u pin%s from %u on", codec->address,
+              hda->sink.converter, hda->sink.pin_count, hda->sink.pin_count > 1 ? "s" : "", hda->sink.pins[0]);
+    return JELLY_AUDIO_PLAYBACK;
 }
 
 /* --- Streams --------------------------------------------------------------------- */
@@ -676,8 +834,10 @@ static void stream_stop(hda_t *hda, hda_stream_t *stream)
     w8(stream->regs, SD_STS, SD_STS_ALL);
 }
 
-static status_t stream_start(hda_t *hda, hda_stream_t *stream, bool playback)
+static status_t stream_start(hda_card_t *card, hda_stream_t *stream, bool playback)
 {
+    hda_t *hda = card->hda;
+
     /* Reset the stream: into reset, out of reset. */
     w8(stream->regs, SD_CTL, SD_CTL_RESET);
     for (int i = 0; i < 20 && !(r8(stream->regs, SD_CTL) & SD_CTL_RESET); i++)
@@ -695,7 +855,7 @@ static status_t stream_start(hda_t *hda, hda_stream_t *stream, bool playback)
     if (playback) {
         /* Two periods ahead of the hardware from the start */
         for (; stream->handled < 2; stream->handled++)
-            audio_playback_pull(&hda->audio, fragment(stream, stream->handled), PERIOD_FRAMES);
+            audio_playback_pull(&card->audio, fragment(stream, stream->handled), PERIOD_FRAMES);
     }
     to_memory(stream->buffer.virt, BUFFER_BYTES);
 
@@ -716,7 +876,7 @@ static status_t stream_start(hda_t *hda, hda_stream_t *stream, bool playback)
 }
 
 /* The hardware finished a fragment (or several, if the interrupt was late). */
-static void stream_interrupt(hda_t *hda, hda_stream_t *stream, bool playback)
+static void stream_interrupt(hda_card_t *card, hda_stream_t *stream, bool playback)
 {
     uint32_t lpib = r32(stream->regs, SD_LPIB) % BUFFER_BYTES;
     stream->position += (lpib + BUFFER_BYTES - stream->last_lpib) % BUFFER_BYTES;
@@ -729,14 +889,14 @@ static void stream_interrupt(hda_t *hda, hda_stream_t *stream, bool playback)
         if (stream->handled < done + 1)
             stream->handled = done + 1; /* too late for those */
         for (; stream->handled < done + 2; stream->handled++) {
-            audio_playback_pull(&hda->audio, fragment(stream, stream->handled), PERIOD_FRAMES);
+            audio_playback_pull(&card->audio, fragment(stream, stream->handled), PERIOD_FRAMES);
             to_memory(fragment(stream, stream->handled), FRAGMENT_BYTES);
         }
     } else {
         if (done - stream->handled > FRAGMENTS)
             stream->handled = done - FRAGMENTS; /* overwritten before we came by */
         for (; stream->handled < done; stream->handled++)
-            audio_capture_push(&hda->audio, fragment(stream, stream->handled), PERIOD_FRAMES);
+            audio_capture_push(&card->audio, fragment(stream, stream->handled), PERIOD_FRAMES);
     }
 }
 
@@ -745,39 +905,44 @@ static void hda_interrupt(void *context)
     hda_t *hda = context;
     uint32_t pending = r32(hda->regs, REG_INTSTS);
 
-    if (hda->out.regs && (pending & (1u << hda->out.index))) {
-        w8(hda->out.regs, SD_STS, SD_STS_ALL);
-        if (hda->out.running)
-            stream_interrupt(hda, &hda->out, true);
-    }
-    if (hda->in.regs && (pending & (1u << hda->in.index))) {
-        w8(hda->in.regs, SD_STS, SD_STS_ALL);
-        if (hda->in.running)
-            stream_interrupt(hda, &hda->in, false);
+    for (uint32_t c = 0; c < 2; c++) {
+        hda_card_t *card = &hda->cards[c];
+        if (card->out.regs && (pending & (1u << card->out.index))) {
+            w8(card->out.regs, SD_STS, SD_STS_ALL);
+            if (card->out.running)
+                stream_interrupt(card, &card->out, true);
+        }
+        if (card->in.regs && (pending & (1u << card->in.index))) {
+            w8(card->in.regs, SD_STS, SD_STS_ALL);
+            if (card->in.running)
+                stream_interrupt(card, &card->in, false);
+        }
     }
 }
 
 static status_t hda_playback_enable(audio_device_t *audio, bool enable)
 {
-    hda_t *hda = audio->driver_data;
+    hda_card_t *card = audio->driver_data;
+    hda_t *hda = card->hda;
+
     if (!enable) {
-        stream_stop(hda, &hda->out);
+        stream_stop(hda, &card->out);
         return STATUS_SUCCESS;
     }
-    /* The graphics side may have switched the sound of the monitor on since the codec was set up: told again. */
-    if (hda->monitor)
+    if (card == &hda->cards[CARD_MONITOR])
         monitor_program(hda);
-    return stream_start(hda, &hda->out, true);
+    return stream_start(card, &card->out, true);
 }
 
 static status_t hda_capture_enable(audio_device_t *audio, bool enable)
 {
-    hda_t *hda = audio->driver_data;
+    hda_card_t *card = audio->driver_data;
+
     if (!enable) {
-        stream_stop(hda, &hda->in);
+        stream_stop(card->hda, &card->in);
         return STATUS_SUCCESS;
     }
-    return stream_start(hda, &hda->in, false);
+    return stream_start(card, &card->in, false);
 }
 
 static const audio_device_ops_t hda_audio_ops = {
@@ -844,14 +1009,15 @@ static status_t hda_probe(device_t *device)
     pci_device_t *pci = pci_from_device(device);
     hda_t *hda = kcalloc(1, sizeof(*hda));
     hda_codec_t *codec = kmalloc(sizeof(*codec));
-    uint32_t flags = 0;
 
     if (!hda || !codec) {
         kfree(hda);
         kfree(codec);
         return STATUS_OUT_OF_MEMORY;
     }
+    hda_card_t *analog = &hda->cards[CARD_ANALOG], *monitor = &hda->cards[CARD_MONITOR];
     hda->device = device;
+    analog->hda = monitor->hda = hda;
     mutex_init(&hda->lock);
 
     /* The HDMI controllers of AMD graphics do not snoop (as Linux's table of controllers has it). */
@@ -870,48 +1036,70 @@ static status_t hda_probe(device_t *device)
             codec->address = address;
             if (!read_codec(hda, codec))
                 continue;
-            uint32_t found = setup_codec(hda, codec, !(flags & JELLY_AUDIO_PLAYBACK), !(flags & JELLY_AUDIO_CAPTURE));
-            if (!found && !(flags & JELLY_AUDIO_PLAYBACK))
-                found = setup_monitor_codec(hda, codec);
-            klog_info("hda: codec %u: vendor %08x, %u widgets%s%s", address, parameter(hda, codec, 0, 0),
+            uint32_t found = setup_codec(hda, codec, !(analog->flags & JELLY_AUDIO_PLAYBACK),
+                                         !(analog->flags & JELLY_AUDIO_CAPTURE));
+            bool sink = false;
+            analog->flags |= found;
+            if (!found && !monitor->flags) {
+                monitor->flags = setup_monitor_codec(hda, codec);
+                sink = monitor->flags;
+            }
+            klog_info("hda: codec %u: vendor %08x, %u widgets%s%s%s", address, parameter(hda, codec, 0, 0),
                       codec->widget_count, (found & JELLY_AUDIO_PLAYBACK) ? ", output" : "",
-                      (found & JELLY_AUDIO_CAPTURE) ? ", input" : "");
-            flags |= found;
-            if (!found)
+                      (found & JELLY_AUDIO_CAPTURE) ? ", input" : "", sink ? ", output to a monitor" : "");
+            if (!found && !sink)
                 report_codec(hda, codec);
         }
-        if (!flags)
+        if (!analog->flags && !monitor->flags)
             status = STATUS_NOT_FOUND; /* a controller without a usable codec */
     }
     kfree(codec);
 
-    /* Stream descriptors: the input streams come first, then the output streams. */
+    /* Stream descriptors: the input streams come first, then the output streams. One output stream per card. */
     if (!STATUS_IS_ERROR(status)) {
         uint16_t gcap = r16(hda->regs, REG_GCAP);
-        uint32_t inputs = (gcap >> 8) & 0xF, outputs = (gcap >> 12) & 0xF;
-        if (!outputs)
-            flags &= ~JELLY_AUDIO_PLAYBACK;
+        uint32_t inputs = (gcap >> 8) & 0xF, outputs = (gcap >> 12) & 0xF, used = 0;
         if (!inputs)
-            flags &= ~JELLY_AUDIO_CAPTURE;
-        if (flags & JELLY_AUDIO_PLAYBACK)
-            status = stream_alloc(hda, &hda->out, inputs, TAG_PLAYBACK);
-        if (!STATUS_IS_ERROR(status) && (flags & JELLY_AUDIO_CAPTURE))
-            status = stream_alloc(hda, &hda->in, 0, TAG_CAPTURE);
-        if (!flags)
+            analog->flags &= ~JELLY_AUDIO_CAPTURE;
+        for (uint32_t c = 0; c < 2 && !STATUS_IS_ERROR(status); c++) {
+            hda_card_t *card = &hda->cards[c];
+            if (!(card->flags & JELLY_AUDIO_PLAYBACK))
+                continue;
+            if (used == outputs)
+                card->flags &= ~JELLY_AUDIO_PLAYBACK;
+            else
+                status = stream_alloc(hda, &card->out, inputs + used++, c == CARD_MONITOR ? TAG_MONITOR : TAG_PLAYBACK);
+        }
+        if (!STATUS_IS_ERROR(status) && (analog->flags & JELLY_AUDIO_CAPTURE))
+            status = stream_alloc(hda, &analog->in, 0, TAG_CAPTURE);
+        if (!STATUS_IS_ERROR(status) && !analog->flags && !monitor->flags)
             status = STATUS_NOT_FOUND;
     }
     if (!STATUS_IS_ERROR(status))
         status = pci_enable_msi(pci, hda_interrupt, hda, &hda->irq);
-    if (!STATUS_IS_ERROR(status)) {
-        format(hda->audio.name, sizeof(hda->audio.name), hda->monitor ? "Monitor sound %04x:%04x" : "HD Audio %04x:%04x",
+    uint32_t registered = 0;
+    for (uint32_t c = 0; c < 2 && !STATUS_IS_ERROR(status); c++) {
+        hda_card_t *card = &hda->cards[c];
+        if (!card->flags)
+            continue;
+        format(card->audio.name, sizeof(card->audio.name), c == CARD_MONITOR ? "Monitor sound %04x:%04x" : "HD Audio %04x:%04x",
                device->id.vendor, device->id.device);
-        hda->audio.flags = flags | (hda->monitor ? JELLY_AUDIO_MONITOR : 0);
-        hda->audio.rate = RATE;
-        hda->audio.channels = CHANNELS;
-        hda->audio.period = PERIOD_FRAMES;
-        hda->audio.ops = &hda_audio_ops;
-        hda->audio.driver_data = hda;
-        status = audio_device_register(&hda->audio);
+        card->audio.flags = card->flags | (c == CARD_MONITOR ? JELLY_AUDIO_MONITOR : 0);
+        card->audio.rate = RATE;
+        card->audio.channels = CHANNELS;
+        card->audio.period = PERIOD_FRAMES;
+        card->audio.ops = &hda_audio_ops;
+        card->audio.driver_data = card;
+        status_t result = audio_device_register(&card->audio);
+        if (STATUS_IS_ERROR(result) && registered) {
+            /* The sound card is in use by now: it stays, without the monitor's sound. */
+            klog_warn("hda: %s: no device for the monitor's sound (%s)", device->name, status_name(result));
+            card->flags = 0;
+        } else if (STATUS_IS_ERROR(result)) {
+            status = result;
+        } else {
+            registered++;
+        }
     }
     if (STATUS_IS_ERROR(status)) {
         if (status != STATUS_NOT_FOUND)
@@ -920,10 +1108,12 @@ static status_t hda_probe(device_t *device)
             w32(hda->regs, REG_INTCTL, 0);
         pci_disable_msi(pci);
         dma_free(&hda->rings);
-        dma_free(&hda->out.buffer);
-        dma_free(&hda->out.bdl);
-        dma_free(&hda->in.buffer);
-        dma_free(&hda->in.bdl);
+        for (uint32_t c = 0; c < 2; c++) {
+            dma_free(&hda->cards[c].out.buffer);
+            dma_free(&hda->cards[c].out.bdl);
+            dma_free(&hda->cards[c].in.buffer);
+            dma_free(&hda->cards[c].in.bdl);
+        }
         kfree(hda);
         return status;
     }

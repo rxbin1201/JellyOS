@@ -38,9 +38,10 @@ sorted list.
 `drivers/graphics/hdmi.c`: what the EDID of a DVI, an HDMI 1.4 and an HDMI
 2.0 monitor says about its input and how fast a mode may be on each, the
 bytes of the AVI info frame (checksum, RGB, range, picture shape, video
-code, the codes that only an HDMI 2.0 signal may name), and the talk with
+code, the codes that only an HDMI 2.0 signal may name), the talk with
 a monitor's status and control registers before a scrambled signal,
-against registers that exist only in the test.
+against registers that exist only in the test, and the description of a
+monitor's sound for an audio codec (ELD).
 
 ## Kernel self-tests (`make test`)
 
@@ -275,7 +276,7 @@ side of the card, so they show what the driver presented:
 
 Not covered by any automated test, because QEMU has no such device: the
 Intel and AMD drivers' mode switching, DisplayPort link training and hot
-plug, and the sound of a monitor on AMD graphics (by hand: `volume output
+plug, and the sound of a monitor on AMD and Intel graphics (by hand: `volume output
 N` for "Monitor sound", then `tone -f 440 -d 3000`). Of the VirtIO GPU driver, a change of the host's window is not
 covered (the tests run without one).
 

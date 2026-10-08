@@ -50,6 +50,24 @@ void hdmi_sink_read(const uint8_t *edid, int blocks, hdmi_sink_t *sink)
     }
 }
 
+void hdmi_eld(const uint8_t *edid, bool displayport, uint8_t eld[HDMI_ELD_SIZE])
+{
+    for (uint32_t i = 0; i < HDMI_ELD_SIZE; i++)
+        eld[i] = 0;
+    eld[0] = 2 << 3;                                       /* ELD version 2 (CTA-861-D) */
+    eld[2] = (HDMI_ELD_SIZE - 4) / 4;                      /* what follows the four header bytes, in words */
+    eld[4] = 3 << 5;                                       /* CTA extension version 3; no monitor name */
+    eld[HDMI_ELD_KIND] = 1 << 4 | (displayport ? 1 : 0) << 2; /* one kind of sound; the connection */
+    eld[7] = 0x01;                                         /* loudspeakers: front left and right */
+    eld[16] = edid[8];                                     /* manufacturer and product, as in the EDID */
+    eld[17] = edid[9];
+    eld[18] = edid[10];
+    eld[19] = edid[11];
+    eld[20] = 1 << 3 | (2 - 1);                            /* PCM, two channels */
+    eld[21] = 0x07;                                        /* 32, 44.1 and 48 kHz */
+    eld[22] = 0x01;                                        /* 16 bits */
+}
+
 uint32_t hdmi_pixel_limit(const hdmi_sink_t *sink, uint32_t source_khz)
 {
     uint32_t limit = HDMI_DVI_MAX_KHZ;

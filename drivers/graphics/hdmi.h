@@ -31,6 +31,8 @@
 #define HDMI_DVI_MAX_KHZ    340000 /* fastest signal without scrambling (HDMI 1.4b; single link DVI ends at 165000) */
 #define HDMI_INFOFRAME_SIZE 17     /* an AVI info frame: 3 bytes of header, the checksum, 13 bytes */
 #define HDMI_SCDC_ADDRESS   0x54   /* the monitor's status and control registers as an I2C device */
+#define HDMI_ELD_SIZE       24     /* the description of a monitor's sound that hdmi_eld() makes */
+#define HDMI_ELD_KIND       5      /* its byte that says in bits 3:2 what the monitor is on: 0 HDMI, 1 DisplayPort */
 
 /* What the monitor's EDID says about its HDMI input. */
 typedef struct {
@@ -56,6 +58,14 @@ uint32_t hdmi_pixel_limit(const hdmi_sink_t *sink, uint32_t source_khz);
  * to 255 is a colour, as a computer's picture has it (else 16 to 235, as video has it).
  */
 void     hdmi_avi_infoframe(const display_timing_t *t, bool hdmi2, bool full_range, uint8_t frame[HDMI_INFOFRAME_SIZE]);
+
+/*
+ * The monitor's sound as an HD Audio codec wants it described ("EDID-like data", ELD, version 2): who the
+ * monitor is, whether it is on HDMI or DisplayPort, and what it plays, which here is what "basic audio" of an
+ * EDID promises: two channels of PCM at 32, 44.1 and 48 kHz with 16 bits. Graphics hardware whose audio codec
+ * has a memory for it gets it from its driver; the audio driver reads it there. HDMI_ELD_SIZE bytes.
+ */
+void     hdmi_eld(const uint8_t *edid, bool displayport, uint8_t eld[HDMI_ELD_SIZE]);
 
 /* I2C on the monitor's DDC lines, as the driver's hardware does it. */
 typedef struct {
