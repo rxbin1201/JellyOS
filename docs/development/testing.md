@@ -261,7 +261,15 @@ the screen on again, and the desktop is back.
 
 A third boot checks the driver `virtio-gpu`: the same system with
 `-vga none -device virtio-vga`, and `shell_test.py --gpu` (log:
-`build/gpu-test.log`). The screenshots QEMU takes there are of the host's
+`build/gpu-test.log`). Its sound card is a VirtIO one, the only one of the
+machine, playing into `build/audio-test3.wav` (`--wav3`): `volume` names
+it, a tone and two tones at once are played, and the file must hold them
+afterwards, as long and as loud as written, mixed, and without a gap (a
+card that ran dry between its buffers would break a tone into pieces).
+Recording is only covered by the kernel test: QEMU's `wav` backend records
+nothing.
+
+The screenshots QEMU takes there are of the host's
 side of the card, so they show what the driver presented:
 
 - the driver took the card, and the display has a pointer, frame timing,
@@ -313,12 +321,13 @@ the monotonic clock) and the live process count of `SYS_SYSTEM_INFO`.
   open, order of frames across the end of the ring, the low-water signal,
   underruns as silence, capture overruns dropping the oldest frames, closing
   stops the device
-- the HD Audio driver in real time: playback takes frames at 48 000 per
-  second (compared with the monotonic clock), stops when disabled, and
-  recording delivers frames at the same rate
+- every sound card in real time, which is the HD Audio driver and the
+  VirtIO sound driver: playback takes frames at 48 000 per second (compared
+  with the monotonic clock), stops when disabled, and recording delivers
+  frames at the same rate
 
-The kernel test run attaches VirtIO and USB input devices and an Intel HDA
-card with the `none` audio backend.
+The kernel test run attaches VirtIO and USB input devices, and an Intel HDA
+card and a VirtIO sound card with the `none` audio backend.
 
 ## Integration test: the shell (milestone M6)
 

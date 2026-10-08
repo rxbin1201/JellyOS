@@ -1,7 +1,8 @@
 /*
  * Kernel tests for Phase 11, audio: the device layer's rings with a driver
- * that exists only in this file, and the HD Audio driver playing and
- * recording in real time (QEMU's codec with the "none" backend).
+ * that exists only in this file, and the sound card drivers (HD Audio,
+ * VirtIO sound) playing and recording in real time (QEMU's cards with the
+ * "none" backend).
  *
  * The audio server and the tools on top are exercised by the integration
  * test, which checks the sound QEMU writes to a WAV file.
@@ -114,19 +115,15 @@ KTEST(audio_device_rings)
     object_release(handle);
 }
 
-/* --- The sound card ---------------------------------------------------------------- */
+/* --- The sound cards --------------------------------------------------------------- */
 
-KTEST(audio_card_plays_and_records)
+static void card_plays_and_records(audio_device_t *card)
 {
     static int16_t frames[256 * 2];
-    audio_device_t *card = audio_device_get(0);
     jelly_audio_info_t before, after;
     object_t *handle;
 
-    if (!card || card == &fake) {
-        klog_info("ktest: no sound card, skipped");
-        return;
-    }
+    klog_info("ktest: sound card %u: %s", card->index, card->name);
     KASSERT(audio_device_open(card->index, &handle) == STATUS_SUCCESS);
     KEXPECT(card->rate == 48000 && card->channels == 2 && (card->flags & JELLY_AUDIO_PLAYBACK));
 
@@ -143,7 +140,7 @@ KTEST(audio_card_plays_and_records)
         thread_sleep(10000000);
     }
     audio_device_info(card, &after);
-    /* Two periods are fetched ahead when the stream starts. */
+    /* A few periods are fetched ahead when the stream starts (two by HD Audio, four by VirtIO sound). */
     uint64_t played = after.played_frames - before.played_frames;
     uint64_t expected = (clock_monotonic_ns() - start) * 48 / 1000000 + 2 * card->period;
     klog_info("ktest: sound card played %lu frames, %lu expected", played, expected);
@@ -170,4 +167,19 @@ KTEST(audio_card_plays_and_records)
     }
     object_release(handle);
     KEXPECT(!card->playing && !card->capturing);
+}
+
+KTEST(audio_cards_play_and_record)
+{
+    uint32_t cards = 0;
+
+    for (uint32_t i = 0; i < audio_device_count(); i++) {
+        audio_device_t *card = audio_device_get(i);
+        if (!card || card == &fake)
+            continue;
+        cards++;
+        card_plays_and_records(card);
+    }
+    if (!cards)
+        klog_info("ktest: no sound card, skipped");
 }

@@ -188,14 +188,23 @@ qemu_disks  = -drive if=pflash,format=raw,file=$(2) -drive format=raw,file=fat:r
 virtio_input = -device virtio-keyboard-pci -device virtio-tablet-pci
 # USB keyboard and tablet on an xHCI controller (the PS/2 keyboard and mouse are part of the machine)
 usb_input = -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0
+comma := ,
 # $(call audio_hw,<backend>): Intel HDA sound card with QEMU's audio backend (none, pa, alsa, sdl, ...)
 audio_hw = -audiodev $(1),id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0
+# $(call virtio_sound,<backend options>): a VirtIO sound card
+virtio_sound = -audiodev $(1),id=vsnd -device virtio-sound-pci,audiodev=vsnd
 # Sound of `make run`: silent unless a backend is chosen, e.g. `make run AUDIO=pa`
 AUDIO ?= none
+# make run SOUND=virtio: the VirtIO sound card instead of the Intel HDA one
+ifeq ($(SOUND),virtio)
+audio_hw = $(call virtio_sound,$(1))
+endif
 # Integration test: the output goes into a WAV file that the test analyzes; the input is silence in real time.
 AUDIO_TEST_WAV := $(BUILD)/audio-test.wav
 # A second sound card with an output only, as the sound of a monitor is: for choosing where the sound goes.
 AUDIO_TEST_WAV2 := $(BUILD)/audio-test2.wav
+# The VirtIO sound card of the third boot (with the VirtIO GPU) plays into this one.
+AUDIO_TEST_WAV3 := $(BUILD)/audio-test3.wav
 audio_test_hw = -audiodev wav,id=snd0,path=$(AUDIO_TEST_WAV) -audiodev none,id=snd1 \
                 -device intel-hda -device hda-output,audiodev=snd0 -device hda-micro,audiodev=snd1 \
                 -audiodev wav,id=snd2,path=$(AUDIO_TEST_WAV2) \
@@ -502,7 +511,8 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	@timeout $(TEST_TIMEOUT) $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(TEST_ESP),$(TEST_VARS)) -display none \
 	    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -device edu -device e1000e \
 	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(virtio_input) $(usb_input) \
-	    $(call audio_hw,none) $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk) $(usb_sticks); \
+	    -audiodev none,id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0 $(call virtio_sound,none) \
+	    $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk) $(usb_sticks); \
 	status=$$?; \
 	if [ $$status -ne 1 ]; then echo "make test: FAILED (QEMU exit status $$status)"; exit 1; fi
 	@# The host (mtools) must read what the kernel's FAT32 driver wrote.
@@ -529,10 +539,11 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	    -qmp unix:$(BUILD)/qmp.sock,server,nowait || { echo "make test: FAILED (shell test)"; exit 1; }
 	@# The same system on a VirtIO GPU instead of the standard VGA card: frames, pointer and modes.
 	@cp $(OVMF_VARS) $(SHELL_TEST_VARS)
-	@rm -f $(BUILD)/qmp-gpu.sock
-	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) --qmp $(BUILD)/qmp-gpu.sock --gpu -- \
+	@rm -f $(BUILD)/qmp-gpu.sock $(AUDIO_TEST_WAV3)
+	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) --qmp $(BUILD)/qmp-gpu.sock --gpu \
+	    --wav3 $(AUDIO_TEST_WAV3) -- \
 	    $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(SHELL_TEST_ESP),$(SHELL_TEST_VARS)) -display none \
-	    $(virtio_gpu) $(usb_input) \
+	    $(virtio_gpu) $(usb_input) $(call virtio_sound,wav$(comma)path=$(AUDIO_TEST_WAV3)) \
 	    -qmp unix:$(BUILD)/qmp-gpu.sock,server,nowait || { echo "make test: FAILED (virtio-gpu test)"; exit 1; }
 	@if mtype -i $(TEST_DISK)@@1M ::/motd.txt | grep -q "Welcome to JellyOS"; then \
 	    echo "make test: host reads the file the shell copied"; \

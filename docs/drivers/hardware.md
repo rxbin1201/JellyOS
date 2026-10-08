@@ -75,6 +75,7 @@ are listed as block devices but not mounted. `dmesg` shows what was found.
 | Intel HD Audio | PARTIALLY_SUPPORTED | Analog output and input at 48 kHz. Playback works on the ThinkCentre; no jack detection |
 | Sound of a monitor (HDMI, DisplayPort) on AMD graphics of Ryzen 4000/5000 G | EXPERIMENTAL | The HD Audio codec of the GPU (1002:aa01) as a sound device of its own, "Monitor sound"; stereo at 48 kHz. Needs the `amd-gpu` driver (`amdgpu=native`). Works on a Ryzen 5 5600G over HDMI and over DisplayPort, also after a change of the mode |
 | Sound of a monitor (HDMI, DisplayPort) on Intel graphics of generation 9 | EXPERIMENTAL | The HD Audio codec of the GPU (8086:2809, 8086:280b), on the sound card's controller, as a second sound device, "Monitor sound"; stereo at 48 kHz. Needs the `intel-gpu` driver (`igpu=native`). Works on the ThinkCentre (UHD 630) over HDMI and over DisplayPort, also after the cable was moved from one to the other. Not on NVIDIA graphics or other Intel generations |
+| VirtIO sound (`virtio-sound-pci`, 1af4:1059) | PARTIALLY_SUPPORTED | `virtio-sound`: output and input at 48 kHz, stereo; tested by `make test`. One stream per direction, no jacks. An emulated card: no real hardware |
 | USB audio | UNSUPPORTED | |
 | Bluetooth audio | UNSUPPORTED | |
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integration test for milestones M6 to M10: the shell, the network, graphical applications, sound.
 
-usage: shell_test.py [--timeout SECONDS] [--qmp SOCKET] [--wav FILE] [--wav2 FILE] [--gpu] -- QEMU COMMAND LINE...
+usage: shell_test.py [--timeout SECONDS] [--qmp SOCKET] [--wav FILE] [--wav2 FILE] [--gpu] [--wav3 FILE] -- QEMU COMMAND LINE...
 
 The machine boots normally (initramfs, init, service manager, shell). The
 script waits for each shell prompt on the serial console, types a command,
@@ -29,6 +29,8 @@ the steps for the VirtIO GPU driver run: that the host shows the guest's
 frames, the card's own pointer, and modes. They end with a kernel panic
 (echo panic > /dev/crash; the kernel needs crashtest=device) that must be on
 the screen in place of the desktop; QEMU is stopped by the script then.
+With --wav3 (the file of a VirtIO sound card's backend) tones are played
+at the start of these steps and looked for in the file afterwards.
 Exit status 0 means every check passed.
 """
 
@@ -175,6 +177,18 @@ def output_steps():
     ]
 
 
+def virtio_sound_steps():
+    """The VirtIO sound card as the machine's only one. What it played is checked by check_virtio_sound()."""
+    return [
+        ("svc status audio", ["audio", "running"], 10),
+        ("volume", ["volume: 100%", "VirtIO sound", "48000 Hz"]),
+        ("tone -f 1500 -d 1000", ["tone: 1500 Hz for 1000 ms"]),
+        ("tone -f 1000 -d 1000 -v 70 & tone -f 2500 -d 1500 -v 70 -r 22050 -m",
+         ["tone: 1000 Hz for 1000 ms", "tone: 2500 Hz for 1500 ms"]),
+        ("dmesg virtio-sound", ["virtio-sound: plays and records"]),
+    ]
+
+
 WINDOW_SECONDS = 0.05
 TONES = (440, 660, 880, 1000, 1500, 2000, 2500, 3500, 5000)
 
@@ -290,6 +304,47 @@ def check_sound(path, second_path=None):
           f"({seconds(1500, share=0.2):.2f} s of 1500 Hz)")
     here = seconds(2000)
     check("the moved stream began on the first card", 0.3 <= here <= 2.0, f"({here:.2f} s of 2000 Hz)")
+    return failures
+
+
+def check_virtio_sound(path):
+    """What the VirtIO sound card played, as recorded by QEMU. Returns the number of failures."""
+    failures = 0
+
+    def check(name, condition, detail=""):
+        nonlocal failures
+        if condition:
+            print(f"shell test: ok    sound: {name}")
+        else:
+            failures += 1
+            print(f"shell test: FAIL  sound: {name} {detail}")
+
+    try:
+        samples, rate = read_wav(path)
+    except (OSError, ValueError) as error:
+        check("QEMU recorded the VirtIO sound card's output", False, f"({error})")
+        return failures
+    windows = analyze(samples, rate)
+    check("QEMU recorded the VirtIO sound card's output", len(samples) > rate, f"({len(samples) / rate:.1f} s)")
+
+    def seconds(*tones, share=0.6):
+        count = sum(1 for _, shares in windows
+                    if shares and sum(shares[t] for t in tones) >= share
+                    and all(shares[t] >= 0.15 for t in tones))
+        return count * WINDOW_SECONDS
+
+    values = sorted(rms for rms, shares in windows if shares and shares[1500] >= 0.9)
+    loud = values[len(values) // 2] if values else 0.0
+    check("a 1500 Hz tone of one second", 0.7 <= seconds(1500) <= 1.3, f"({seconds(1500):.2f} s)")
+    check("the tone has the amplitude the program wrote", 9500 <= loud <= 12500, f"(RMS {loud:.0f}, expected 11314)")
+    check("two programs are mixed", seconds(1000, 2500) >= 0.6, f"({seconds(1000, 2500):.2f} s of 1000 + 2500 Hz)")
+    check("the longer stream plays on alone", seconds(2500, share=0.9) >= 0.25, f"({seconds(2500, share=0.9):.2f} s)")
+    # No gaps: a card that ran dry between its buffers would break the tone into pieces.
+    inside = [bool(shares) and shares[1500] >= 0.9 for _, shares in windows]
+    first = inside.index(True) if True in inside else 0
+    last = len(inside) - inside[::-1].index(True) if True in inside else 0
+    gaps = inside[first:last].count(False)
+    check("the tone has no gaps", gaps == 0, f"({gaps} windows of {last - first} without it)")
     return failures
 
 
@@ -849,9 +904,9 @@ def gpu_steps(console, qmp, timeout):
 def main():
     args = sys.argv[1:]
     timeout = 90.0
-    qmp_path = wav_path = wav2_path = None
+    qmp_path = wav_path = wav2_path = wav3_path = None
     gpu = False
-    while args[:1] in (["--timeout"], ["--qmp"], ["--wav"], ["--wav2"], ["--gpu"]):
+    while args[:1] in (["--timeout"], ["--qmp"], ["--wav"], ["--wav2"], ["--wav3"], ["--gpu"]):
         if args[0] == "--gpu":
             gpu = True
             args = args[1:]
@@ -862,6 +917,8 @@ def main():
             wav_path = args[1]
         elif args[0] == "--wav2":
             wav2_path = args[1]
+        elif args[0] == "--wav3":
+            wav3_path = args[1]
         else:
             qmp_path = args[1]
         args = args[2:]
@@ -885,6 +942,8 @@ def main():
             steps += output_steps()
     if not gpu and "nvme" in " ".join(args):
         steps += disk_steps()
+    if gpu and wav3_path:
+        steps += virtio_sound_steps()
     if not gpu:
         steps.append(FINAL_STEP)  # (the GPU steps end with a kernel panic)
     console = Console(args[1:], log)
@@ -954,6 +1013,8 @@ def main():
         console.process.kill()
     if wav_path:
         failures += check_sound(wav_path, wav2_path)
+    if wav3_path:
+        failures += check_virtio_sound(wav3_path)
     log.close()
     print(f"shell test: {'PASSED' if failures == 0 else f'{failures} FAILED'} (log: {log_path})")
     return 0 if failures == 0 else 1
