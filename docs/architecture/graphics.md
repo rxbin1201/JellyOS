@@ -568,8 +568,7 @@ the fastest the monitor takes. The EDID is read again; another monitor gets
 its own list of modes and, if the mode on the screen is not among them, its
 best one.
 
-**HDMI.** HDMI and DVI connectors are driven with DVI signalling, as the
-firmware does (no info frames). Three things differ from DisplayPort:
+**HDMI.** Three things differ from DisplayPort:
 
 | | DisplayPort | HDMI, DVI |
 | --- | --- | --- |
@@ -578,8 +577,26 @@ firmware does (no info frames). Three things differ from DisplayPort:
 | Monitor there? | It answers on the AUX channel | The hot plug pin |
 
 A mode switch on HDMI stops the timing generator, then the transmitter,
-sets the PLL, writes the timing and starts both again. Without scrambling
-the pixel clock ends at 340 MHz.
+sets the PLL, writes the timing and starts both again.
+
+The firmware drives an HDMI connector like a DVI one: pixels and nothing
+else. The driver does the same for a monitor whose EDID does not call it
+an HDMI one. For an HDMI monitor it sends HDMI proper, with the parts that
+are the same for every GPU in [`hdmi.c`](../../drivers/graphics/hdmi.c):
+
+| | |
+| --- | --- |
+| The sink | What the CTA extension of the EDID says about the monitor's input: the HDMI vendor block (it understands packets), the HDMI Forum's block (HDMI 2.0: how fast a signal, and that it has status and control registers, *SCDC*), whether it follows the colour range a source names |
+| Packets | Between the pixels: general control and null packets, and in every frame the **AVI info frame**, which says what the pixels are: RGB, full range, made by a computer, the picture's shape, and which of CTA-861's timings this is, if any. It goes into the memory of the encoder's generic packet 0 |
+| HDMI 2.0 | Above 340 MHz the data is scrambled and the clock lane runs at a quarter of its rate; the PHY makes signals up to 600 MHz. Before such a signal starts the monitor is told so in its SCDC registers, over the DDC line (I2C address 0x54), and when the signal goes back to a plain one. With this a mode like 3440x1440 at 100 Hz (536 MHz) works over HDMI |
+| Did it arrive? | A fast signal that the cable or the monitor does not carry gives a black screen while the pipe runs perfectly. So after the start the driver asks the monitor, for half a second, whether it found the clock and locked onto the three data lanes (SCDC status); if it says no, the mode counts as failed and the one before comes back |
+
+The video BIOS's tables are told "HDMI" as the kind of signal, and its
+table for an encoder's stream side is run with each mode (as Linux does).
+A monitor that was switched off or unplugged forgets what it was told:
+when it is back, a scrambled signal is started again from the SCDC write
+on. `amdgpu=native,dvi` keeps an HDMI monitor at DVI signalling, up to 340
+MHz, as before.
 
 **Other connectors.** The video BIOS lists the board's connectors (kind,
 encoder, DDC line, hot plug pin); on this hardware connector *n* uses PHY,
@@ -612,15 +629,15 @@ runs. Two rules came out of making this work on real hardware:
   reads as all ones. So the driver asks the PHY for its power state first
   (`transmitter_runs()`) and leaves the front end alone otherwise.
 
-`amdgpu=on,noflip`, `nopointer`, `novblank`, `noirq` leave single parts of
-the driver out (for finding the cause of a problem). `amdgpu=native,trace` logs every
+`amdgpu=on,noflip`, `nopointer`, `novblank`, `noirq`, `dvi` leave single
+parts of the driver out (for finding the cause of a problem). `amdgpu=native,trace` logs every
 register access of the video BIOS's tables (reads that repeat while a table
 waits are counted); together with `logfile=` (the boot entry `JellyOSLog`)
 this shows on another computer what a table did before the screen went
 dark.
 
-Not yet: several screens at once, HDMI with info frames and audio,
-acceleration.
+Not yet: several screens at once, sound over HDMI and DisplayPort, more
+than 8 bits per colour, acceleration.
 
 ## VirtIO GPU driver (Phase 12)
 

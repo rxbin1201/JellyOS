@@ -98,6 +98,7 @@
 #include "drivers/graphics/display.h"
 #include "drivers/graphics/dp_aux.h"
 #include "drivers/graphics/edid.h"
+#include "drivers/graphics/hdmi.h"
 
 #include "core/arch.h"
 #include "core/cmdline.h"
@@ -270,6 +271,24 @@
 #define DP_VID_M(i)           (0x15748 + 0x400u * (uint32_t)(i))
 #define DP_MSA_TIMING(i, k)   (0x15830 + 0x400u * (uint32_t)(i) + 4u * (uint32_t)(k)) /* what the monitor is told: 1-4 */
 #define DIG_CLOCK_PATTERN(i)  (0x154AC + 0x400u * (uint32_t)(i)) /* TMDS: the pattern on the clock lane (0x1F) */
+/* HDMI: packets between the pixels, and the fast signal of HDMI 2.0. Stream side of the encoder, like DIG_FE_CNTL. */
+#define HDMI_CONTROL(i)       (0x154C4 + 0x400u * (uint32_t)(i))
+#define HDMI_KEEPOUT          (1u << 0)
+#define HDMI_SCRAMBLE         (1u << 1)  /* the data is scrambled */
+#define HDMI_CLOCK_QUARTER    (1u << 2)  /* the clock lane runs at a quarter of the character rate */
+#define HDMI_NO_EXTRA_NULLS   (1u << 3)
+#define HDMI_PACKETS_V1       (1u << 4)
+#define HDMI_DEEP_COLOR       (1u << 24 | 3u << 28)
+#define HDMI_VBI_PACKETS(i)   (0x154D4 + 0x400u * (uint32_t)(i)) /* bit 0 null packets, 4 and 5 general control packets, 12 ACP */
+#define HDMI_GENERIC_SEND(i)  (0x154E0 + 0x400u * (uint32_t)(i)) /* generic packet 0: bit 0 send, bit 1 in every frame */
+#define HDMI_GENERIC_LINE(i)  (0x15554 + 0x400u * (uint32_t)(i)) /* bits 15:0: the line packet 0 is sent in */
+#define HDMI_GC(i)            (0x154EC + 0x400u * (uint32_t)(i)) /* bit 0: mute */
+#define HDMI_DB_CONTROL(i)    (0x15520 + 0x400u * (uint32_t)(i)) /* bit 12: no double buffering of the packets */
+#define AFMT_CNTL(i)          (0x15698 + 0x400u * (uint32_t)(i)) /* bit 0: the clock of the packet memory */
+#define AFMT_PACKETS(i)       (0x155AC + 0x400u * (uint32_t)(i)) /* bit 16 the hardware is reading, 17 never mind, 31:28 which packet */
+#define AFMT_UPDATE(i)        (0x1569C + 0x400u * (uint32_t)(i)) /* bit 2: packet 0 changes at once */
+#define AFMT_GENERIC_HDR(i)   (0x15530 + 0x400u * (uint32_t)(i)) /* the packet's three header bytes */
+#define AFMT_GENERIC(i, k)    (0x15534 + 0x400u * (uint32_t)(i) + 4u * (uint32_t)(k)) /* its 28 bytes, k = 0..7 */
 #define DP_PIXEL_FORMAT(i)    (0x15724 + 0x400u * (uint32_t)(i)) /* bits 26:24 colour depth (1: 8 bits) */
 #define DP_MSA_COLORIMETRY(i) (0x15728 + 0x400u * (uint32_t)(i)) /* bits 31:24: what the monitor is told about it */
 #define DIG_COUNT             5
@@ -325,6 +344,7 @@
 #define SMU_RESPONSE          0x58A6C
 
 #define TMDS_MAX_KHZ          340000  /* HDMI without scrambling */
+#define HDMI_SOURCE_MAX_KHZ   600000  /* the fastest HDMI signal the PHY makes (HDMI 2.0) */
 #define SMU_SET_DISPCLK       0x4     /* messages: argument and answer in MHz */
 #define SMU_SET_DPPCLK        0x7
 
@@ -333,6 +353,9 @@
 #define ATOM_SET_PIXEL_CLOCK  12      /* the PLL of a PHY as pixel clock for a timing generator (HDMI, DVI) */
 #define ATOM_PHY_PLL0         20      /* the PLL of PHY 0; the others follow */
 #define ATOM_MODE_DVI         2       /* kinds of signal: 0 DisplayPort, 2 DVI, 3 HDMI */
+#define ATOM_MODE_HDMI        3
+#define ATOM_ENCODER_CONTROL  4       /* the stream side of an encoder */
+#define ENCODER_STREAM_SETUP  0x0F
 #define CONNECTOR_HDMI        0x0C
 #define TRANSMITTER_DISABLE   0
 #define TRANSMITTER_ENABLE    1
@@ -357,6 +380,12 @@ typedef struct {
     volatile uint32_t *cursor;                 /* the pointer image, mapped */
     bool              flip_pending;
     uint32_t          refresh_mhz;             /* from the pixel clock, 0 if that is not known */
+
+    /* HDMI */
+    hdmi_sink_t       sink;                    /* what the monitor on an HDMI connector says about its input */
+    bool              hdmi;                    /* driven as HDMI (packets, the fast signal), not as DVI */
+    bool              scrambled;               /* the signal is a scrambled one (above 340 MHz) */
+    bool              encoder_table;           /* the video BIOS has the table that sets an encoder's stream side up */
 
     /* Interrupts */
     dma_buffer_t      ih_memory;               /* the ring, a page for the write pointer's copy, a page for dummy reads */
@@ -518,6 +547,47 @@ static void aux_enable(amdgpu_t *g, uint32_t i)
 }
 
 static bool ddc_read_block(amdgpu_t *g, uint32_t line, uint8_t offset, uint8_t *block);
+static bool ddc_transfer(amdgpu_t *g, uint32_t line, uint8_t address, const uint8_t *tx, uint32_t tx_length, uint8_t *rx,
+                         uint32_t rx_length);
+static bool contains(const char *text, const char *word);
+
+/* The monitor's status and control registers (SCDC) over the DDC line of the connector in use (hdmi.h). */
+static bool scdc_write(void *context, uint8_t address, const uint8_t *data, int length)
+{
+    amdgpu_t *g = context;
+
+    return ddc_transfer(g, (uint32_t)g->encoder, address, data, (uint32_t)length, NULL, 0);
+}
+
+static bool scdc_read(void *context, uint8_t address, uint8_t offset, uint8_t *buffer, int length)
+{
+    amdgpu_t *g = context;
+
+    return ddc_transfer(g, (uint32_t)g->encoder, address, &offset, 1, buffer, (uint32_t)length);
+}
+
+/*
+ * What the monitor on the HDMI connector says about its input, and with it how the connector is driven: as
+ * HDMI if the monitor is one ("amdgpu=...,dvi" keeps it at DVI, as the firmware drives it), and how fast.
+ */
+static void sink_update(amdgpu_t *g)
+{
+    char option[48];
+
+    hdmi_sink_read(g->edid, g->edid_blocks, &g->sink);
+    bool dvi = cmdline_value("amdgpu", option, sizeof(option)) && contains(option, "dvi");
+    g->hdmi = g->sink.hdmi && !dvi;
+    g->limit_khz = g->hdmi ? hdmi_pixel_limit(&g->sink, HDMI_SOURCE_MAX_KHZ) : TMDS_MAX_KHZ;
+    if (!g->sink.hdmi)
+        klog_info("amdgpu: the monitor is not an HDMI one (no such block in its EDID): driven as DVI, up to %u MHz",
+                  g->limit_khz / 1000);
+    else
+        klog_info("amdgpu: HDMI monitor: %s signals up to %u MHz%s; driven as %s, up to %u MHz",
+                  g->sink.scdc ? "HDMI 2.0," : "HDMI 1.x,",
+                  (g->sink.max_character_khz ? g->sink.max_character_khz : g->sink.max_tmds_khz) / 1000,
+                  g->sink.max_character_khz || g->sink.max_tmds_khz ? "" : " (not said)", g->hdmi ? "HDMI" : "DVI (dvi)",
+                  g->limit_khz / 1000);
+}
 
 /* The EDID of a monitor on an HDMI or DVI connector, over its DDC line: returns the number of valid blocks. */
 static int ddc_edid(amdgpu_t *g, uint32_t line, uint8_t *edid)
@@ -567,6 +637,7 @@ static void read_monitor(amdgpu_t *g)
             return;
         }
         g->mode_count = edid_collect_timings(g->edid, g->edid_blocks, g->modes, 0, MAX_MODES);
+        sink_update(g);
         /* Two modes can have the same timing and differ only in the pixel clock (60 and 100 Hz with the same
          * totals): of those with the timing on the screen, the one nearest to the measured refresh rate. */
         uint32_t measured = measure_refresh(g), nearest = 0xFFFFFFFF;
@@ -582,7 +653,7 @@ static void read_monitor(amdgpu_t *g)
         }
         klog_info("amdgpu: DDC line %d: EDID of %d block%s; the mode on the screen has a pixel clock of %u kHz", g->encoder,
                   g->edid_blocks, g->edid_blocks == 1 ? "" : "s", g->current.khz);
-        log_modes(g, " (too fast for HDMI without scrambling)");
+        log_modes(g, " (too fast for this HDMI connection)");
         return;
     }
     for (int i = 0; i < AUX_COUNT && g->aux_engine < 0; i++) {
@@ -1093,6 +1164,7 @@ static void atom_load(amdgpu_t *g, const device_t *device)
             klog_info("amdgpu: video BIOS of %u KiB from ACPI; transmitter control revision %u.%u", length >> 10, format,
                       content);
             g->pixel_clock_table = atom_table_revision(&g->atom, ATOM_SET_PIXEL_CLOCK, &format, &content) && content == 7;
+            g->encoder_table = atom_table_revision(&g->atom, ATOM_ENCODER_CONTROL, &format, &content) && content == 5;
             if (!g->pixel_clock_table)
                 klog_info("amdgpu: the video BIOS's pixel clock table is revision %u.%u (7 is known here): no HDMI modes",
                           format, content);
@@ -1130,7 +1202,7 @@ static bool atom_report(amdgpu_t *g, const char *what, bool ok)
 static bool transmitter(amdgpu_t *g, uint8_t action, uint8_t value, uint32_t khz)
 {
     uint32_t parameters[ATOM_PARAMETERS] = { 0 }, e = (uint32_t)g->encoder;
-    uint32_t mode = action == TRANSMITTER_LEVELS ? value : g->displayport ? 0 : ATOM_MODE_DVI;
+    uint32_t mode = action == TRANSMITTER_LEVELS ? value : g->displayport ? 0 : g->hdmi ? ATOM_MODE_HDMI : ATOM_MODE_DVI;
     uint32_t lanes = g->displayport ? g->lanes : 4;
 
     /* phy, action, kind of signal or levels, lanes; clock in 10 kHz; hot plug pin (from 1), front end, connector */
@@ -1157,12 +1229,29 @@ static bool set_pixel_clock(amdgpu_t *g, uint32_t khz)
 
     /* clock in 100 Hz; PLL, encoder, kind of signal, flags; timing generator, colour depth (0: 8 bits) */
     parameters[0] = khz * 10;
-    parameters[1] = (ATOM_PHY_PLL0 + e) | encoder_object << 8 | ATOM_MODE_DVI << 16;
+    parameters[1] = (ATOM_PHY_PLL0 + e) | encoder_object << 8 | (uint32_t)(g->hdmi ? ATOM_MODE_HDMI : ATOM_MODE_DVI) << 16;
     parameters[2] = (uint32_t)g->otg;
     g->atom_bad_register = 0;
     trace_start(g);
     klog_debug("amdgpu: pixel clock: %u kHz from the PLL of PHY %u", khz, e);
     return atom_report(g, "pixel clock table", atom_execute(&g->atom, ATOM_SET_PIXEL_CLOCK, parameters));
+}
+
+/* The video BIOS sets the stream side of encoder e up for an HDMI signal of khz (8 bits per colour). */
+static void encoder_stream_setup(amdgpu_t *g, uint32_t e, uint32_t khz)
+{
+    uint32_t parameters[ATOM_PARAMETERS] = { 0 };
+
+    if (!g->encoder_table)
+        return;
+    /* encoder, action, kind of signal, lanes; clock in 10 kHz; colour depth (2: 8 bits) */
+    parameters[0] = e | (uint32_t)ENCODER_STREAM_SETUP << 8 | (uint32_t)ATOM_MODE_HDMI << 16 | 4u << 24;
+    parameters[1] = khz / 10;
+    parameters[2] = 2;
+    g->atom_bad_register = 0;
+    trace_start(g);
+    klog_debug("amdgpu: encoder control: stream of encoder %u for HDMI at %u kHz", e, khz);
+    atom_report(g, "encoder control", atom_execute(&g->atom, ATOM_ENCODER_CONTROL, parameters));
 }
 
 /* A message to the system management unit; returns its answer, 0 if it does not answer. */
@@ -1335,10 +1424,12 @@ static uint32_t hpd_pins(amdgpu_t *g)
 }
 
 /*
- * One block of EDID over a DDC line with the hardware I2C engine (after Linux's dce_i2c_hw.c): write the
- * offset to device 0x50, then read 128 bytes, as two transactions of one run. False if nothing answers.
+ * I2C on a DDC line with the hardware I2C engine (after Linux's dce_i2c_hw.c): tx_length bytes written to the
+ * device at the 7-bit `address`, then, if rx_length is not 0, that many bytes read from it, as two
+ * transactions of one run. False if nothing answers.
  */
-static bool ddc_read_block(amdgpu_t *g, uint32_t line, uint8_t offset, uint8_t *block)
+static bool ddc_transfer(amdgpu_t *g, uint32_t line, uint8_t address, const uint8_t *tx, uint32_t tx_length, uint8_t *rx,
+                         uint32_t rx_length)
 {
     bool ok = false;
 
@@ -1353,14 +1444,18 @@ static bool ddc_read_block(amdgpu_t *g, uint32_t line, uint8_t offset, uint8_t *
     wr(g, I2C_SETUP(line), (rd(g, I2C_SETUP(line)) & 0x00FFFFFF) | 3u << 24 | 1u << 2 | 1u << 6);
     wr(g, I2C_ARBITRATION, rd(g, I2C_ARBITRATION) & ~(1u << 4));
 
-    wr(g, I2C_TRANSACTION(0), 1u << 8 | 1u << 12 | 1u << 16);                        /* write one byte, no stop */
-    wr(g, I2C_DATA, 1u << 31 | 0xA0u << 8);                                          /* device 0x50, writing */
-    wr(g, I2C_DATA, (uint32_t)offset << 8);
-    wr(g, I2C_TRANSACTION(1), 1u << 0 | 1u << 8 | 1u << 12 | 1u << 13 | 128u << 16); /* read 128 bytes, stop */
-    wr(g, I2C_DATA, 0xA1u << 8);                                                     /* device 0x50, reading */
+    /* Writing: start, the bytes; a stop only if nothing is read afterwards. */
+    wr(g, I2C_TRANSACTION(0), 1u << 8 | 1u << 12 | (rx_length ? 0 : 1u << 13) | tx_length << 16);
+    wr(g, I2C_DATA, 1u << 31 | (uint32_t)(address << 1) << 8);
+    for (uint32_t i = 0; i < tx_length; i++)
+        wr(g, I2C_DATA, (uint32_t)tx[i] << 8);
+    if (rx_length) {
+        wr(g, I2C_TRANSACTION(1), 1u << 0 | 1u << 8 | 1u << 12 | 1u << 13 | rx_length << 16); /* read, then stop */
+        wr(g, I2C_DATA, (uint32_t)(address << 1 | 1) << 8);
+    }
 
     wr(g, I2C_SETUP(line), rd(g, I2C_SETUP(line)) & ~(1u << 0 | 1u << 1 | 1u << 7 | 0xFFFFu << 8));
-    wr(g, I2C_CONTROL, (rd(g, I2C_CONTROL) & ~(0xFu | 3u << 20)) | 1u << 20);
+    wr(g, I2C_CONTROL, (rd(g, I2C_CONTROL) & ~(0xFu | 3u << 20)) | (rx_length ? 1u << 20 : 0));
     wr(g, I2C_CONTROL, rd(g, I2C_CONTROL) | 1u);
     for (int ms = 0; ms < 60; ms++) {
         uint32_t status = rd(g, I2C_SW_STATUS);
@@ -1370,16 +1465,22 @@ static bool ddc_read_block(amdgpu_t *g, uint32_t line, uint8_t offset, uint8_t *
         }
         sleep_ms(1);
     }
-    if (ok) {
-        wr(g, I2C_DATA, 1u << 31 | 3u << 16 | 1u); /* the reply follows the three bytes sent */
-        for (int i = 0; i < 128; i++)
-            block[i] = (uint8_t)(rd(g, I2C_DATA) >> 8);
+    if (ok && rx_length) {
+        wr(g, I2C_DATA, 1u << 31 | (tx_length + 2) << 16 | 1u); /* the reply follows the bytes sent */
+        for (uint32_t i = 0; i < rx_length; i++)
+            rx[i] = (uint8_t)(rd(g, I2C_DATA) >> 8);
     }
     wr(g, I2C_CONTROL, rd(g, I2C_CONTROL) | 1u << 1 | 1u << 3);
     wr(g, I2C_CONTROL, rd(g, I2C_CONTROL) & ~(1u << 1 | 1u << 3));
     wr(g, I2C_SETUP(line), rd(g, I2C_SETUP(line)) & ~(1u << 6));
     wr(g, I2C_ARBITRATION, (rd(g, I2C_ARBITRATION) & ~(1u << 20)) | 1u << 21);
     return ok;
+}
+
+/* One block of EDID: the offset written to device 0x50, then 128 bytes read. */
+static bool ddc_read_block(amdgpu_t *g, uint32_t line, uint8_t offset, uint8_t *block)
+{
+    return ddc_transfer(g, line, 0x50, &offset, 1, block, 128);
 }
 
 /* The connectors of the board as the video BIOS lists them: kind, encoder, DDC line, hot plug pin. */
@@ -1465,6 +1566,44 @@ static void connect_front_end(amdgpu_t *g, uint32_t e)
         wr(g, DIG_BE_CNTL(e), (back & ~(0x7Fu << 8)) | (1u << e) << 8);
 }
 
+/*
+ * The stream side of encoder e for HDMI (after Linux's enc1_stream_encoder_hdmi_set_stream_attribute() and
+ * enc2_update_hdmi_info_packet()): RGB with 8 bits per colour, general control and null packets, above 340 MHz
+ * scrambled data with the clock lane at a quarter of its rate, and the AVI info frame as generic packet 0 of
+ * every frame. The transmitter is on: these registers are the PHY's to clock (see transmitter_runs()).
+ */
+static void hdmi_stream(amdgpu_t *g, uint32_t e, const display_timing_t *t)
+{
+    bool fast = t->khz > TMDS_MAX_KHZ;
+    uint8_t frame[HDMI_INFOFRAME_SIZE + 3] = { 0 };
+
+    encoder_stream_setup(g, e, t->khz);
+    wr(g, DIG_FE_CNTL(e), (rd(g, DIG_FE_CNTL(e)) & ~(7u | 1u << 28 | 3u << 30)) | (uint32_t)g->otg);
+    wr(g, HDMI_CONTROL(e), (rd(g, HDMI_CONTROL(e)) & ~(HDMI_SCRAMBLE | HDMI_CLOCK_QUARTER | HDMI_DEEP_COLOR)) |
+                               HDMI_KEEPOUT | HDMI_NO_EXTRA_NULLS | HDMI_PACKETS_V1 |
+                               (fast ? HDMI_SCRAMBLE | HDMI_CLOCK_QUARTER : 0));
+    wr(g, HDMI_VBI_PACKETS(e), (rd(g, HDMI_VBI_PACKETS(e)) & ~(1u << 12)) | 1u << 0 | 1u << 4 | 1u << 5);
+    wr(g, HDMI_GC(e), rd(g, HDMI_GC(e)) & ~1u);
+
+    /* The AVI info frame into the memory of generic packet 0, then sent in line 2 of every frame. */
+    hdmi_avi_infoframe(t, fast, frame);
+    wr(g, AFMT_CNTL(e), rd(g, AFMT_CNTL(e)) | 1u);
+    wait_bits(g, AFMT_PACKETS(e), 1u << 16, 0, 2);
+    wr(g, AFMT_PACKETS(e), rd(g, AFMT_PACKETS(e)) | 1u << 17);
+    wr(g, AFMT_PACKETS(e), rd(g, AFMT_PACKETS(e)) & ~(0xFu << 28));
+    wr(g, AFMT_GENERIC_HDR(e), frame[0] | (uint32_t)frame[1] << 8 | (uint32_t)frame[2] << 16);
+    for (uint32_t k = 0; k < 8; k++) {
+        const uint8_t *b = frame + 3 + 4 * k; /* the checksum, then the frame's bytes; nothing after them */
+        wr(g, AFMT_GENERIC(e, k), k < 4 ? b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24 : 0);
+    }
+    wr(g, AFMT_UPDATE(e), rd(g, AFMT_UPDATE(e)) | 1u << 2);
+    wr(g, HDMI_DB_CONTROL(e), rd(g, HDMI_DB_CONTROL(e)) | 1u << 12);
+    wr(g, HDMI_GENERIC_LINE(e), (rd(g, HDMI_GENERIC_LINE(e)) & ~0xFFFFu) | 2);
+    wr(g, HDMI_GENERIC_SEND(e), rd(g, HDMI_GENERIC_SEND(e)) | 3u);
+    klog_debug("amdgpu: HDMI stream: control 0x%x, packets 0x%x 0x%x, video code %u%s", rd(g, HDMI_CONTROL(e)),
+               rd(g, HDMI_VBI_PACKETS(e)), rd(g, HDMI_GENERIC_SEND(e)), frame[7], fast ? ", scrambled" : "");
+}
+
 /* The reverse; `t` is the timing that was written. */
 static void pipe_start(amdgpu_t *g, const display_timing_t *t)
 {
@@ -1476,6 +1615,14 @@ static void pipe_start(amdgpu_t *g, const display_timing_t *t)
         klog_warn("amdgpu: the timing generator does not start (0x%x)", rd(g, OTG_CONTROL(g->otg)));
     wr(g, HUBP_CNTL(g->hubp), rd(g, HUBP_CNTL(g->hubp)) & ~(HUBP_BLANK | HUBP_NO_URGENCY));
     if (!g->displayport) {
+        /*
+         * HDMI: the stream side is set up before the transmitter goes on (the order of Linux: scrambling and the
+         * clock lane's rate are in place when the PHY starts). Its registers may be touched now because the front
+         * end is free: the video BIOS disconnected it from the back end when it switched the transmitter off.
+         */
+        bool early = g->hdmi && !(rd(g, DIG_BE_EN_CNTL(e)) & 1u) && !((rd(g, DIG_BE_CNTL(e)) >> 8) & 0x7F);
+        if (early)
+            hdmi_stream(g, e, t);
         /* HDMI, DVI: the transmitter on at the pixel clock; the encoder passes on what the timing generator makes. */
         transmitter(g, TRANSMITTER_ENABLE, 0, t->khz);
         if (!transmitter_runs(g, e)) {
@@ -1485,8 +1632,11 @@ static void pipe_start(amdgpu_t *g, const display_timing_t *t)
             return;
         }
         connect_front_end(g, e);
+        if (g->hdmi && !early)
+            hdmi_stream(g, e, t);
         wr(g, DIG_FE_CNTL(e), (rd(g, DIG_FE_CNTL(e)) & ~7u) | (uint32_t)g->otg);
-        wr(g, DIG_CLOCK_PATTERN(e), 0x1F);
+        if (!g->scrambled)
+            wr(g, DIG_CLOCK_PATTERN(e), 0x1F);
         return;
     }
     if (!transmitter_runs(g, e)) {
@@ -1623,13 +1773,81 @@ static uint32_t plan_mode(amdgpu_t *g, const display_timing_t *t, const display_
     return count;
 }
 
+/*
+ * HDMI or DVI, with the transmitter off: the PHY's PLL at the mode's pixel clock, and before that the monitor
+ * told whether the signal that comes is a scrambled one. (It forgets when it loses the signal, and it must
+ * know before the signal is there.)
+ */
+static void tmds_prepare(amdgpu_t *g, const display_timing_t *t)
+{
+    const hdmi_ddc_t ddc = { g, scdc_write, scdc_read };
+    bool scramble = g->hdmi && t->khz > TMDS_MAX_KHZ;
+
+    if (g->hdmi && g->sink.scdc && (scramble || g->scrambled)) {
+        uint8_t config = 0xEE;
+        if (!hdmi_scdc_configure(&ddc, scramble))
+            klog_warn("amdgpu: the monitor does not take the setting for a %s signal", scramble ? "scrambled" : "plain");
+        scdc_read(g, HDMI_SCDC_ADDRESS, 0x20, &config, 1);
+        klog_debug("amdgpu: the monitor is told: a %s signal (it now says 0x%x)", scramble ? "scrambled" : "plain", config);
+    }
+    g->scrambled = scramble;
+    set_pixel_clock(g, t->khz);
+}
+
+/*
+ * A scrambled signal is on its way. Whether it arrives only the monitor knows: it is asked for half a second
+ * whether it found the clock and locked onto the three data lanes. A monitor that does not say counts as yes.
+ */
+static bool scrambled_signal_arrives(amdgpu_t *g)
+{
+    const hdmi_ddc_t ddc = { g, scdc_write, scdc_read };
+    int locked = -1;
+
+    for (int tries = 0; tries < 10 && locked != 1; tries++) {
+        sleep_ms(50);
+        locked = hdmi_scdc_locked(&ddc);
+    }
+    klog_info("amdgpu: HDMI 2.0 signal: the monitor %s, scrambling %s",
+              locked == 1 ? "has locked onto it" : locked == 0 ? "does not lock onto it" : "does not say whether it arrives",
+              hdmi_scdc_scrambling_seen(&ddc) ? "seen" : "not seen");
+    if (locked != 1) {
+        /* Why not: what it was told, what it sees (bit 0 a clock, bits 1-3 the data lanes), errors it counted. */
+        uint32_t e = (uint32_t)g->encoder;
+        uint8_t config = 0xEE, scrambler = 0xEE, flags = 0xEE, version = 0xEE, errors[7] = { 0 };
+        scdc_read(g, HDMI_SCDC_ADDRESS, 0x01, &version, 1);
+        scdc_read(g, HDMI_SCDC_ADDRESS, 0x20, &config, 1);
+        scdc_read(g, HDMI_SCDC_ADDRESS, 0x21, &scrambler, 1);
+        scdc_read(g, HDMI_SCDC_ADDRESS, 0x40, &flags, 1);
+        bool counted = scdc_read(g, HDMI_SCDC_ADDRESS, 0x50, errors, 7);
+        klog_info("amdgpu: the monitor's registers: version 0x%x, signal setting 0x%x, scrambler 0x%x, status 0x%x, "
+                  "errors %s 0x%02x%02x 0x%02x%02x 0x%02x%02x", version, config, scrambler, flags,
+                  counted ? "counted" : "not readable", errors[1], errors[0], errors[3], errors[2], errors[5], errors[4]);
+        klog_info("amdgpu: our side: HDMI control 0x%x, clock pattern 0x%x, front end 0x%x, back end 0x%x (on 0x%x), "
+                  "PHY 0x%x", rd(g, HDMI_CONTROL(e)), rd(g, DIG_CLOCK_PATTERN(e)), rd(g, DIG_FE_CNTL(e)),
+                  rd(g, DIG_BE_CNTL(e)), rd(g, DIG_BE_EN_CNTL(e)), rd(g, PHY_CNTL6(e)));
+    }
+    return locked != 0;
+}
+
+/* The picture of an HDMI monitor again after it was away: it has forgotten what signal it was promised. */
+static void tmds_restart(amdgpu_t *g)
+{
+    pipe_stop(g);
+    tmds_prepare(g, &g->current);
+    surface_show(g, g->framebuffers[0]);
+    g->flip_pending = false;
+    pipe_start(g, &g->current);
+    if (g->scrambled)
+        scrambled_signal_arrives(g);
+}
+
 /* Stop the pipe, write a list (remembering what was there in `undo`), start it. True if frames come out intact. */
 static bool pipe_apply(amdgpu_t *g, const reg_write_t *list, uint32_t count, reg_write_t *undo,
                        const display_timing_t *t)
 {
     pipe_stop(g);
     if (!g->displayport)
-        set_pixel_clock(g, t->khz);
+        tmds_prepare(g, t);
     for (uint32_t i = 0; i < count; i++) {
         if (undo)
             undo[i] = (reg_write_t){ list[i].reg, rd(g, list[i].reg) };
@@ -1638,6 +1856,8 @@ static bool pipe_apply(amdgpu_t *g, const reg_write_t *list, uint32_t count, reg
     surface_show(g, g->framebuffers[0]);
     g->flip_pending = false;
     pipe_start(g, t);
+    if (!g->displayport && g->scrambled && !scrambled_signal_arrives(g))
+        return false;
 
     /* Let it settle, forget what happened while starting, then watch a quarter of a second. */
     sleep_ms(100);
@@ -1818,6 +2038,7 @@ static bool connector_move(amdgpu_t *g, int c, uint8_t *edid)
     if (g->encoder >= 0 && g->phy_on) /* (for HDMI pipe_stop() has done it) */
         transmitter(g, TRANSMITTER_DISABLE, 0, g->displayport ? g->link_khz : g->current.khz);
     g->lit = false;
+    g->scrambled = false;
     g->encoder = c;
     g->displayport = dp;
     g->aux_engine = dp ? c : -1;
@@ -1867,9 +2088,9 @@ static bool connector_move(amdgpu_t *g, int c, uint8_t *edid)
     } else {
         /* The pixel clock from the PHY's PLL (set with each mode), not from the DTO. */
         wr(g, PIXEL_RATE_CNTL(m), (rd(g, PIXEL_RATE_CNTL(m)) & ~(3u | 1u << 4)) | (e & 3u));
-        g->limit_khz = TMDS_MAX_KHZ;
+        sink_update(g);
     }
-    log_modes(g, dp ? " (too fast for this link)" : " (too fast for HDMI without scrambling)");
+    log_modes(g, dp ? " (too fast for this link)" : " (too fast for this HDMI connection)");
     return g->mode_count > 0;
 }
 
@@ -1964,8 +2185,14 @@ static void hotplug_thread(void *argument)
                     memcpy(g->edid, edid, sizeof(edid));
                     g->edid_blocks = blocks;
                     g->mode_count = edid_collect_timings(g->edid, blocks, g->modes, 0, MAX_MODES);
+                    if (!g->displayport)
+                        sink_update(g);
                     new_monitor = true;
                 }
+                /* It has forgotten that the signal is a scrambled one. (A monitor that does not take the mode
+                 * on the screen gets another one below instead.) */
+                if (!g->displayport && g->lit && g->scrambled && g->current.khz <= g->limit_khz)
+                    tmds_restart(g);
                 if (g->displayport && g->atom_ready) {
                     link_restore(g, rate);
                     watch_link = true;
@@ -2189,7 +2416,7 @@ static status_t amdgpu_probe(device_t *device)
     }
     read_monitor(g);
     atom_load(g, device);
-    /* amdgpu=...,noddc / noflip / nopointer / novblank / noirq leave one part out: for finding what a problem comes from. */
+    /* amdgpu=...,noddc / noflip / nopointer / novblank / noirq / dvi leave one part out: for finding what a problem comes from. */
     bool has_option = cmdline_value("amdgpu", option, sizeof(option));
     bool no_ddc = has_option && contains(option, "noddc"), no_flip = has_option && contains(option, "noflip");
     bool no_pointer = has_option && contains(option, "nopointer"), no_vblank = has_option && contains(option, "novblank");

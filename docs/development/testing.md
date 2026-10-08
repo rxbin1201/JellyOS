@@ -34,6 +34,13 @@ tables' timings, a mode named three times listed once, interlaced modes
 and those without square pixels left out, reduced blanking for a flat
 panel and the classic one for an analog monitor, and the order of the
 sorted list.
+[`tests/unit/hdmi_test.c`](../../tests/unit/hdmi_test.c) covers
+`drivers/graphics/hdmi.c`: what the EDID of a DVI, an HDMI 1.4 and an HDMI
+2.0 monitor says about its input and how fast a mode may be on each, the
+bytes of the AVI info frame (checksum, RGB, range, picture shape, video
+code, the codes that only an HDMI 2.0 signal may name), and the talk with
+a monitor's status and control registers before a scrambled signal,
+against registers that exist only in the test.
 
 ## Kernel self-tests (`make test`)
 

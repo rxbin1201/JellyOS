@@ -181,6 +181,19 @@ static void timing_from(const standard_timing_t *s, display_timing_t *t)
                              .vsw = (uint32_t)(s->vse - s->vss), .vt = s->vt, .hpos = s->hpos, .vpos = s->vpos };
 }
 
+uint8_t edid_cta_code(const display_timing_t *t)
+{
+    for (uint32_t i = 0; i < sizeof(cta_timings) / sizeof(cta_timings[0]); i++) {
+        const standard_timing_t *s = &cta_timings[i];
+        uint32_t difference = s->khz > t->khz ? s->khz - t->khz : t->khz - s->khz;
+        /* (The standard's timings also run at 1000/1001 of their rate: 59.94 Hz is the same code as 60.) */
+        if (s->ha == t->ha && s->va == t->va && s->ht == t->ht && s->vt == t->vt && difference <= s->khz / 200 &&
+            !t->interlaced)
+            return s->code;
+    }
+    return 0;
+}
+
 /* Add a timing that comes from a table, unless the list has the mode already. */
 static uint32_t add_named(display_timing_t *list, uint32_t count, uint32_t max, const standard_timing_t *s)
 {

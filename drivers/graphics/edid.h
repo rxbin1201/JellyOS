@@ -53,6 +53,9 @@ bool     edid_timing_parse(const uint8_t *descriptor, display_timing_t *timing);
  */
 uint32_t edid_collect_timings(const uint8_t *edid, int blocks, display_timing_t *list, uint32_t count, uint32_t max);
 
+/* The CTA video code of a timing (its numbers are those of the standard's table), 0 if it has none. */
+uint8_t  edid_cta_code(const display_timing_t *timing);
+
 /* Refresh rate in hundredths of a hertz, and in frames per 1000 seconds. */
 uint32_t display_timing_hz100(const display_timing_t *timing);
 uint32_t display_timing_mhz(const display_timing_t *timing);
