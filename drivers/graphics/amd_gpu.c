@@ -106,9 +106,51 @@
 #include "memory/layout.h"
 #include "memory/vmm.h"
 #include "scheduler/thread.h"
+#include "scheduler/wait.h"
 #include "time/clock.h"
 
 /* --- Registers (byte offsets in BAR 5) ------------------------------------------------- */
+
+/*
+ * Interrupts. The GPU has one interrupt for everything: whatever happens in one of its blocks is written as an
+ * entry of 32 bytes into a ring in main memory by the "interrupt handler" block (IH), which then raises the
+ * interrupt. The driver reads the entries up to the write pointer and says how far it got.
+ */
+#define IH_RB_CNTL            0x4480
+#define IH_RB_BASE            0x4484  /* bits 39:8 of the ring's address */
+#define IH_RB_BASE_HI         0x4488  /* bits 47:40 */
+#define IH_RB_RPTR            0x448C  /* read up to here (bytes); writing it also arms the interrupt again */
+#define IH_RB_WPTR            0x4490  /* written up to here (bytes); bit 0: the ring ran over */
+#define IH_RB_WPTR_ADDR_HI    0x4494  /* where the GPU keeps a copy of the write pointer in memory */
+#define IH_RB_WPTR_ADDR_LO    0x4498
+#define IH_DOORBELL_RPTR      0x449C  /* bit 28: the read pointer comes through a doorbell (not used) */
+#define IH_STATUS             0x4588
+#define IH_CHICKEN            0x48B0  /* bit 4: the ring's address may be one of main memory */
+#define INTERRUPT_CNTL        0x3844  /* the PCI side: bit 0 dummy read by hand, bit 3 the ring is not cached */
+#define INTERRUPT_CNTL2       0x3848  /* a page for that dummy read, >> 8 */
+#define IH_DOORBELL_RANGE     0x3BC8  /* bits 20:16: how many doorbells are the IH's (none) */
+
+#define IH_RB_ENABLE          (1u << 0)
+#define IH_RB_SIZE(log2)      ((uint32_t)(log2) << 1) /* of the ring in dwords */
+#define IH_RB_SIZE_MASK       (0x1Fu << 1)
+#define IH_GPU_TIMESTAMPS     (1u << 7)
+#define IH_WPTR_WRITEBACK     (1u << 8)
+#define IH_OVERFLOW_ENABLE    (1u << 16)
+#define IH_ENABLE_INTR        (1u << 17)
+#define IH_MC_SNOOP           (1u << 20)
+#define IH_RPTR_REARM         (1u << 21)
+#define IH_MC_RO              (1u << 22)
+#define IH_MC_VMID_MASK       (0xFu << 24)
+#define IH_MC_SPACE_MASK      (7u << 28)
+#define IH_MC_SPACE_BUS       (1u << 28) /* the ring's address is a bus address, not one of the GPU's own */
+#define IH_OVERFLOW_CLEAR     (1u << 31)
+#define IH_CHICKEN_GPA        (1u << 4)
+
+#define IH_RING_BYTES         (64u << 10)
+#define IH_ENTRY_BYTES        32
+#define IH_CLIENT_DISPLAY     4    /* who an entry is from (its byte 0); byte 1 says what happened: */
+#define IH_SOURCE_VSTARTUP    0x3C /* + m: timing generator m starts a new frame (in the vertical blank) */
+#define IH_SOURCE_VUPDATE     0x57 /* + m: its double buffered registers took their new values (a flip happened) */
 
 #define PIPES                 4
 
@@ -196,6 +238,12 @@
 #define OTG_V_SYNC_CNTL(m)    (0x13FE0 + OTG(m))
 #define OTG_CONTROL(m)        (0x14004 + OTG(m)) /* bit 0 on, bits 9:8 where to stop, bit 16 running */
 #define OTG_FRAME_COUNT(m)    (0x14030 + OTG(m))
+#define OTG_SYNC_STATUS(m)    (0x14128 + OTG(m)) /* the timing generator's interrupts: */
+#define OTG_VSTARTUP_INT      (1u << 0)          /*   a frame starts: on, */
+#define OTG_VSTARTUP_CLEAR    (1u << 4)          /*   taken note of */
+#define OTG_VUPDATE_INT       (1u << 12)         /*   the registers were updated: on, */
+#define OTG_VUPDATE_CLEAR     (1u << 16)         /*   taken note of */
+#define OTG_SYNC_KEEP         (0x000C30E3u)      /* the bits of the register that are settings */
 #define OTG_CLOCK_CONTROL(m)  (0x14118 + OTG(m)) /* bit 16 busy */
 #define OTG_VSTARTUP(m)       (0x1411C + OTG(m)) /* lines before the picture at which the HUBP starts */
 #define OTG_VUPDATE(m)        (0x14120 + OTG(m)) /* 15:0 offset in pixels, 25:16 width */
@@ -309,6 +357,19 @@ typedef struct {
     volatile uint32_t *cursor;                 /* the pointer image, mapped */
     bool              flip_pending;
     uint32_t          refresh_mhz;             /* from the pixel clock, 0 if that is not known */
+
+    /* Interrupts */
+    dma_buffer_t      ih_memory;               /* the ring, a page for the write pointer's copy, a page for dummy reads */
+    volatile uint32_t *ih_ring;
+    uint32_t          ih_rptr;
+    uint32_t          irq;
+    bool              vblank_irq;              /* frames are counted by interrupt (else: the frame counter is polled) */
+    bool              irq_storm;               /* too many interrupts: switched off in the handler */
+    uint64_t          irqs, vblanks, vupdates, strangers; /* interrupts, and entries by kind */
+    uint32_t          stranger[4];             /* the first entries that were none of ours (their first dword) */
+    uint64_t          irq_window, irq_window_count; /* for noticing a storm: a second, and the interrupts in it */
+    uint32_t          irq_misses;              /* waits for a frame that timed out although frames went by */
+    wait_queue_t      frame;                   /* woken by the frame interrupts */
 
     int               aux_engine;              /* the AUX channel the monitor answers on, -1 if none */
     uint32_t          link_khz, lanes;         /* DisplayPort link as the firmware trained it */
@@ -607,6 +668,155 @@ static void surface_show(amdgpu_t *g, uint64_t offset)
     wr(g, SURFACE_ADDRESS(g->hubp), (uint32_t)address);
 }
 
+/* --- Interrupts ------------------------------------------------------------------------ */
+
+/* The timing generator's two interrupts and the ring off. Interrupt or thread context. */
+static void interrupts_off(amdgpu_t *g)
+{
+    wr(g, OTG_SYNC_STATUS(g->otg), (rd(g, OTG_SYNC_STATUS(g->otg)) & OTG_SYNC_KEEP & ~(OTG_VSTARTUP_INT | OTG_VUPDATE_INT)) |
+                                       OTG_VSTARTUP_CLEAR | OTG_VUPDATE_CLEAR);
+    wr(g, IH_RB_CNTL, rd(g, IH_RB_CNTL) & ~(IH_RB_ENABLE | IH_ENABLE_INTR));
+    g->vblank_irq = false;
+}
+
+static void amdgpu_interrupt(void *context)
+{
+    amdgpu_t *g = context;
+    uint32_t mask = IH_RING_BYTES - 1, wptr, sync = 0;
+    uint64_t now = clock_monotonic_ns();
+
+    /* An interrupt that cannot be quietened would stop the machine: more than a few thousand a second and it is over. */
+    g->irqs++;
+    if (now - g->irq_window > 1000000000ull) {
+        g->irq_window = now;
+        g->irq_window_count = 0;
+    }
+    if (++g->irq_window_count > 20000) {
+        g->irq_storm = true;
+        interrupts_off(g);
+        wr(g, IH_RB_RPTR, rd(g, IH_RB_WPTR) & mask);
+        wait_queue_wake_all(&g->frame, STATUS_SUCCESS);
+        return;
+    }
+
+    for (int round = 0; round < 4; round++) {
+        wptr = rd(g, IH_RB_WPTR);
+        if (wptr & 1u) {
+            /* The ring ran over: go on behind the oldest entry that is still whole, and take the mark away. */
+            g->ih_rptr = (wptr + IH_ENTRY_BYTES) & mask & ~(IH_ENTRY_BYTES - 1);
+            wr(g, IH_RB_CNTL, rd(g, IH_RB_CNTL) | IH_OVERFLOW_CLEAR);
+        }
+        wptr &= mask & ~(IH_ENTRY_BYTES - 1);
+        if (wptr == g->ih_rptr)
+            break;
+        while (g->ih_rptr != wptr) {
+            uint32_t what = g->ih_ring[g->ih_rptr / 4], client = what & 0xFF, source = (what >> 8) & 0xFF;
+
+            g->irq_window_count++;
+            if (client == IH_CLIENT_DISPLAY && source == IH_SOURCE_VSTARTUP + (uint32_t)g->otg) {
+                g->vblanks++;
+                sync |= OTG_VSTARTUP_CLEAR;
+            } else if (client == IH_CLIENT_DISPLAY && source == IH_SOURCE_VUPDATE + (uint32_t)g->otg) {
+                g->vupdates++;
+                sync |= OTG_VUPDATE_CLEAR;
+            } else {
+                if (g->strangers < 4)
+                    g->stranger[g->strangers] = what;
+                g->strangers++;
+            }
+            g->ih_rptr = (g->ih_rptr + IH_ENTRY_BYTES) & mask;
+        }
+        /* Taken note of: the timing generator may report the next one. */
+        if (sync)
+            wr(g, OTG_SYNC_STATUS(g->otg), (rd(g, OTG_SYNC_STATUS(g->otg)) & OTG_SYNC_KEEP) | sync);
+        wr(g, IH_RB_RPTR, g->ih_rptr);
+    }
+    if (sync)
+        wait_queue_wake_all(&g->frame, STATUS_SUCCESS);
+}
+
+static void interrupts_report(amdgpu_t *g, const char *when)
+{
+    klog_info("amdgpu: interrupts %s: %lu, frames %lu, updates %lu, other entries %lu (first 0x%x 0x%x)", when, g->irqs,
+              g->vblanks, g->vupdates, g->strangers, g->stranger[0], g->stranger[1]);
+    klog_info("amdgpu: ring control 0x%x, written to 0x%x (copy in memory 0x%x), read to 0x%x, status 0x%x, chicken "
+              "0x%x; PCI side 0x%x; timing generator 0x%x", rd(g, IH_RB_CNTL), rd(g, IH_RB_WPTR),
+              g->ih_ring[IH_RING_BYTES / 4], rd(g, IH_RB_RPTR), rd(g, IH_STATUS), rd(g, IH_CHICKEN), rd(g, INTERRUPT_CNTL),
+              rd(g, OTG_SYNC_STATUS(g->otg)));
+    klog_info("amdgpu: the ring starts with 0x%x 0x%x 0x%x 0x%x, 0x%x 0x%x 0x%x 0x%x", g->ih_ring[0], g->ih_ring[1],
+              g->ih_ring[2], g->ih_ring[3], g->ih_ring[4], g->ih_ring[5], g->ih_ring[6], g->ih_ring[7]);
+}
+
+/*
+ * Frames by interrupt instead of by looking at the frame counter every millisecond (after Linux's vega10_ih.c
+ * and the display core's interrupt service for DCN 2.1): the ring in main memory, the GPU's MSI, and the timing
+ * generator's "a frame starts" and "registers updated" as the two things to be told about. Then it is checked
+ * that they really arrive; if not, everything is switched off again and the polling stays. Thread context.
+ */
+static bool interrupts_start(amdgpu_t *g, device_t *device)
+{
+    uint32_t log2 = 0;
+
+    while ((4u << log2) < IH_RING_BYTES)
+        log2++;
+    wait_queue_init(&g->frame);
+    if (STATUS_IS_ERROR(dma_alloc(device, IH_RING_BYTES + 2 * PAGE_SIZE, ~0ULL, &g->ih_memory))) {
+        klog_info("amdgpu: no memory for the interrupt ring: frames are timed by polling");
+        return false;
+    }
+    g->ih_ring = g->ih_memory.virt;
+    uint64_t ring = g->ih_memory.phys, copy = ring + IH_RING_BYTES, dummy = copy + PAGE_SIZE;
+
+    /* Everything off, then the ring: where it is, how large, that its address is one of main memory. */
+    uint32_t control = rd(g, IH_RB_CNTL) & ~(IH_RB_ENABLE | IH_ENABLE_INTR);
+    wr(g, IH_RB_CNTL, control);
+    wr(g, INTERRUPT_CNTL2, (uint32_t)(dummy >> 8));
+    wr(g, INTERRUPT_CNTL, rd(g, INTERRUPT_CNTL) & ~(1u << 0 | 1u << 3));
+    wr(g, IH_CHICKEN, rd(g, IH_CHICKEN) | IH_CHICKEN_GPA);
+    wr(g, IH_RB_BASE, (uint32_t)(ring >> 8));
+    wr(g, IH_RB_BASE_HI, (uint32_t)(ring >> 40) & 0xFF);
+    control = (control & ~(IH_RB_SIZE_MASK | IH_MC_SPACE_MASK | IH_MC_RO | IH_MC_VMID_MASK)) | IH_MC_SPACE_BUS |
+              IH_OVERFLOW_CLEAR | IH_OVERFLOW_ENABLE | IH_RB_SIZE(log2) | IH_WPTR_WRITEBACK | IH_MC_SNOOP | IH_RPTR_REARM;
+    wr(g, IH_RB_CNTL, control);
+    wr(g, IH_RB_WPTR_ADDR_LO, (uint32_t)copy);
+    wr(g, IH_RB_WPTR_ADDR_HI, (uint32_t)(copy >> 32) & 0xFFFF);
+    wr(g, IH_RB_WPTR, 0);
+    wr(g, IH_RB_RPTR, 0);
+    wr(g, IH_DOORBELL_RPTR, 0);
+    wr(g, IH_DOORBELL_RANGE, rd(g, IH_DOORBELL_RANGE) & ~(0x1Fu << 16));
+    g->ih_rptr = 0;
+
+    /* The GPU writes the ring itself, and its interrupt is a message. */
+    pci_enable_device(g->pci, true);
+    if (STATUS_IS_ERROR(pci_enable_msi(g->pci, amdgpu_interrupt, g, &g->irq))) {
+        klog_info("amdgpu: no MSI interrupt: frames are timed by polling");
+        dma_free(&g->ih_memory);
+        return false;
+    }
+    g->irq_window = clock_monotonic_ns();
+    wr(g, IH_RB_CNTL, control | IH_RB_ENABLE | IH_GPU_TIMESTAMPS | IH_ENABLE_INTR);
+    wr(g, OTG_SYNC_STATUS(g->otg), (rd(g, OTG_SYNC_STATUS(g->otg)) & OTG_SYNC_KEEP) | OTG_VSTARTUP_INT | OTG_VUPDATE_INT |
+                                       OTG_VSTARTUP_CLEAR | OTG_VUPDATE_CLEAR);
+
+    /* Do they come? A quarter of a second is 12 frames and more. */
+    uint32_t frames = rd(g, OTG_FRAME_COUNT(g->otg));
+    sleep_ms(250);
+    frames = rd(g, OTG_FRAME_COUNT(g->otg)) - frames;
+    interrupts_report(g, "after a quarter of a second");
+    if (g->irq_storm || g->vblanks < 3 || g->vblanks > (uint64_t)frames + 3) {
+        klog_warn("amdgpu: %s (%lu for %u frames): frames are timed by polling",
+                  g->irq_storm ? "interrupts came without end and were switched off" : "the frame interrupt does not work",
+                  g->vblanks, frames);
+        interrupts_off(g);
+        pci_disable_msi(g->pci);
+        return false;
+    }
+    g->vblank_irq = true;
+    klog_info("amdgpu: frames are timed by interrupt (%lu in %u frames; %s)", g->vblanks, frames,
+              g->vupdates ? "a flip is reported, too" : "no report of flips: looked for after each frame");
+    return true;
+}
+
 /* --- Driver operations for the display layer ------------------------------------------ */
 
 static amdgpu_t *amdgpu_of(display_t *display)
@@ -614,9 +824,56 @@ static amdgpu_t *amdgpu_of(display_t *display)
     return display->driver_data;
 }
 
+/* The next frame by interrupt; after a flip, the frame with which the hardware has taken the new address. */
+static status_t wait_frame_interrupt(amdgpu_t *g, uint64_t timeout_ns)
+{
+    uint64_t deadline = wait_deadline(timeout_ns);
+    uint32_t counter = rd(g, OTG_FRAME_COUNT(g->otg));
+    status_t status = STATUS_SUCCESS;
+
+    uint64_t flags = arch_interrupts_save();
+    uint64_t start = g->vblanks;
+    while (status == STATUS_SUCCESS && g->vblank_irq) {
+        if (g->vblanks == start) {
+            status = wait_queue_block(&g->frame, deadline);
+            continue;
+        }
+        if (!g->flip_pending || !(rd(g, FLIP_CONTROL(g->hubp)) & FLIP_PENDING))
+            break;
+        /*
+         * The frame has started, the new address is taken a few lines later: the "registers updated" interrupt
+         * wakes this up, and should it not come, a millisecond does.
+         */
+        uint64_t soon = wait_deadline(1000000);
+        status = wait_queue_block(&g->frame, soon < deadline ? soon : deadline);
+        if (status == STATUS_TIMEOUT && soon < deadline)
+            status = STATUS_SUCCESS;
+    }
+    arch_interrupts_restore(flags);
+
+    if (status == STATUS_TIMEOUT && g->vblank_irq && rd(g, OTG_FRAME_COUNT(g->otg)) != counter &&
+        ++g->irq_misses >= 3) {
+        /* Frames go by and no interrupt says so (three waits in a row): back to looking at the frame counter. */
+        interrupts_off(g);
+        klog_warn("amdgpu: the frame interrupt has stopped: frames are timed by polling from now on");
+        interrupts_report(g, "so far");
+    } else if (status == STATUS_SUCCESS) {
+        g->irq_misses = 0;
+    }
+    return status;
+}
+
 static status_t amdgpu_wait_vblank(display_t *display, uint64_t timeout_ns)
 {
     amdgpu_t *g = amdgpu_of(display);
+
+    if (g->vblank_irq) {
+        status_t status = wait_frame_interrupt(g, timeout_ns);
+        if (status == STATUS_SUCCESS)
+            g->flip_pending = false;
+        if (g->vblank_irq || status != STATUS_SUCCESS)
+            return status;
+    }
     uint64_t end = clock_monotonic_ns() + timeout_ns;
     uint32_t frame = rd(g, OTG_FRAME_COUNT(g->otg));
 
@@ -1932,10 +2189,11 @@ static status_t amdgpu_probe(device_t *device)
     }
     read_monitor(g);
     atom_load(g, device);
-    /* amdgpu=...,noddc / noflip / nopointer / novblank leave one part out: for finding what a problem comes from. */
+    /* amdgpu=...,noddc / noflip / nopointer / novblank / noirq leave one part out: for finding what a problem comes from. */
     bool has_option = cmdline_value("amdgpu", option, sizeof(option));
     bool no_ddc = has_option && contains(option, "noddc"), no_flip = has_option && contains(option, "noflip");
     bool no_pointer = has_option && contains(option, "nopointer"), no_vblank = has_option && contains(option, "novblank");
+    bool no_irq = has_option && contains(option, "noirq");
     g->trace = has_option && contains(option, "trace");
     g->phy_on = true; /* the firmware's connector shows a picture */
     klog_debug("amdgpu: PHY control: 0x%x, 0x%x, 0x%x", rd(g, PHY_CNTL6(0)), rd(g, PHY_CNTL6(1)), rd(g, PHY_CNTL6(2)));
@@ -1965,6 +2223,10 @@ static status_t amdgpu_probe(device_t *device)
 
     if (measured >= 10000 && !no_vblank) {
         amdgpu_ops.wait_vblank = amdgpu_wait_vblank;
+        if (no_irq)
+            klog_info("amdgpu: no interrupts (noirq): frames are timed by polling");
+        else
+            interrupts_start(g, device);
         void *second = room && !no_flip ? (void *)vmm_map_mmio(g->aperture + g->framebuffers[1], d->info.size, VM_WRITE_COMBINING)
                             : NULL;
         if (second) {

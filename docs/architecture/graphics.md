@@ -431,7 +431,7 @@ firmware's mode until another one is chosen. It offers:
 | | |
 | --- | --- |
 | Hardware pointer | The cursor of the HUBP and DPP, 64x64 ARGB. The registers hold the place of the hot spot; an image that hangs over the left or top edge is shown by moving the hot spot into the image |
-| Vertical blank | The timing generator's frame counter, polled every millisecond. Interrupts of this GPU arrive through a ring buffer (IH) that is not set up yet |
+| Vertical blank | An interrupt of the timing generator ("a frame starts"), see below; if it does not arrive, the frame counter is polled every millisecond |
 | Page flipping | The HUBP's surface address, which the hardware takes over at the next frame; the wait ends when the "flip pending" bit is gone |
 
 The second framebuffer and the pointer image lie in the GPU's video memory
@@ -493,6 +493,30 @@ through functions of the driver), which is what makes it testable: a unit
 test runs it on a small image built by hand
 ([`tests/unit/atom_test.c`](../../tests/unit/atom_test.c)).
 
+**Interrupts.** The GPU has one interrupt for everything. Whatever happens
+in one of its blocks is written as an entry of 32 bytes (who, what, when)
+into a ring by the *interrupt handler* block (IH), which then raises the
+GPU's MSI; the driver reads the entries up to the write pointer and writes
+back how far it got, which arms the interrupt again. The ring lies in main
+memory (the IH is told that its address is a bus address), so none of the
+GPU's own memory management is needed for it. After Linux's `vega10_ih.c`.
+
+The driver asks the timing generator for two events: *VSTARTUP*, the start
+of a new frame inside the vertical blank, which is what `wait_vblank`
+waits for, and *VUPDATE*, the moment the double buffered registers take
+their new values, which is when a flip has happened. A wait after a flip
+is woken by the first, finds the flip still pending and is woken again by
+the second a few lines later.
+
+Nothing of this can be tested without the hardware, so the driver checks
+it itself: after switching the interrupts on it counts them for a quarter
+of a second against the frame counter. If none or far too many arrive, or
+if later three waits in a row time out while frames go by, everything is
+switched off again and frames are timed by polling as before; `dmesg
+amdgpu` shows the ring's registers in that case. An interrupt that cannot
+be quietened (more than 20000 a second) is switched off in the handler.
+`amdgpu=native,noirq` leaves the interrupts out.
+
 **Hot plug.** As in the Intel driver, a thread reads the monitor's link
 status over the AUX channel once a second. No answer: the monitor is gone.
 When it answers again, or reports the link lost while staying connected (it
@@ -545,8 +569,8 @@ runs. Two rules came out of making this work on real hardware:
   reads as all ones. So the driver asks the PHY for its power state first
   (`transmitter_runs()`) and leaves the front end alone otherwise.
 
-`amdgpu=on,noflip`, `nopointer`, `novblank` leave single parts of the driver
-out (for finding the cause of a problem). `amdgpu=native,trace` logs every
+`amdgpu=on,noflip`, `nopointer`, `novblank`, `noirq` leave single parts of
+the driver out (for finding the cause of a problem). `amdgpu=native,trace` logs every
 register access of the video BIOS's tables (reads that repeat while a table
 waits are counted); together with `logfile=` (the boot entry `JellyOSLog`)
 this shows on another computer what a table did before the screen went
