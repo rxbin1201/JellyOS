@@ -13,18 +13,28 @@
  * and binds the converters to its two streams. All volume control is left
  * to the audio server's mixer.
  *
+ * The sound of a monitor on HDMI or DisplayPort is a codec, too: a digital
+ * one, part of the graphics chip, with a converter and a pin for each
+ * place the graphics side can send sound to. The driver takes the first
+ * such pair: the stream goes to the converter, and the graphics driver
+ * puts what arrives there into the picture's signal (for AMD graphics:
+ * its audio endpoint 0, see drivers/graphics/amd_gpu.c). A controller with
+ * such a codec becomes an audio device of its own, "Monitor sound".
+ *
  * The format is fixed: 48 kHz, 16 bits, stereo. Each stream buffer has
  * FRAGMENTS periods of 10 ms; playback keeps the next period filled ahead
  * of the hardware position (latency 10-20 ms on top of the device ring).
  *
  * Tested with QEMU's codecs (hda-output, hda-micro, hda-duplex). Not yet:
- * jack detection, digital outputs (HDMI), other sample formats, suspend.
+ * jack detection, other sample formats, suspend; of the digital codecs
+ * only AMD's (1002:aa01).
  */
 
 #include "audio/device/audio_device.h"
 #include "drivers/bus/pci/pci.h"
 #include "drivers/core/module.h"
 
+#include "core/arch.h"
 #include "core/format.h"
 #include "core/log.h"
 #include "core/string.h"
@@ -72,6 +82,7 @@
 #define SD_CTL_RESET (1u << 0)
 #define SD_CTL_RUN   (1u << 1)
 #define SD_CTL_IOCE  (1u << 2) /* interrupt on completion */
+#define SD_CTL2_TRAFFIC_PRIORITY 0x04 /* in the third byte: the stream's DMA is not snooped */
 #define SD_STS_BCIS  (1u << 2) /* buffer completion */
 #define SD_STS_ALL   0x1C
 
@@ -84,6 +95,16 @@
 #define VERB_SET_STREAM      0x706
 #define VERB_SET_PIN_CONTROL 0x707
 #define VERB_SET_EAPD        0x70C
+#define VERB_SET_DIGITAL     0x70D /* a digital converter: bit 0 on */
+#define VERB_SET_CHANNELS    0x72D /* a converter: channels - 1 */
+/* The codec of AMD graphics (vendor 1002): verbs of its own */
+#define ATI_SET_RAMP_RATE    0x770
+#define ATI_SET_ALLOCATION   0x771 /* which loudspeakers the channels are (0: front left and right) */
+#define ATI_SET_DOWNMIX      0x772
+#define ATI_SET_SLOT_PAIR    0x777 /* slots 0+1 of the signal (0x778: 2+3, ...): stream channel << 4, bit 0 on */
+#define ATI_SET_SLOT_ODD     0x785 /* slot 1 (0x786: 3, ...) when every channel is mapped by itself */
+#define ATI_SLOT_ON          0x01
+#define ATI_SET_CHANNEL_MODE 0x789 /* 1: every channel is mapped by itself */
 #define VERB_GET_PIN_SENSE   0xF09 /* bit 31: something is plugged in; digital pins, bit 30: its description is valid */
 #define VERB_GET_ELD_SIZE    0xF2E /* with payload 8: bytes of the monitor's description (ELD) the pin holds */
 #define VERB_GET_ELD_BYTE    0xF2F /* payload: which byte; bit 31 of the answer: valid */
@@ -180,6 +201,13 @@ typedef struct {
     uint32_t          corb_size, rirb_size, rirb_read;
     hda_stream_t      out, in;
     audio_device_t    audio;
+    bool              monitor;  /* the output is a digital codec: the sound of a monitor */
+    struct {
+        uint8_t  address, pin, converter; /* of the codec, and the pair of widgets in use */
+        uint32_t revision;
+        bool     amd, pin_amp, pin_select, power;
+    } sink;
+    bool              no_snoop; /* the controller reads its buffers past the CPU's caches (AMD's HDMI controllers) */
 } hda_t;
 
 /* --- Registers ------------------------------------------------------------------- */
@@ -512,7 +540,93 @@ static uint32_t setup_codec(hda_t *hda, hda_codec_t *codec, bool want_playback, 
     return flags;
 }
 
+/*
+ * Tell the monitor's codec (again) what it is to do: the pin on, the converter fed by the playback stream
+ * with two channels of 16 bits at 48 kHz. Thread context.
+ */
+static void monitor_program(hda_t *hda)
+{
+    hda_codec_t codec = { .address = hda->sink.address }; /* (for verb(): only the address is looked at) */
+    uint8_t pin = hda->sink.pin, converter = hda->sink.converter;
+
+    if (hda->sink.power) {
+        verb(hda, &codec, converter, VERB_SET_POWER, 0);
+        verb(hda, &codec, pin, VERB_SET_POWER, 0);
+    }
+    if (hda->sink.amd) {
+        /* As Linux's patch_hdmi.c: nothing mixed down, channels mapped one by one, the default ramp. */
+        bool single = (hda->sink.revision & 0xFF00) >= 0x0300;
+
+        verb(hda, &codec, pin, ATI_SET_DOWNMIX, 0);
+        if (single) {
+            verb(hda, &codec, pin, ATI_SET_CHANNEL_MODE, 1);
+            verb(hda, &codec, converter, ATI_SET_RAMP_RATE, 180);
+        }
+        verb(hda, &codec, pin, ATI_SET_ALLOCATION, 0);
+        /*
+         * The eight channel slots of the signal: each one is off until it is given a channel of the stream.
+         * Front left and right are slots 0 and 1; the other six stay silent. (Older codecs map pairs.)
+         */
+        for (uint32_t slot = 0; slot < 8; slot++) {
+            uint32_t setup = slot < CHANNELS ? slot << 4 | ATI_SLOT_ON : 0;
+            if (!(slot & 1))
+                verb(hda, &codec, pin, ATI_SET_SLOT_PAIR + slot / 2, setup);
+            else if (single)
+                verb(hda, &codec, pin, ATI_SET_SLOT_ODD + slot / 2, setup);
+        }
+    }
+    if (hda->sink.pin_select)
+        verb(hda, &codec, pin, VERB_SET_SELECT, 0);
+    if (hda->sink.pin_amp)
+        verb4(hda, &codec, pin, VERB4_SET_AMP, AMP_OUTPUT | AMP_LEFT | AMP_RIGHT);
+    verb(hda, &codec, pin, VERB_SET_PIN_CONTROL, 0x40); /* out */
+    verb(hda, &codec, converter, VERB_SET_CHANNELS, CHANNELS - 1);
+    verb(hda, &codec, converter, VERB_SET_DIGITAL, 0x01);
+    verb(hda, &codec, converter, VERB_SET_STREAM, TAG_PLAYBACK << 4);
+    verb4(hda, &codec, converter, VERB4_SET_FORMAT, FORMAT_48K_16_STEREO);
+}
+
+/*
+ * The sound of a monitor: a digital codec of a graphics chip. Its first output pin that is wired to a
+ * connector, with the converter that feeds it, gets the playback stream: two channels of 16 bits at 48 kHz,
+ * which every such codec and every monitor with loudspeakers takes. Only for codecs whose graphics side this
+ * system drives; the others would be outputs that never sound.
+ */
+static uint32_t setup_monitor_codec(hda_t *hda, hda_codec_t *codec)
+{
+    uint32_t id = parameter(hda, codec, 0, 0);
+    bool amd = (id >> 16) == 0x1002;
+
+    if (!amd)
+        return 0;
+    for (uint32_t i = 0; i < codec->widget_count; i++) {
+        hda_widget_t *pin = &codec->widgets[i];
+        if (WCAP_TYPE(pin->caps) != WIDGET_PIN || !(pin->caps & WCAP_DIGITAL) || !(pin->pin_caps & PINCAP_OUTPUT) ||
+            !connected(pin) || !pin->connection_count)
+            continue;
+        hda_widget_t *converter = widget(codec, pin->connections[0]);
+        if (!converter || WCAP_TYPE(converter->caps) != WIDGET_OUTPUT)
+            continue;
+        hda->sink.address = codec->address;
+        hda->sink.pin = pin->nid;
+        hda->sink.converter = converter->nid;
+        hda->sink.revision = parameter(hda, codec, 0, 2);
+        hda->sink.amd = amd;
+        hda->sink.pin_amp = pin->caps & WCAP_OUT_AMP;
+        hda->sink.pin_select = pin->connection_count > 1;
+        hda->sink.power = (pin->caps | converter->caps) & WCAP_POWER;
+        hda->monitor = true;
+        monitor_program(hda);
+        klog_info("hda: codec %u: the sound of a monitor: pin %u <- converter %u", codec->address, pin->nid,
+                  converter->nid);
+        return JELLY_AUDIO_PLAYBACK;
+    }
+    return 0;
+}
+
 /* --- Streams --------------------------------------------------------------------- */
+
+static void to_memory(const void *start, size_t bytes);
 
 static status_t stream_alloc(hda_t *hda, hda_stream_t *stream, uint32_t index, uint8_t tag)
 {
@@ -527,7 +641,22 @@ static status_t stream_alloc(hda_t *hda, hda_stream_t *stream, uint32_t index, u
     hda_bdl_entry_t *bdl = stream->bdl.virt;
     for (uint32_t i = 0; i < FRAGMENTS; i++)
         bdl[i] = (hda_bdl_entry_t){ stream->buffer.phys + i * FRAGMENT_BYTES, FRAGMENT_BYTES, 1 };
+    to_memory(bdl, FRAGMENTS * sizeof(hda_bdl_entry_t));
     return STATUS_SUCCESS;
+}
+
+/*
+ * What the controller is about to read out of memory: out of the CPU's caches first. A controller may read
+ * its buffers without the caches being asked ("no snoop", AMD's HDMI controllers), and would then play what
+ * was in memory before: silence. (Linux maps the buffers write-combining for these.)
+ */
+static void to_memory(const void *start, size_t bytes)
+{
+    const uint8_t *p = start;
+
+    for (size_t offset = 0; offset < bytes; offset += 64)
+        __asm__ volatile("clflush (%0)" : : "r"(p + offset) : "memory");
+    __asm__ volatile("mfence" : : : "memory");
 }
 
 static int16_t *fragment(hda_stream_t *stream, uint64_t number)
@@ -568,13 +697,14 @@ static status_t stream_start(hda_t *hda, hda_stream_t *stream, bool playback)
         for (; stream->handled < 2; stream->handled++)
             audio_playback_pull(&hda->audio, fragment(stream, stream->handled), PERIOD_FRAMES);
     }
+    to_memory(stream->buffer.virt, BUFFER_BYTES);
 
     w32(stream->regs, SD_BDPL, (uint32_t)stream->bdl.phys);
     w32(stream->regs, SD_BDPU, (uint32_t)(stream->bdl.phys >> 32));
     w32(stream->regs, SD_CBL, BUFFER_BYTES);
     w16(stream->regs, SD_LVI, FRAGMENTS - 1);
     w16(stream->regs, SD_FMT, FORMAT_48K_16_STEREO);
-    w8(stream->regs, SD_CTL + 2, (uint8_t)(stream->tag << 4));
+    w8(stream->regs, SD_CTL + 2, (uint8_t)(stream->tag << 4 | (hda->no_snoop ? SD_CTL2_TRAFFIC_PRIORITY : 0)));
     w8(stream->regs, SD_STS, SD_STS_ALL);
 
     uint64_t flags = arch_interrupts_save();
@@ -598,8 +728,10 @@ static void stream_interrupt(hda_t *hda, hda_stream_t *stream, bool playback)
         /* Fragment `done` is playing: keep the one after it filled. */
         if (stream->handled < done + 1)
             stream->handled = done + 1; /* too late for those */
-        for (; stream->handled < done + 2; stream->handled++)
+        for (; stream->handled < done + 2; stream->handled++) {
             audio_playback_pull(&hda->audio, fragment(stream, stream->handled), PERIOD_FRAMES);
+            to_memory(fragment(stream, stream->handled), FRAGMENT_BYTES);
+        }
     } else {
         if (done - stream->handled > FRAGMENTS)
             stream->handled = done - FRAGMENTS; /* overwritten before we came by */
@@ -632,6 +764,9 @@ static status_t hda_playback_enable(audio_device_t *audio, bool enable)
         stream_stop(hda, &hda->out);
         return STATUS_SUCCESS;
     }
+    /* The graphics side may have switched the sound of the monitor on since the codec was set up: told again. */
+    if (hda->monitor)
+        monitor_program(hda);
     return stream_start(hda, &hda->out, true);
 }
 
@@ -719,6 +854,8 @@ static status_t hda_probe(device_t *device)
     hda->device = device;
     mutex_init(&hda->lock);
 
+    /* The HDMI controllers of AMD graphics do not snoop (as Linux's table of controllers has it). */
+    hda->no_snoop = device->id.vendor == 0x1002;
     status_t status = pci_enable_device(pci, true);
     if (!STATUS_IS_ERROR(status)) {
         hda->regs = (volatile uint8_t *)pci_map_bar(pci, 0);
@@ -734,6 +871,8 @@ static status_t hda_probe(device_t *device)
             if (!read_codec(hda, codec))
                 continue;
             uint32_t found = setup_codec(hda, codec, !(flags & JELLY_AUDIO_PLAYBACK), !(flags & JELLY_AUDIO_CAPTURE));
+            if (!found && !(flags & JELLY_AUDIO_PLAYBACK))
+                found = setup_monitor_codec(hda, codec);
             klog_info("hda: codec %u: vendor %08x, %u widgets%s%s", address, parameter(hda, codec, 0, 0),
                       codec->widget_count, (found & JELLY_AUDIO_PLAYBACK) ? ", output" : "",
                       (found & JELLY_AUDIO_CAPTURE) ? ", input" : "");
@@ -764,8 +903,9 @@ static status_t hda_probe(device_t *device)
     if (!STATUS_IS_ERROR(status))
         status = pci_enable_msi(pci, hda_interrupt, hda, &hda->irq);
     if (!STATUS_IS_ERROR(status)) {
-        format(hda->audio.name, sizeof(hda->audio.name), "HD Audio %04x:%04x", device->id.vendor, device->id.device);
-        hda->audio.flags = flags;
+        format(hda->audio.name, sizeof(hda->audio.name), hda->monitor ? "Monitor sound %04x:%04x" : "HD Audio %04x:%04x",
+               device->id.vendor, device->id.device);
+        hda->audio.flags = flags | (hda->monitor ? JELLY_AUDIO_MONITOR : 0);
         hda->audio.rate = RATE;
         hda->audio.channels = CHANNELS;
         hda->audio.period = PERIOD_FRAMES;

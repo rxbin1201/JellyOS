@@ -60,7 +60,42 @@ handle stops both directions.
   interrupt skips what it missed instead of playing stale data.
 
 Tested with QEMU's codecs (hda-duplex, hda-output, hda-micro). Not yet: jack
-detection, digital outputs (HDMI/DisplayPort), other formats, suspend.
+detection, other formats, suspend.
+
+### The sound of a monitor
+
+A monitor on HDMI or DisplayPort gets its sound in the picture's signal.
+For HD Audio that is a codec like any other, a digital one that is part of
+the graphics chip, on a controller of its own or next to the analog codec:
+a converter and a pin for each place the graphics side can send sound to.
+Two drivers have to do their part:
+
+- **The HD Audio driver** takes the first pin of such a codec that is wired
+  to a connector, with its converter, and gives it the playback stream (two
+  channels of 16 bits at 48 kHz, which every such codec and every monitor
+  with loudspeakers takes). The controller becomes a sound device of its
+  own, "Monitor sound", marked `JELLY_AUDIO_MONITOR`. The codec is told
+  again at every start of a playback, because the graphics side may have
+  switched the sound on in between.
+- **The graphics driver** tells its end of the codec what the monitor takes,
+  makes the sound's clock from the pixel clock, and lets its encoder put
+  the samples between the pixels (see
+  [graphics.md](graphics.md#amd-graphics-driver-phase-12)).
+
+Today for the codec of AMD graphics (1002:aa01), whose graphics side the
+AMD driver does. What is particular to it, as in Linux's `patch_hdmi.c`:
+
+- Its pin has eight channel slots of the signal, and each is off until it
+  is given a channel of the stream (vendor verbs 0x777..., 0x785...): left
+  and right go to slots 0 and 1.
+- AMD's HDMI controllers are listed as reading their buffers past the CPU's
+  caches ("no snoop"). So what the controller is about to read is flushed
+  out of the caches first (`clflush`), and the stream gets the traffic
+  priority bit. Linux maps the buffers write-combining instead.
+
+Codecs the driver finds no way through are written to the log with their
+widgets (`dmesg hda`): Intel's and NVIDIA's digital codecs, whose graphics
+side is not done yet.
 
 ## Audio server and mixer
 
@@ -72,8 +107,10 @@ A machine can have several sound devices: the sound card's jacks, the
 loudspeakers of a monitor. The server uses two of them, which may be the
 same: the **output**, where everything that is played goes, and the
 **input**, where recordings come from. At the start the output is the first
-device that can play (or the one `/etc/audio.conf` names with `output=N`)
-and the input the first that can record. The output can be changed while
+device that can play and is not the sound of a monitor (not every monitor
+has loudspeakers; if there is nothing else, the monitor it is), or the one
+`/etc/audio.conf` names with `output=N`, and the input the first that can
+record. The output can be changed while
 sound plays (`AUDIO_SET_OUTPUT`): the old card is stopped, the streams'
 converters are set to the new card's rate, and they play on there; what was
 queued in the old card, a fraction of a second, is lost. The input stays

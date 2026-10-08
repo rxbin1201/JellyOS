@@ -23,7 +23,8 @@
  *
  * /etc/audio.conf may set the start volume ("volume=80", "muted=no") and
  * the output device by its number ("output=1"); without that the output is
- * the first device that can play, the input the first that can record.
+ * the first sound card that can play (the sound of a monitor only if there
+ * is no other), the input the first device that can record.
  */
 
 #include "audio/client/protocol.h"
@@ -377,6 +378,11 @@ static void choose_devices(void)
 
     if (wanted_output != UINT32_MAX && STATUS_IS_ERROR(set_output(wanted_output)))
         log_message("output=%u in /etc/audio.conf is not a device that can play", wanted_output);
+    /* A sound card before the sound of a monitor: not every monitor has loudspeakers. */
+    for (uint32_t i = 0; !out.open && jelly_audio_info(i, &card) == STATUS_SUCCESS; i++) {
+        if (playable(&card) && !(card.flags & JELLY_AUDIO_MONITOR))
+            set_output(i);
+    }
     for (uint32_t i = 0; !out.open && jelly_audio_info(i, &card) == STATUS_SUCCESS; i++) {
         if (playable(&card))
             set_output(i);

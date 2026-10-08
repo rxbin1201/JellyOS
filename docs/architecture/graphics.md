@@ -590,6 +590,31 @@ are the same for every GPU in [`hdmi.c`](../../drivers/graphics/hdmi.c):
 | HDMI 2.0 | Above 340 MHz the data is scrambled and the clock lane runs at a quarter of its rate; the PHY makes signals up to 600 MHz. Before such a signal starts the monitor is told so in its SCDC registers, over the DDC line (I2C address 0x54), and when the signal goes back to a plain one. With this a mode like 3440x1440 at 100 Hz (536 MHz) works over HDMI |
 | Did it arrive? | A fast signal that the cable or the monitor does not carry gives a black screen while the pipe runs perfectly. So after the start the driver asks the monitor, for half a second, whether it found the clock and locked onto the three data lanes (SCDC status); if it says no, the mode counts as failed and the one before comes back |
 
+**Sound.** A monitor whose EDID says it plays sound (basic audio) gets it
+in the signal, on HDMI and on DisplayPort. The samples come from the HD
+Audio codec inside the GPU (see [audio.md](audio.md#the-sound-of-a-monitor));
+the display engine has the other end of that codec, *audio endpoints*, and
+the encoders take their samples from one of them. Three parts, after
+Linux's `dce_audio.c` and `dcn10_stream_encoder.c`:
+
+| | |
+| --- | --- |
+| The endpoint | Endpoint 0, which is the codec's first pin. It is told what the monitor takes (two channels of PCM at 32, 44.1 and 48 kHz, 16 bits; HDMI or DisplayPort) and that a monitor is there |
+| The clock | 24 MHz for the sound, made by a DTO from the pixel clock (HDMI) or from DisplayPort's reference clock. Which DTO and its source are set before the numbers: the other order gives no sound |
+| The encoder | Takes the endpoint's samples and sends them between the pixels, with what a monitor needs to play them: on HDMI clock regeneration packets (N as the standard has it for "any other pixel clock"; the hardware measures CTS) and the audio info frame; on DisplayPort time stamps and the info frame |
+
+One more thing has to be right, and it cost the most time: **the memories
+of the encoders' HDMI parts**. A firmware that shows its picture as DVI
+has no use for them and leaves them held off (`DIO_MEM_PWR_CTRL`). Then
+everything about the sound looks right from every side: the codec has the
+stream, the endpoint counts its samples, the encoder reports sound and
+sends clock packets with the right numbers. The monitor stays silent. The
+driver releases them at its start, as Linux's `dcn10_init_hw()` does.
+
+`amdgpu=native,nosound` leaves the sound out. The state of the sound
+(the codec's stream at the endpoint, whether the encoder plays) goes to
+the log at debug level whenever it changes (`dmesg amdgpu`).
+
 The video BIOS's tables are told "HDMI" as the kind of signal, and its
 table for an encoder's stream side is run with each mode (as Linux does).
 A monitor that was switched off or unplugged forgets what it was told:
@@ -628,14 +653,14 @@ runs. Two rules came out of making this work on real hardware:
   reads as all ones. So the driver asks the PHY for its power state first
   (`transmitter_runs()`) and leaves the front end alone otherwise.
 
-`amdgpu=on,noflip`, `nopointer`, `novblank`, `noirq`, `dvi` leave single
+`amdgpu=on,noflip`, `nopointer`, `novblank`, `noirq`, `dvi`, `nosound` leave single
 parts of the driver out (for finding the cause of a problem). `amdgpu=native,trace` logs every
 register access of the video BIOS's tables (reads that repeat while a table
 waits are counted); together with `logfile=` (the boot entry `JellyOSLog`)
 this shows on another computer what a table did before the screen went
 dark.
 
-Not yet: several screens at once, sound over HDMI and DisplayPort, more
+Not yet: several screens at once, more than two channels of sound, more
 than 8 bits per colour, acceleration.
 
 ## VirtIO GPU driver (Phase 12)

@@ -377,6 +377,7 @@ typedef struct {
  */
 #define JELLY_AUDIO_PLAYBACK (1u << 0)
 #define JELLY_AUDIO_CAPTURE  (1u << 1)
+#define JELLY_AUDIO_MONITOR  (1u << 2) /* the sound of a monitor (HDMI, DisplayPort): it may have no loudspeakers */
 
 typedef struct {
     uint32_t index;

@@ -216,7 +216,7 @@ interleaved signed 16-bit samples in the device's format.
 
 | # | Name | Arguments | Output | Rights / notes |
 |---|---|---|---|---|
-| 71 | `SYS_AUDIO_INFO` | `index, jelly_audio_info_t *info` | name, directions, rate, channels, period, buffer size, frame and underrun/overrun counters | `NOT_FOUND` after the last device |
+| 71 | `SYS_AUDIO_INFO` | `index, jelly_audio_info_t *info` | name, directions (and `JELLY_AUDIO_MONITOR`: the sound of a monitor), rate, channels, period, buffer size, frame and underrun/overrun counters | `NOT_FOUND` after the last device |
 | 72 | `SYS_AUDIO_OPEN` | `index, jelly_handle_t *device` | device handle (`READ`, `WRITE`, `WAIT`) | Root only. Exclusive (`BUSY`). Signaled while playback runs with at most two periods queued, or a period of recorded frames waits. Closing stops the device |
 | 73 | `SYS_AUDIO_WRITE` | `handle, const int16_t *frames, count, size_t *written` | frames queued | Needs `WRITE`. Never blocks: takes what fits |
 | 74 | `SYS_AUDIO_READ` | `handle, int16_t *frames, count, size_t *read` | recorded frames | Needs `READ`. Never blocks: 0 frames if none wait |

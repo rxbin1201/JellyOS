@@ -343,6 +343,44 @@
 #define SMU_ARGUMENT          0x58A4C
 #define SMU_RESPONSE          0x58A6C
 
+/*
+ * Sound for the monitor. The GPU has audio endpoints, each of which the HD Audio codec of the graphics chip
+ * (PCI function 1, driven by drivers/audio/intel_hda.c) shows as a converter and a pin: what is played to the
+ * converter of endpoint n arrives here, and an encoder that takes endpoint n puts it into its signal. An
+ * endpoint's registers are reached through an index and a data register.
+ */
+#define AZ_INDEX(n)           (0x0E118 + 0x18u * (uint32_t)(n))
+#define AZ_DATA(n)            (0x0E11C + 0x18u * (uint32_t)(n))
+#define AZ_SPEAKERS           0x25    /* bits 6:0 which loudspeakers, bit 16 on HDMI, bit 17 on DisplayPort */
+#define AZ_DESCRIPTOR(k)      (0x28 + (uint32_t)(k)) /* 14 kinds of sound; 0 is PCM: channels - 1, rates << 8, sizes << 16 */
+#define AZ_SINK_INFO(k)       (0x3A + (uint32_t)(k)) /* who the monitor is (9 registers) */
+#define AZ_HOT_PLUG           0x54    /* bit 0 no clock gating, bit 31 sound is on */
+#define AZ_SIZE_RATES         0x0E32C /* of all endpoints: bits 11:0 sample rates as HD Audio numbers them */
+#define AZ_POWER_STATES       0x0E334
+#define DIO_MEM_POWER         0x14E78 /* the memories of the encoders' HDMI parts: 0 is "none held off" */
+#define DIO_MEM_STATUS        0x14E74
+#define AUDIO_DTO_SOURCE      0x005AC /* the 24 MHz the sound is clocked with: bits 2:0 timing generator of DTO 0, 5:4 which DTO */
+#define AUDIO_DTO0_PHASE      0x005B0 /* HDMI: 24 MHz = pixel clock * phase / module */
+#define AUDIO_DTO0_MODULE     0x005B4
+#define AUDIO_DTO1_PHASE      0x005B8 /* DisplayPort: 24 MHz = DisplayPort reference clock * phase / module */
+#define AUDIO_DTO1_MODULE     0x005BC
+#define SOUND_ENDPOINT        0       /* the endpoint in use: the first converter and pin of the codec */
+/* The encoder's part (stream side, like DIG_FE_CNTL) */
+#define AFMT_AUDIO_PACKETS(i)  (0x155A8 + 0x400u * (uint32_t)(i)) /* bit 0 send the samples, bit 26 new channel status */
+#define AFMT_AUDIO_PACKETS2(i) (0x154F0 + 0x400u * (uint32_t)(i)) /* bit 0 and 28 overrides, bits 15:8 the channels in use */
+#define AFMT_AUDIO_SOURCE(i)   (0x155B4 + 0x400u * (uint32_t)(i)) /* which endpoint */
+#define AFMT_INFOFRAME(i)      (0x155B0 + 0x400u * (uint32_t)(i)) /* bit 7: the audio info frame is renewed */
+#define AFMT_60958_0(i)        (0x15580 + 0x400u * (uint32_t)(i)) /* channel status: 23:20 number of the left channel */
+#define AFMT_60958_1(i)        (0x15584 + 0x400u * (uint32_t)(i)) /* 23:20 number of the right channel */
+#define HDMI_AUDIO_PACKETS(i)  (0x154CC + 0x400u * (uint32_t)(i)) /* bits 5:4 delay */
+#define HDMI_ACR_CONTROL(i)    (0x154D0 + 0x400u * (uint32_t)(i)) /* clock regeneration packets: bit 8 source, bit 12 sent by themselves */
+#define HDMI_ACR(i, k)         (0x15558 + 0x400u * (uint32_t)(i) + 4u * (uint32_t)(k)) /* CTS << 12 and N for 32, 44.1, 48 kHz */
+#define HDMI_INFOFRAME0(i)     (0x154D8 + 0x400u * (uint32_t)(i)) /* bit 4 send the audio info frame, bit 5 in every frame */
+#define HDMI_INFOFRAME1(i)     (0x154DC + 0x400u * (uint32_t)(i)) /* bits 13:8 in which line */
+#define DP_SEC_CNTL(i)         (0x157AC + 0x400u * (uint32_t)(i)) /* DisplayPort's secondary data: bit 0 on, 4 samples, 8 time stamps, 12 info frame */
+#define DP_SEC_AUD_N(i)        (0x157C4 + 0x400u * (uint32_t)(i))
+#define DP_SEC_TIMESTAMP(i)    (0x157D4 + 0x400u * (uint32_t)(i)) /* bit 0: time stamps computed by the hardware */
+
 #define TMDS_MAX_KHZ          340000  /* HDMI without scrambling */
 #define HDMI_SOURCE_MAX_KHZ   600000  /* the fastest HDMI signal the PHY makes (HDMI 2.0) */
 #define SMU_SET_DISPCLK       0x4     /* messages: argument and answer in MHz */
@@ -386,6 +424,8 @@ typedef struct {
     bool              hdmi;                    /* driven as HDMI (packets, the fast signal), not as DVI */
     bool              scrambled;               /* the signal is a scrambled one (above 340 MHz) */
     bool              encoder_table;           /* the video BIOS has the table that sets an encoder's stream side up */
+    bool              sound;                   /* sound is switched on in the signal */
+    uint32_t          sound_seen[4];           /* what was last reported of its state */
 
     /* Interrupts */
     dma_buffer_t      ih_memory;               /* the ring, a page for the write pointer's copy, a page for dummy reads */
@@ -1566,6 +1606,144 @@ static void connect_front_end(amdgpu_t *g, uint32_t e)
         wr(g, DIG_BE_CNTL(e), (back & ~(0x7Fu << 8)) | (1u << e) << 8);
 }
 
+/* --- Sound for the monitor ------------------------------------------------------------- */
+
+static uint32_t az_read(amdgpu_t *g, uint32_t index)
+{
+    wr(g, AZ_INDEX(SOUND_ENDPOINT), index);
+    return rd(g, AZ_DATA(SOUND_ENDPOINT));
+}
+
+static void az_write(amdgpu_t *g, uint32_t index, uint32_t value)
+{
+    wr(g, AZ_INDEX(SOUND_ENDPOINT), index);
+    wr(g, AZ_DATA(SOUND_ENDPOINT), value);
+}
+
+/* Does the monitor play sound? Its EDID says so. "amdgpu=...,nosound" leaves the sound out. */
+static bool sound_wanted(amdgpu_t *g)
+{
+    hdmi_sink_t sink;
+    char option[48];
+
+    if (!g->displayport && !g->hdmi)
+        return false; /* DVI carries none */
+    if (cmdline_value("amdgpu", option, sizeof(option)) && contains(option, "nosound"))
+        return false;
+    hdmi_sink_read(g->edid, g->edid_blocks, &sink);
+    return sink.basic_audio;
+}
+
+/*
+ * Sound into the signal of encoder e (after Linux's dce_audio.c and the audio part of
+ * dcn10_stream_encoder.c). Three parts:
+ *
+ *   the encoder   takes the samples of the audio endpoint and sends them between the pixels, with what a
+ *                 monitor needs to play them: on HDMI clock regeneration packets and the audio info frame, on
+ *                 DisplayPort time stamps and the info frame
+ *   the endpoint  tells the HD Audio codec what the monitor takes (two channels of PCM at 32, 44.1 and 48 kHz)
+ *                 and that it is there
+ *   the clock     24 MHz for the sound, made from the pixel clock (HDMI) or from DisplayPort's reference clock
+ *
+ * The encoder's registers are stream-side ones (see transmitter_runs()); the caller knows they may be touched.
+ */
+static void sound_on(amdgpu_t *g, uint32_t e, const display_timing_t *t)
+{
+    uint32_t m = (uint32_t)g->otg;
+
+    /* The encoder */
+    wr(g, AFMT_CNTL(e), rd(g, AFMT_CNTL(e)) | 1u);
+    wr(g, AFMT_AUDIO_PACKETS(e), rd(g, AFMT_AUDIO_PACKETS(e)) | 1u << 26);
+    wr(g, AFMT_AUDIO_PACKETS2(e), rd(g, AFMT_AUDIO_PACKETS2(e)) & ~(1u << 0 | 1u << 28));
+    if (!g->displayport) {
+        wr(g, HDMI_AUDIO_PACKETS(e), (rd(g, HDMI_AUDIO_PACKETS(e)) & ~(3u << 4)) | 1u << 4);
+        /* Clock regeneration: N as the standard has it for "any other pixel clock"; the hardware measures CTS. */
+        wr(g, HDMI_ACR_CONTROL(e), (rd(g, HDMI_ACR_CONTROL(e)) & ~(1u << 8 | 1u << 31)) | 1u << 12);
+        static const uint32_t n[3] = { 4096, 6272, 6144 };
+        for (uint32_t k = 0; k < 3; k++) {
+            wr(g, HDMI_ACR(e, 2 * k), t->khz << 12);
+            wr(g, HDMI_ACR(e, 2 * k + 1), n[k]);
+        }
+        wr(g, AFMT_60958_0(e), (rd(g, AFMT_60958_0(e)) & ~(0xFu << 20 | 3u << 28)) | 1u << 20);
+        wr(g, AFMT_60958_1(e), (rd(g, AFMT_60958_1(e)) & ~(0xFu << 20)) | 2u << 20);
+        /* The audio info frame, which the hardware makes itself, in line 2 of every frame. */
+        wr(g, HDMI_INFOFRAME0(e), rd(g, HDMI_INFOFRAME0(e)) | 1u << 4 | 1u << 5);
+        wr(g, HDMI_INFOFRAME1(e), (rd(g, HDMI_INFOFRAME1(e)) & ~(0x3Fu << 8)) | 2u << 8);
+    } else {
+        wr(g, DP_SEC_AUD_N(e), 0x8000);
+        wr(g, DP_SEC_TIMESTAMP(e), 1);
+        wr(g, AFMT_60958_0(e), rd(g, AFMT_60958_0(e)) & ~(3u << 28));
+    }
+    wr(g, AFMT_INFOFRAME(e), rd(g, AFMT_INFOFRAME(e)) | 1u << 7);
+    wr(g, AFMT_AUDIO_SOURCE(e), SOUND_ENDPOINT);
+    wr(g, AFMT_AUDIO_PACKETS2(e), (rd(g, AFMT_AUDIO_PACKETS2(e)) & ~(0xFFu << 8)) | 0x03u << 8); /* front left and right */
+
+    /* The endpoint: its registers are written with the clock gating off. */
+    uint32_t hot = az_read(g, AZ_HOT_PLUG);
+    az_write(g, AZ_HOT_PLUG, hot | 1u);
+    wr(g, AZ_SIZE_RATES, (rd(g, AZ_SIZE_RATES) & ~0xFFFu) | 0x70); /* 32, 44.1 and 48 kHz */
+    wr(g, AZ_POWER_STATES, rd(g, AZ_POWER_STATES) | 3u << 30);
+    az_write(g, AZ_SPEAKERS, (az_read(g, AZ_SPEAKERS) & ~(0x7Fu | 3u << 16 | 1u << 18 | 3u << 24)) | 0x01 |
+                                 (g->displayport ? 1u << 17 : 1u << 16));
+    az_write(g, AZ_DESCRIPTOR(0), 1u | 0x07u << 8 | 0x01u << 16 | 0x07u << 24); /* PCM: 2 channels, three rates, 16 bits */
+    for (uint32_t k = 1; k < 14; k++)
+        az_write(g, AZ_DESCRIPTOR(k), 0);
+    az_write(g, AZ_SINK_INFO(0), g->edid[8] | (uint32_t)g->edid[9] << 8 | (uint32_t)g->edid[10] << 16 |
+                                     (uint32_t)g->edid[11] << 24); /* manufacturer and product, as in the EDID */
+    for (uint32_t k = 1; k < 9; k++)
+        az_write(g, AZ_SINK_INFO(k), 0);
+
+    /* The clock. (Which DTO and its source first, then the numbers: the other order gives no sound.) */
+    if (!g->displayport) {
+        wr(g, AUDIO_DTO_SOURCE, (rd(g, AUDIO_DTO_SOURCE) & ~(7u | 3u << 4)) | m);
+        wr(g, AUDIO_DTO0_MODULE, t->khz * 10);
+        wr(g, AUDIO_DTO0_PHASE, 24 * 10000);
+    } else {
+        wr(g, AUDIO_DTO_SOURCE, (rd(g, AUDIO_DTO_SOURCE) & ~(3u << 4)) | 1u << 4);
+        wr(g, AUDIO_DTO1_MODULE, rd(g, DP_DTO_MODULO(m)) / 100);
+        wr(g, AUDIO_DTO1_PHASE, 24 * 10000);
+        wr(g, AUDIO_DTO_SOURCE, rd(g, AUDIO_DTO_SOURCE) | 1u << 20);
+    }
+
+    /* On: the codec sees a monitor at its pin; then the samples are let through. */
+    az_write(g, AZ_HOT_PLUG, hot | 1u << 31 | 1u);
+    az_write(g, AZ_HOT_PLUG, (hot | 1u << 31) & ~1u);
+    if (g->displayport) {
+        wr(g, DP_SEC_CNTL(e), rd(g, DP_SEC_CNTL(e)) | 1u << 4);
+        wr(g, DP_SEC_CNTL(e), rd(g, DP_SEC_CNTL(e)) | 1u << 8 | 1u << 12);
+        wr(g, DP_SEC_CNTL(e), rd(g, DP_SEC_CNTL(e)) | 1u);
+    }
+    wr(g, AFMT_AUDIO_PACKETS(e), rd(g, AFMT_AUDIO_PACKETS(e)) | 1u);
+    g->sound = true;
+    klog_debug("amdgpu: sound for the monitor (%s): endpoint 0x%x 0x%x, clock 0x%x, packets 0x%x 0x%x",
+               g->displayport ? "DisplayPort" : "HDMI", az_read(g, AZ_HOT_PLUG), az_read(g, AZ_SPEAKERS),
+               rd(g, AUDIO_DTO_SOURCE), rd(g, AFMT_AUDIO_PACKETS(e)), rd(g, AFMT_AUDIO_PACKETS2(e)));
+}
+
+/*
+ * The sound's state, into the log whenever it changes: what the HD Audio codec has told the endpoint (its
+ * stream, the format, that the pin is on), and what the encoder does with it (sound enabled; on HDMI the N of
+ * the clock regeneration packets it sends, 0 if it sends none). Called once a second while a monitor is there.
+ */
+static void sound_report(amdgpu_t *g)
+{
+    uint32_t e = (uint32_t)g->encoder;
+
+    if (!g->sound || g->encoder < 0 || !transmitter_runs(g, e))
+        return;
+    uint32_t stream = az_read(g, 0x03), format = az_read(g, 0x02), digital = az_read(g, 0x04), pin = az_read(g, 0x24);
+    uint32_t status = rd(g, 0x155A4 + 0x400u * e), n = g->displayport ? 0 : rd(g, 0x15574 + 0x400u * e);
+    uint32_t now[4] = { stream << 16 | (format & 0xFFFF), (digital & 0xFF) << 8 | (pin & 0xFF), status & 0x01000110, n };
+
+    if (memcmp(now, g->sound_seen, sizeof(now)) == 0)
+        return;
+    memcpy(g->sound_seen, now, sizeof(now));
+    klog_debug("amdgpu: sound: the codec's stream 0x%x, format 0x%x, digital 0x%x, pin 0x%x; encoder status 0x%x, "
+              "clock packets N %u, CTS %u (control 0x%x), endpoint 0x%x", stream, format, digital, pin, status, n,
+              g->displayport ? 0 : rd(g, 0x15570 + 0x400u * e) >> 12, g->displayport ? 0 : rd(g, HDMI_ACR_CONTROL(e)),
+              az_read(g, AZ_HOT_PLUG));
+}
+
 /*
  * The stream side of encoder e for HDMI (after Linux's enc1_stream_encoder_hdmi_set_stream_attribute() and
  * enc2_update_hdmi_info_packet()): RGB with 8 bits per colour, general control and null packets, above 340 MHz
@@ -1602,6 +1780,8 @@ static void hdmi_stream(amdgpu_t *g, uint32_t e, const display_timing_t *t)
     wr(g, HDMI_GENERIC_SEND(e), rd(g, HDMI_GENERIC_SEND(e)) | 3u);
     klog_debug("amdgpu: HDMI stream: control 0x%x, packets 0x%x 0x%x, video code %u%s", rd(g, HDMI_CONTROL(e)),
                rd(g, HDMI_VBI_PACKETS(e)), rd(g, HDMI_GENERIC_SEND(e)), frame[7], fast ? ", scrambled" : "");
+    if (sound_wanted(g))
+        sound_on(g, e, t);
 }
 
 /* The reverse; `t` is the timing that was written. */
@@ -1666,6 +1846,8 @@ static void pipe_start(amdgpu_t *g, const display_timing_t *t)
     (void)rd(g, DP_STEER_FIFO(e));
     wr(g, DP_STEER_FIFO(e), rd(g, DP_STEER_FIFO(e)) & ~1u);
     sleep_ms(1);
+    if (sound_wanted(g))
+        sound_on(g, e, t);
     wr(g, DP_VID_STREAM_CNTL(e), rd(g, DP_VID_STREAM_CNTL(e)) | 1u); /* from the next frame on */
 }
 
@@ -2123,6 +2305,7 @@ static void hotplug_thread(void *argument)
             pins = hpd_pins(g);
             klog_info("amdgpu: hot plug pins now 0x%x", pins);
         }
+        sound_report(g);
         if (g->displayport) {
             present = dp_dpcd_read(&aux, DPCD_LANE_STATUS, status, 6) == 6;
             link_ok = present && dp_link_good(status, g->lanes);
@@ -2416,7 +2599,7 @@ static status_t amdgpu_probe(device_t *device)
     }
     read_monitor(g);
     atom_load(g, device);
-    /* amdgpu=...,noddc / noflip / nopointer / novblank / noirq / dvi leave one part out: for finding what a problem comes from. */
+    /* amdgpu=...,noddc / noflip / nopointer / novblank / noirq / dvi / nosound leave one part out: for finding what a problem comes from. */
     bool has_option = cmdline_value("amdgpu", option, sizeof(option));
     bool no_ddc = has_option && contains(option, "noddc"), no_flip = has_option && contains(option, "noflip");
     bool no_pointer = has_option && contains(option, "nopointer"), no_vblank = has_option && contains(option, "novblank");
@@ -2438,6 +2621,15 @@ static status_t amdgpu_probe(device_t *device)
         klog_info("amdgpu: nothing changed; boot with amdgpu=native (or amdgpu=on to keep the firmware's mode)");
         return STATUS_SUCCESS;
     }
+
+    /*
+     * The memories of the encoders' HDMI parts, which the sound's samples pass through: none held off any more
+     * (as Linux's dcn10_init_hw() does, "power AFMT HDMI memory"). A firmware that shows its picture as DVI has
+     * no use for them and leaves them off: everything about the sound then looks right, and the monitor is
+     * silent.
+     */
+    klog_debug("amdgpu: HDMI memories: control 0x%x, status 0x%x", rd(g, DIO_MEM_POWER), rd(g, DIO_MEM_STATUS));
+    wr(g, DIO_MEM_POWER, 0);
 
     /* Behind the firmware's framebuffer, on boundaries of 2 MiB: the second framebuffer, then the pointer. */
     uint64_t usable = g->vram_size < g->aperture_size ? g->vram_size : g->aperture_size;
@@ -2509,6 +2701,12 @@ static status_t amdgpu_probe(device_t *device)
                   hz % 100);
         if (STATUS_IS_ERROR(display_set_mode(0, 0)))
             klog_warn("amdgpu: the best mode does not come up: the firmware's mode stays");
+    } else if (g->displayport && g->encoder >= 0 && transmitter_runs(g, (uint32_t)g->encoder) && sound_wanted(g)) {
+        /* The firmware's mode stays: sound is added to the stream as it runs. (An HDMI connector the firmware
+         * drives as DVI gets it with the first mode set here.) */
+        display_lock(d);
+        sound_on(g, (uint32_t)g->encoder, &g->current);
+        display_unlock(d);
     }
     return STATUS_SUCCESS;
 }

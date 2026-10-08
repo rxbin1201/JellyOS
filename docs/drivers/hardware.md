@@ -72,7 +72,8 @@ are listed as block devices but not mounted. `dmesg` shows what was found.
 
 | Device | Status | Notes |
 | --- | --- | --- |
-| Intel HD Audio | PARTIALLY_SUPPORTED | Analog output and input at 48 kHz. Playback works on the ThinkCentre; no jack detection, no HDMI/DisplayPort audio |
+| Intel HD Audio | PARTIALLY_SUPPORTED | Analog output and input at 48 kHz. Playback works on the ThinkCentre; no jack detection |
+| Sound of a monitor (HDMI, DisplayPort) on AMD graphics of Ryzen 4000/5000 G | EXPERIMENTAL | The HD Audio codec of the GPU (1002:aa01) as a sound device of its own, "Monitor sound"; stereo at 48 kHz. Needs the `amd-gpu` driver (`amdgpu=native`). Works on a Ryzen 5 5600G over HDMI and over DisplayPort, also after a change of the mode. Not on Intel or NVIDIA graphics |
 | USB audio | UNSUPPORTED | |
 | Bluetooth audio | UNSUPPORTED | |
 
