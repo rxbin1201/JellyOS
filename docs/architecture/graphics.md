@@ -307,6 +307,33 @@ and so also works on the text console; a running display server follows.
 The page **Display** of the Settings program shows the same list; choosing
 an entry asks the display server, which also remembers the choice.
 
+## The monitor's modes (EDID)
+
+How a driver gets the EDID is its own business (I2C on the DDC lines, or
+over the DisplayPort AUX channel); what is in it is the same for every GPU
+and read by [`drivers/graphics/edid.c`](../../drivers/graphics/edid.c). A
+monitor names its modes in four ways:
+
+| In the EDID | What it says | Where the timing comes from |
+| --- | --- | --- |
+| Detailed timings (base block and CTA extension) | Every number: pixel clock, sizes, blanking, sync | The EDID itself. These are the modes the monitor prefers |
+| CTA video codes (CTA-861 extension: televisions, HDMI monitors) | A number, such as 16 for 1920x1080 at 60 Hz | A table of that standard's timings (1280x720, 1920x1080 and 3840x2160 at 24 to 120 Hz, 640x480) |
+| Standard timings (8 in the base block, 6 more in a descriptor) | Width, aspect ratio, refresh rate | VESA's list of monitor timings (DMT). Where it has two for a mode, a flat panel gets the one with reduced blanking, a monitor with an analog input the classic one |
+| Established timings | One bit each for a handful of old modes (640x480 to 1280x1024) | The same list |
+
+The detailed timings come first; of the other three kinds a mode is left
+out if the list already has its size at its refresh rate, so the monitor's
+own numbers win. A mode no table has is left out, too: no timing is made
+up by formula. Not taken: interlaced modes, and 720x480 and 720x576, whose
+pixels are not square.
+
+The drivers keep what their connection carries (pixel clock, link) and
+sort: larger first, at the same size the faster one, but every mode of 48
+Hz and more before the slower ones. The first of the list is the mode
+`igpu=native` and `amdgpu=native` switch to, and 3840x2160 at 30 Hz is not
+what a desktop wants when 1920x1080 at 60 Hz is there. A display has room
+for 32 modes.
+
 ## Intel graphics driver (Phase 12)
 
 [`drivers/graphics/intel_gpu.c`](../../drivers/graphics/intel_gpu.c) handles the
@@ -317,9 +344,9 @@ monitor's own resolution where the firmware only offers a small mode.
 
 Without an option it changes nothing and reports what it finds (`dmesg igpu`):
 the pipe that shows the boot framebuffer, the port and kind of connection,
-the timings, the DisplayPort link the firmware trained, and the detailed
-timings from the monitor's EDID (read over the AUX channel for DisplayPort,
-over GMBUS for HDMI).
+the timings, the DisplayPort link the firmware trained, and the modes
+from the monitor's EDID (read over the AUX channel for DisplayPort, over
+GMBUS for HDMI).
 
 With `igpu=native` or `igpu=WIDTHxHEIGHT[@HZ]` on the kernel command line (the
 default boot entry has `igpu=native`; the entry `FirmwareGrafik` leaves the

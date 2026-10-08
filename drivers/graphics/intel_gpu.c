@@ -10,7 +10,7 @@
  *   - it reads how the firmware set things up: which pipe shows the boot
  *     framebuffer, on which port, with which timings, link and clock
  *   - it reads the monitor's EDID (DisplayPort: over the AUX channel; HDMI:
- *     over the GMBUS I2C controller) and collects the detailed timings
+ *     over the GMBUS I2C controller) and collects the modes it names
  *   - with "igpu=native" or "igpu=WIDTHxHEIGHT[@HZ]" on the kernel command
  *     line it allocates a framebuffer of that size, maps it into the
  *     graphics address space (GGTT) and switches:
@@ -193,7 +193,7 @@
 #define PTE_ADDRESS           0x7FFFFFF000ull
 
 #define HDMI_MAX_KHZ          300000 /* generation 9: HDMI up to 300 MHz pixel clock */
-#define MAX_MODES             24
+#define MAX_MODES             JELLY_DISPLAY_MODE_MAX
 
 /* Timings, the EDID and the protocol of the AUX channel are shared with the other drivers (edid.h, dp_aux.h). */
 typedef display_timing_t timing_t;
@@ -447,7 +447,7 @@ static void add_mode(igpu_t *g, const timing_t *t)
     g->mode_count = display_timing_add(g->modes, g->mode_count, MAX_MODES, t);
 }
 
-/* The detailed timings of the base block and of CTA extension blocks: the modes the monitor itself names. */
+/* The modes the monitor names in its EDID (edid.c): detailed timings, video codes, standard and established timings. */
 static void collect_modes(igpu_t *g, const uint8_t *edid, int blocks)
 {
     g->mode_count = edid_collect_timings(edid, blocks, g->modes, g->mode_count, MAX_MODES);

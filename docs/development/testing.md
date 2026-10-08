@@ -25,6 +25,15 @@ checks the events their reports become, plus malformed descriptors.
 `audio/mixer`: sample-rate conversion up and down (a tone keeps its pitch,
 chunked input gives the same result), mono to stereo, volume, mixing and
 clipping.
+[`tests/unit/edid_test.c`](../../tests/unit/edid_test.c) builds the EDID of
+a monitor by hand, with every way of naming a mode in it, and checks what
+`drivers/graphics/edid.c` reads: detailed timings first and with their own
+numbers, CTA video codes, standard timings (also from a descriptor, and
+the form 1366x768 takes) and established timings with every number of the
+tables' timings, a mode named three times listed once, interlaced modes
+and those without square pixels left out, reduced blanking for a flat
+panel and the classic one for an analog monitor, and the order of the
+sorted list.
 
 ## Kernel self-tests (`make test`)
 

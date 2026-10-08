@@ -341,7 +341,7 @@
 #define CONNECTOR_DISPLAYPORT 0x13
 
 #define REGISTER_WINDOW       0x60000u
-#define MAX_MODES             24
+#define MAX_MODES             JELLY_DISPLAY_MODE_MAX
 #define MAX_WRITES            48
 
 typedef struct {
