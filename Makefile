@@ -196,6 +196,8 @@ AUDIO ?= none
 AUDIO_TEST_WAV := $(BUILD)/audio-test.wav
 audio_test_hw = -audiodev wav,id=snd0,path=$(AUDIO_TEST_WAV) -audiodev none,id=snd1 \
                 -device intel-hda -device hda-output,audiodev=snd0 -device hda-micro,audiodev=snd1
+# VirtIO GPU in place of the standard VGA card (with a VGA side for the firmware): make run GPU=virtio
+virtio_gpu = -vga none -device virtio-vga
 # $(call virtio_disk,<image>,<id>)
 virtio_disk = -drive file=$(1),if=none,id=$(2),format=raw -device virtio-blk-pci,drive=$(2)
 # $(call virtio_nic,<id>): VirtIO NIC on QEMU's user network (NAT; gateway and host 10.0.2.2, DNS 10.0.2.3)
@@ -204,6 +206,11 @@ virtio_nic  = -netdev user,id=$(1) -device virtio-net-pci,netdev=$(1)
 e1000_nic   = -netdev user,id=intelnet,net=10.0.3.0/24 -device e1000e,netdev=intelnet
 
 QEMU_FLAGS := $(QEMU_BASE) $(call qemu_disks,$(ESP),$(VARS_COPY)) $(usb_input) $(call audio_hw,$(AUDIO))
+
+# make run GPU=virtio: the VirtIO GPU instead of the standard VGA card
+ifeq ($(GPU),virtio)
+QEMU_FLAGS += $(virtio_gpu)
+endif
 
 # make run NET=0: without a network card
 ifneq ($(NET),0)
@@ -507,6 +514,13 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(usb_input_hub) $(audio_test_hw) \
 	    $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk) $(e1000_nic) \
 	    -qmp unix:$(BUILD)/qmp.sock,server,nowait || { echo "make test: FAILED (shell test)"; exit 1; }
+	@# The same system on a VirtIO GPU instead of the standard VGA card: frames, pointer and modes.
+	@cp $(OVMF_VARS) $(SHELL_TEST_VARS)
+	@rm -f $(BUILD)/qmp-gpu.sock
+	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) --qmp $(BUILD)/qmp-gpu.sock --gpu -- \
+	    $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(SHELL_TEST_ESP),$(SHELL_TEST_VARS)) -display none \
+	    $(virtio_gpu) $(usb_input) \
+	    -qmp unix:$(BUILD)/qmp-gpu.sock,server,nowait || { echo "make test: FAILED (virtio-gpu test)"; exit 1; }
 	@if mtype -i $(TEST_DISK)@@1M ::/motd.txt | grep -q "Welcome to JellyOS"; then \
 	    echo "make test: host reads the file the shell copied"; \
 	else echo "make test: FAILED (host cannot read ::/motd.txt)"; exit 1; fi

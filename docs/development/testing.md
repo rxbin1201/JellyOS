@@ -5,6 +5,7 @@
 1. the host unit tests (`make unit`)
 2. the kernel self-tests in QEMU
 3. the integration test in QEMU (shell, network, GUI)
+4. the same system on a VirtIO GPU (frames, pointer, modes)
 
 ## Host unit tests (`make unit`)
 
@@ -227,8 +228,28 @@ the Display page of Settings (1920x1080; the display server writes it to
 goes back. After each switch a screenshot must have the new size, with the
 maximized window filling it and the taskbar at the new bottom edge.
 
+A third boot checks the driver `virtio-gpu`: the same system with
+`-vga none -device virtio-vga`, and `shell_test.py --gpu` (log:
+`build/gpu-test.log`). The screenshots QEMU takes there are of the host's
+side of the card, so they show what the driver presented:
+
+- the driver took the card, and the display has a pointer, frame timing,
+  page flipping and modes
+- the login screen and, after logging in with the keyboard, the desktop
+  arrive on the host
+- the pointer is the card's: a screenshot is the same with the pointer on
+  a spot and away from it (with the standard VGA card, where the display
+  server draws the pointer, this check fails), and clicks arrive where it
+  is (the launcher opens, the terminal starts and shows its window)
+- modes: 1024x768, 1920x1080 (larger than the firmware's) and back; after
+  each the host's picture has the new size and the taskbar is at its
+  bottom edge
+- no command to the card failed
+
 Not covered by any automated test, because QEMU has no such device: the
-Intel driver's mode switching, DisplayPort link training and hot plug.
+Intel and AMD drivers' mode switching, DisplayPort link training and hot
+plug. Of the VirtIO GPU driver, a change of the host's window is not
+covered (the tests run without one).
 
 [`tests/kernel/desktop_tests.c`](../../tests/kernel/desktop_tests.c)
 (Phase 10) checks the RTC wall clock (a plausible date that advances with

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integration test for milestones M6 to M10: the shell, the network, graphical applications, sound.
 
-usage: shell_test.py [--timeout SECONDS] [--qmp SOCKET] [--wav FILE] -- QEMU COMMAND LINE...
+usage: shell_test.py [--timeout SECONDS] [--qmp SOCKET] [--wav FILE] [--gpu] -- QEMU COMMAND LINE...
 
 The machine boots normally (initramfs, init, service manager, shell). The
 script waits for each shell prompt on the serial console, types a command,
@@ -21,6 +21,10 @@ With an intel-hda sound card on the command line the audio steps run. With
 --wav (the file QEMU's "wav" audio backend writes) the script analyzes
 what JellyOS played after QEMU has exited: which tones, how loud, and that
 two programs were mixed.
+
+With --gpu (and --qmp; QEMU started with -vga none -device virtio-vga) only
+the steps for the VirtIO GPU driver run: that the host shows the guest's
+frames, the card's own pointer, and modes.
 Exit status 0 means every check passed.
 """
 
@@ -637,11 +641,110 @@ def gui_steps(console, qmp, timeout):
     return failures
 
 
+def gpu_steps(console, qmp, timeout):
+    """Phase 12: the VirtIO GPU driver. Returns the number of failures."""
+    failures = 0
+
+    def check(name, condition, detail=""):
+        nonlocal failures
+        if condition:
+            print(f"shell test: ok    gpu: {name}")
+        else:
+            failures += 1
+            print(f"shell test: FAIL  gpu: {name} {detail}")
+
+    def expect(name, text, wait=30):
+        try:
+            console.wait_for(text, wait)
+            check(name, True)
+            return True
+        except TimeoutError as error:
+            check(name, False, f"(no '{text}'; console: {str(error)[-300:]!r})")
+            return False
+
+    def driver_log(name):
+        console.send("dmesg virtio-gpu")
+        output = console.read_until(PROMPT, timeout)
+        check(name, "failed" not in output and "no answer" not in output, f"({output!r})")
+        return output
+
+    # --- The driver has the screen
+    output = driver_log("no command of the driver failed at the start")
+    check("the driver takes the card", "VirtIO GPU 1af4:1050" in output and "2 framebuffers" in output, f"({output!r})")
+    console.send("display")
+    output = console.read_until(PROMPT, timeout)
+    check("the display has a pointer, frame timing, flipping and modes",
+          all(text in output for text in ("display 0: 1280x800 at 60.00 Hz", "hardware pointer", "vertical blank timing",
+                                          "page flipping", "mode switching", "1920x1080", "(current)  (preferred)")),
+          f"({output!r})")
+
+    # --- Frames reach the host: what a screenshot of the host's side shows
+    shot = qmp.screenshot()
+    check("the host shows a 1280x800 picture", (qmp.width, qmp.height) == (1280, 800), f"({qmp.width}x{qmp.height})")
+    colors = {shot.color(x, y) for x in range(8, qmp.width, 16) for y in range(8, qmp.height, 16)}
+    check("the login screen is on it", len(colors) > 1, f"(one colour: {colors})")
+    qmp.type("jelly\n")
+    qmp.type("jelly\n")
+    expect("logging in", "login: session of jelly started (uid 1000)")
+    expect("the desktop shell starts", "desktop: ready")
+    time.sleep(1.5)
+    shot = qmp.screenshot()
+    check("the taskbar is shown", shot.color(640, 790) == DARK_BACKGROUND, f"({shot.color(640, 790):06x})")
+    taskbar_corner = shot.color(4, 797)
+
+    # --- The pointer is the card's: the host places it, the frame does not contain it
+    qmp.move(700, 300)
+    time.sleep(0.7)
+    under = qmp.screenshot()
+    qmp.move(200, 600)
+    time.sleep(0.7)
+    away = qmp.screenshot()
+    check("the pointer is not drawn into the frame",
+          all(under.color(700 + i, 300 + j) == away.color(700 + i, 300 + j) for i in range(14) for j in range(14)))
+    qmp.click(*LAUNCHER)
+    expect("a click arrives where the pointer is", "desktop: launcher open")
+    time.sleep(0.5)
+    qmp.click(60, MENU["Terminal"])
+    expect("the launcher starts the terminal", "desktop: started /bin/terminal")
+    time.sleep(2.0)
+    shot = qmp.screenshot()
+    check("the terminal's window is on the screen", shot.color(400, 64) == TITLE_FOCUSED,
+          f"(title bar {shot.color(400, 64):06x})")
+
+    # --- Modes: a resource of another size on the host, the same framebuffers
+    def screen_is(name, width, height):
+        if not expect(f"{name}: the display server follows", f"the screen is now {width}x{height}"):
+            return
+        time.sleep(2.5)
+        shot = qmp.screenshot()
+        check(f"{name}: the host's picture has {width}x{height} pixels", (qmp.width, qmp.height) == (width, height),
+              f"({qmp.width}x{qmp.height})")
+        check(f"{name}: the taskbar is at the new bottom edge",
+              shot.color(4, height - 3) == taskbar_corner and shot.color(width - 4, height - 3) == taskbar_corner,
+              f"({shot.color(4, height - 3):06x} {shot.color(width - 4, height - 3):06x}, was {taskbar_corner:06x})")
+
+    console.send("display 1024x768")
+    screen_is("a smaller mode", 1024, 768)
+    console.send("display 1920x1080")
+    screen_is("a mode larger than the firmware's", 1920, 1080)
+    console.send("display 0")
+    screen_is("back to the host's mode", 1280, 800)
+    console.send("")
+    console.read_until(PROMPT, timeout)
+    driver_log("no command of the driver failed")
+    return failures
+
+
 def main():
     args = sys.argv[1:]
     timeout = 90.0
     qmp_path = wav_path = None
-    while args[:1] in (["--timeout"], ["--qmp"], ["--wav"]):
+    gpu = False
+    while args[:1] in (["--timeout"], ["--qmp"], ["--wav"], ["--gpu"]):
+        if args[0] == "--gpu":
+            gpu = True
+            args = args[1:]
+            continue
         if args[0] == "--timeout":
             timeout = float(args[1])
         elif args[0] == "--wav":
@@ -653,16 +756,19 @@ def main():
         print(__doc__.strip().splitlines()[2], file=sys.stderr)
         return 2
     os.makedirs("build", exist_ok=True)
-    log = open("build/shell-test.log", "wb")
-    steps = STEPS[:]
-    if "virtio-net" in " ".join(args):
+    log_path = "build/gpu-test.log" if gpu else "build/shell-test.log"
+    log = open(log_path, "wb")
+    steps = [] if gpu else STEPS[:]
+    if gpu:
+        pass
+    elif "virtio-net" in " ".join(args):
         ports = start_host_servers()
         steps += network_steps(*ports)
         if "e1000e" in " ".join(args):
             steps += intel_nic_steps(ports[0])
-    if "intel-hda" in " ".join(args):
+    if not gpu and "intel-hda" in " ".join(args):
         steps += audio_steps()
-    if "nvme" in " ".join(args):
+    if not gpu and "nvme" in " ".join(args):
         steps += disk_steps()
     steps.append(FINAL_STEP)
     console = Console(args[1:], log)
@@ -674,10 +780,13 @@ def main():
         print("shell test: shell prompt reached")
         if qmp_path:
             qmp = Qmp(qmp_path)
-            steps.insert(len(steps) - 1, "gui")
+            steps.insert(len(steps) - 1, "gpu" if gpu else "gui")
         for step in steps:
             if step == "gui":
                 failures += gui_steps(console, qmp, timeout)
+                continue
+            if step == "gpu":
+                failures += gpu_steps(console, qmp, timeout)
                 continue
             if isinstance(step, str) and step.startswith("unplug "):
                 if qmp:
@@ -725,7 +834,7 @@ def main():
     if wav_path:
         failures += check_sound(wav_path)
     log.close()
-    print(f"shell test: {'PASSED' if failures == 0 else f'{failures} FAILED'} (log: build/shell-test.log)")
+    print(f"shell test: {'PASSED' if failures == 0 else f'{failures} FAILED'} (log: {log_path})")
     return 0 if failures == 0 else 1
 
 

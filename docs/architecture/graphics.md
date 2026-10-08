@@ -98,10 +98,15 @@ The same event is signaled when the driver gives a new list of modes
 mode, call `display_set_framebuffer()`, fill in the operations its hardware
 has, call `display_set_driver()` and `display_set_modes()`. Nothing above
 the driver changes; what it leaves out is done in software as before. There
-are two such drivers: [`intel_gpu.c`](../../drivers/graphics/intel_gpu.c)
-(everything, below) and [`bochs_gpu.c`](../../drivers/graphics/bochs_gpu.c)
-for the standard VGA card of QEMU, which has `set_mode` and nothing else —
-about 150 lines, and the reason mode switching is covered by `make test`.
+are four such drivers:
+
+| Driver | Hardware | What it brings |
+| --- | --- | --- |
+| [`intel_gpu.c`](../../drivers/graphics/intel_gpu.c) | Intel graphics, generation 9 | Everything (below) |
+| [`amd_gpu.c`](../../drivers/graphics/amd_gpu.c) | AMD graphics of Ryzen 4000/5000 G | Everything (below) |
+| [`virtio_gpu.c`](../../drivers/graphics/virtio_gpu.c) | The VirtIO GPU of virtual machines | Everything (below), and covered by `make test` |
+| [`bochs_gpu.c`](../../drivers/graphics/bochs_gpu.c) | The standard VGA card of QEMU | `set_mode` and nothing else: about 150 lines, the smallest example |
+
 The kernel tests `display_driver_operations` and
 `display_modes_can_be_switched` run the whole interface with drivers that
 exist only in the tests.
@@ -253,6 +258,8 @@ The shell can start them from the console without waiting: `guidemo &`.
 `make run` adds a VirtIO keyboard and tablet. The QEMU window shows the
 desktop; the serial console stays on the terminal. QEMU's standard VGA card
 gets the driver `bochs-gpu`, so the screen mode can be changed there, too.
+`make run GPU=virtio` gives the machine a VirtIO GPU instead (`-vga none
+-device virtio-vga`), with the driver `virtio-gpu`.
 
 ## The `display` command and the Settings page
 
@@ -510,3 +517,49 @@ dark.
 
 Not yet: several screens at once, HDMI with info frames and audio,
 acceleration.
+
+## VirtIO GPU driver (Phase 12)
+
+[`drivers/graphics/virtio_gpu.c`](../../drivers/graphics/virtio_gpu.c)
+drives the paravirtual graphics card of QEMU and other virtual machines
+(`virtio-vga`, PCI 1af4:1050), in its 2D mode. It is the one graphics driver
+whose every operation runs in `make test`.
+
+The card differs from real ones in one thing: **it has no framebuffer the
+host looks at.** The picture lives in a *resource* on the host. The guest
+keeps the pixels in its own memory (the resource's *backing*) and says when
+to copy them over and when to show them. Commands and their answers travel
+over a virtqueue ([`drivers/bus/virtio`](../../drivers/bus/virtio/virtio.h),
+shared with the block, network and input drivers).
+
+| Display interface | What the driver does |
+| --- | --- |
+| Framebuffers | Two, in guest memory (enough for 1920x1080 each), both the backing of one resource: the second lies behind the first |
+| Frames | A thread copies the framebuffer on the screen to the host and shows it, 60 times a second (`TRANSFER_TO_HOST_2D`, `RESOURCE_FLUSH`): the card's "vertical blank" |
+| `flip` | The other framebuffer is copied from the next frame on (the same resource, read from another offset of its backing). The host only ever sees whole frames |
+| `wait_vblank` | Until the next frame has been presented; after a flip, the frame that shows the new framebuffer |
+| Pointer | A second resource of 64x64 pixels, placed by the host through the cursor queue (`UPDATE_CURSOR`, `MOVE_CURSOR`). It is not part of the frame |
+| `set_mode` | A resource of the new size with the same backing, put on the scanout; the old one is given back. The framebuffers do not move |
+| Modes | The size the host prefers (its window) and common sizes that fit the framebuffers. The card itself takes any size |
+
+**Taking over.** As `virtio-vga` the card is also a VGA card: the firmware
+shows its picture through that side, and the boot framebuffer is the VGA
+memory. The driver creates its resources, moves the display (and with it
+the kernel console) into its own framebuffer, and puts the resource on
+scanout 0; from that command on the host shows the VirtIO side.
+
+**The host's window.** When it gets another size, or the output goes away
+or comes back, the device sets an event in its configuration. The frame
+thread looks at it once a second, asks for the output's state and passes it
+on as for another monitor: a new list of modes (the window's size is the
+preferred one) or "monitor disconnected". The mode on the screen stays.
+
+Limits:
+
+- A kernel panic stops interrupts and with them the frame thread: its text
+  reaches the serial port, not the VirtIO screen.
+- No 3D (virgl), one scanout, and no card without the VGA side
+  (`virtio-gpu-pci`): there the firmware gives no boot framebuffer to take
+  over.
+- A change of the host's window cannot be made in a test without a window;
+  that path is not covered by `make test`.
