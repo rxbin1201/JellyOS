@@ -451,7 +451,7 @@ debug: all $(VARS_COPY)
 # The test drivers are passed as boot modules; edu and e1000e are their devices.
 # Host unit tests: code without OS dependencies, built with the host compiler and sanitizers.
 UNIT_TESTS := $(BUILD)/unit/canvas_test $(BUILD)/unit/sha256_test $(BUILD)/unit/hid_test $(BUILD)/unit/mixer_test \
-              $(BUILD)/unit/atom_test $(BUILD)/unit/edid_test $(BUILD)/unit/hdmi_test
+              $(BUILD)/unit/atom_test $(BUILD)/unit/edid_test $(BUILD)/unit/hdmi_test $(BUILD)/unit/intel_kernels_test
 UNIT_CFLAGS := -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -I.
 
 $(BUILD)/unit/canvas_test: tests/unit/canvas_test.c graphics/core/canvas.c graphics/core/canvas.h \
@@ -484,6 +484,11 @@ $(BUILD)/unit/hdmi_test: tests/unit/hdmi_test.c drivers/graphics/hdmi.c drivers/
                          drivers/graphics/edid.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UNIT_CFLAGS) tests/unit/hdmi_test.c drivers/graphics/hdmi.c drivers/graphics/edid.c -o $@
+
+$(BUILD)/unit/intel_kernels_test: tests/unit/intel_kernels_test.c drivers/graphics/intel_kernels.c \
+                                  drivers/graphics/intel_kernels.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UNIT_CFLAGS) tests/unit/intel_kernels_test.c drivers/graphics/intel_kernels.c -o $@
 
 unit: $(UNIT_TESTS)
 	@for t in $(UNIT_TESTS); do $$t || { echo "make unit: FAILED ($$t)"; exit 1; }; done

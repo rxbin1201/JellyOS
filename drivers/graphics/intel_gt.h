@@ -61,6 +61,16 @@ status_t intel_gt_run(intel_gt_t *gt, uint32_t engine, const uint32_t *commands,
 uint64_t intel_gt_map(intel_gt_t *gt, uint64_t phys, uint32_t pages, bool scanout);
 void     intel_gt_unmap(intel_gt_t *gt, uint64_t address, uint32_t pages);
 
+/*
+ * Execute the batch at `address` (in the address space of intel_gt_map(), on 8 bytes) on an engine and return
+ * when it is done; the engine's caches of earlier work are made fresh first. Its commands are not privileged.
+ */
+status_t intel_gt_run_batch(intel_gt_t *gt, uint32_t engine, uint64_t address, uint64_t timeout_ns);
+
+/* The render engine's caching of a surface (its surface state's memory object control field) */
+#define INTEL_MOCS_UNCACHED 0u /* straight to memory: what a display reads */
+#define INTEL_MOCS_CACHED   4u /* through the cache the CPU shares */
+
 /* A rectangle filled with a colour, or copied from another place. Pixels of 32 bits; addresses from intel_gt_map(). */
 typedef struct {
     bool     copy;

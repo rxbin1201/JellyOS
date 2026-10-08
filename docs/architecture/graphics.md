@@ -576,8 +576,38 @@ than a frame), and at the full clock the blitter is about as fast as the
 CPU, which the display server would then only wait for. The gain is for
 the render engine, which can put the windows together, shadows and
 transparency included; the old JellyOS composited its desktop that way,
-about twice as fast as with the CPU on the same machine. That is the next
-step.
+about twice as fast as with the CPU on the same machine.
+
+### Copying and blending on the render engine
+
+The first part of that, ported from the old JellyOS (`igd_rcs.c`,
+`igd_comp.c`): the render engine copies rectangles and blends them with
+their alpha, times an opacity, over a destination. Nothing uses it for the
+desktop yet.
+
+Not the 3D pipeline but the GPGPU one. The render engine starts a hardware
+thread on the execution units (EUs) for each block of 8 x 8 pixels, and
+each runs a small program that reads its block of the source (and for
+blending of the destination) with "media block read" messages, computes,
+and writes the block back. The hardware does not cut a block at the edge
+of a surface, so a rectangle is cut into up to four pieces whose blocks
+fit exactly: 8 x 8 inside, 1 x 8 on the right, 8 x 1 at the bottom, 1 x 1
+in the corner.
+
+| | |
+| --- | --- |
+| Programs | [`intel_kernels.c`](../../drivers/graphics/intel_kernels.c): a small assembler for the EUs' instruction format (generation 8 and 9, 128 bits per instruction) and the eight programs, copy and blend for each block shape. Blending per byte: (source x a + destination x (255 - a)) / 255, rounded, where a = the source's alpha x opacity / 256. No hardware in this file: the unit test checks that the assembler makes the fill program of Intel's test suite (IGT) bit for bit, that the pieces cover a rectangle exactly once, and the formula |
+| A batch | [`intel_render.c`](../../drivers/graphics/intel_render.c): `PIPELINE_SELECT` (GPGPU), `STATE_BASE_ADDRESS`, `MEDIA_VFE_STATE`, then per piece its constants (the corners in both surfaces), its interface descriptor (program, binding table with the two surface states), `GPGPU_WALKER` with one thread per block, and a `PIPE_CONTROL` that waits for every thread and flushes the data cache, so that the next piece sees what this one wrote. Up to 32 rectangles per batch |
+| Surfaces | Seen as 8-bit surfaces (x counts bytes), up to 4096 pixels wide. One that a display reads is written past the GPU's caches, by its entry in the render engine's caching table (which the driver sets as the old JellyOS did); others go through the cache the CPU shares |
+| Fresh | Before every batch a `PIPE_CONTROL` in the ring makes the engine forget its translations and its caches of states, constants and programs (as i915 does); the blitter's batches get the same from `MI_FLUSH_DW` |
+
+At its start it is tried on surfaces of its own: an odd rectangle copied
+(all four shapes), two blends that overlap, the second at half opacity,
+and a copy into a surface written past the caches; every pixel is compared
+with the CPU's result. Then on the framebuffers: the whole screen copied,
+1024 x 1024 pixels of ordinary memory blended over it, a part compared
+with the CPU, and the time of both in the log. On the ThinkCentre at
+1050 MHz: the whole screen (3440x1440) in 4.6 ms, blending at 4 GB/s.
 
 
 ## AMD graphics driver (Phase 12)

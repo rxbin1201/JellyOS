@@ -105,6 +105,11 @@
 #define GDRST                 0x0941C /* reset of single engines: a bit each, clears itself */
 #define GDRST_RENDER          (1u << 1)
 #define GDRST_BLITTER         (1u << 3)
+#define RENDER_MOCS(i)        (0x0C800 + 4u * (uint32_t)(i)) /* the render engine's memory object control: 62 entries */
+#define L3_MOCS(i)            (0x0B020 + 4u * (uint32_t)(i)) /* its L3 cache's: two entries per register */
+#define MOCS_UNCACHED         0x09u /* straight to memory */
+#define MOCS_WRITE_BACK       0x3Bu /* in the cache the CPU shares (LLC and eLLC, age 3) */
+#define L3_UNCACHED           0x10u
 #define PRIVATE_PAT_LOW       0x040E0 /* what the "memory type" bits of a translation table entry mean: eight types */
 #define PRIVATE_PAT_HIGH      0x040E4
 #define GT_FAULT              0x04094 /* a page fault of an engine */
@@ -168,6 +173,10 @@
 #define MI_FLUSH_STORE        (0x26u << 23 | 1u << 14 | 2) /* what was drawn is in memory, then store: address, value */
 #define MI_FLUSH_ADDRESS_GGTT (1u << 2)
 #define MI_BATCH_START        (0x31u << 23 | 1u << 8 | 1)  /* go on at an address of the context's own address space */
+#define MI_FLUSH_INVALIDATE   (1u << 18)                   /* (MI_FLUSH_STORE) and forget the translations */
+#define PIPE_CONTROL          (3u << 29 | 3u << 27 | 2u << 24 | 4) /* 6 dwords */
+#define PC_INVALIDATE_ALL     (1u << 20 | 1u << 18 | 1u << 11 | 1u << 10 | 1u << 4 | 1u << 3 | 1u << 2)
+#define PC_STORE_QWORD_GGTT   (1u << 14 | 1u << 24)        /* (the invalidation needs a write after it) */
 /* The blitter's two: pixels of 32 bits, all four bytes written */
 #define XY_COLOR_BLT          (2u << 29 | 0x50u << 22 | 3u << 20 | 5) /* 7 dwords */
 #define XY_SRC_COPY_BLT       (2u << 29 | 0x53u << 22 | 3u << 20 | 8) /* 10 dwords */
@@ -193,11 +202,12 @@
 /* The status page, in dwords: where our sequence number goes (the hardware's own entries are below 0x30) */
 #define HWSP_SEQNO            0x40
 #define HWSP_SCRATCH          0x80
+#define HWSP_SCRATCH2         0x88 /* for the writes that invalidations need */
 
 #define RING_PAGES            4
 #define RING_BYTES            (RING_PAGES * PAGE_SIZE)
 #define BREADCRUMB_DWORDS     6
-#define BATCH_START_DWORDS    4
+#define BATCH_START_DWORDS    (6 + 4) /* the caches made fresh, then "go there" */
 #define BATCH_PAGES           1
 #define BATCH_DWORDS          (BATCH_PAGES * PAGE_SIZE / 4)
 
@@ -250,6 +260,7 @@ typedef struct {
     const uint16_t    *layout;
     uint32_t           interrupt_shift; /* its half of the interrupt registers */
     bool               flushes;       /* it draws: a submission ends with "flush, then store" */
+    bool               render;        /* its caches are invalidated with a PIPE_CONTROL (else MI_FLUSH_DW) */
 
     mutex_t            lock;
     bool               works;
@@ -619,7 +630,7 @@ static bool engine_events(const intel_gt_t *gt, engine_t *e)
  * Commands into the ring (`count` dwords of them, then "go on in the batch buffer" if `batch`), the context to
  * the engine, and wait until it is through and switched out. Lock held.
  */
-static status_t engine_submit(intel_gt_t *gt, engine_t *e, const uint32_t *commands, uint32_t count, bool batch,
+static status_t engine_submit(intel_gt_t *gt, engine_t *e, const uint32_t *commands, uint32_t count, uint64_t batch,
                               uint64_t timeout_ns)
 {
     uint32_t b = e->base, used = count + (batch ? BATCH_START_DWORDS : 0) + BREADCRUMB_DWORDS;
@@ -636,9 +647,29 @@ static status_t engine_submit(intel_gt_t *gt, engine_t *e, const uint32_t *comma
     for (uint32_t i = 0; i < count; i++)
         *out++ = commands[i];
     if (batch) {
+        /*
+         * What the engine keeps of earlier submissions is forgotten first (as i915 does before each request): the
+         * translations of the address space, which may have changed, and for the render engine its caches of
+         * states, constants, programs and textures. Six dwords either way.
+         */
+        if (e->render) {
+            *out++ = PIPE_CONTROL;
+            *out++ = PC_INVALIDATE_ALL | PC_STORE_QWORD_GGTT;
+            *out++ = e->hwsp_gtt + HWSP_SCRATCH2 * 4;
+            *out++ = 0;
+            *out++ = 0;
+            *out++ = 0;
+        } else {
+            *out++ = MI_FLUSH_STORE | MI_FLUSH_INVALIDATE;
+            *out++ = (e->hwsp_gtt + HWSP_SCRATCH2 * 4) | MI_FLUSH_ADDRESS_GGTT;
+            *out++ = 0;
+            *out++ = 0;
+            *out++ = MI_NOOP;
+            *out++ = MI_NOOP;
+        }
         *out++ = MI_BATCH_START;
-        *out++ = (uint32_t)e->batch_address;
-        *out++ = (uint32_t)(e->batch_address >> 32);
+        *out++ = (uint32_t)batch;
+        *out++ = (uint32_t)(batch >> 32);
         *out++ = MI_NOOP;
     }
     /* The end of every submission: our sequence number into the status page (for what draws: once it is in memory). */
@@ -707,7 +738,18 @@ status_t intel_gt_run(intel_gt_t *gt, uint32_t engine, const uint32_t *commands,
     if ((count + BATCH_START_DWORDS + BREADCRUMB_DWORDS + 1) * 4 > RING_BYTES / 2 || (count && !commands))
         return STATUS_INVALID_ARGUMENT;
     mutex_lock(&e->lock);
-    status_t status = e->works ? engine_submit(gt, e, commands, count, false, timeout_ns) : STATUS_DEVICE_ERROR;
+    status_t status = e->works ? engine_submit(gt, e, commands, count, 0, timeout_ns) : STATUS_DEVICE_ERROR;
+    mutex_unlock(&e->lock);
+    return status;
+}
+
+status_t intel_gt_run_batch(intel_gt_t *gt, uint32_t engine, uint64_t address, uint64_t timeout_ns)
+{
+    if (!gt || engine >= INTEL_ENGINE_COUNT || !address || (address & 7))
+        return STATUS_INVALID_ARGUMENT;
+    engine_t *e = &gt->engines[engine];
+    mutex_lock(&e->lock);
+    status_t status = e->works ? engine_submit(gt, e, NULL, 0, address, timeout_ns) : STATUS_DEVICE_ERROR;
     mutex_unlock(&e->lock);
     return status;
 }
@@ -755,7 +797,7 @@ status_t intel_gt_blit(intel_gt_t *gt, const intel_blit_t *blits, uint32_t count
     *out++ = MI_BATCH_BUFFER_END;
     *out++ = MI_NOOP;
     __asm__ volatile("mfence" : : : "memory");
-    status_t status = e->works ? engine_submit(gt, e, NULL, 0, true, 1000000000ull) : STATUS_DEVICE_ERROR;
+    status_t status = e->works ? engine_submit(gt, e, NULL, 0, e->batch_address, 1000000000ull) : STATUS_DEVICE_ERROR;
     mutex_unlock(&e->lock);
     return status;
 }
@@ -793,7 +835,7 @@ static bool engine_try(intel_gt_t *gt, uint32_t index)
         mutex_lock(&e->lock);
         e->batch[0] = MI_BATCH_BUFFER_END;
         e->batch[1] = MI_NOOP;
-        status_t status = engine_submit(gt, e, NULL, 0, true, second);
+        status_t status = engine_submit(gt, e, NULL, 0, e->batch_address, second);
         mutex_unlock(&e->lock);
         if (STATUS_IS_ERROR(status))
             return false;
@@ -812,7 +854,8 @@ status_t intel_gt_start(const intel_gt_host_t *host, intel_gt_t **out)
         return STATUS_OUT_OF_MEMORY;
     gt->host = *host;
     gt->engines[INTEL_ENGINE_RENDER] = (engine_t){ .name = "render", .base = 0x02000, .reset_bit = GDRST_RENDER,
-                                                   .context_pages = 22, .layout = render_layout, .interrupt_shift = 0 };
+                                                   .context_pages = 22, .layout = render_layout, .interrupt_shift = 0,
+                                                   .render = true };
     gt->engines[INTEL_ENGINE_BLITTER] = (engine_t){ .name = "blitter", .base = 0x22000, .reset_bit = GDRST_BLITTER,
                                                     .context_pages = 2, .layout = blitter_layout, .interrupt_shift = 16,
                                                     .flushes = true };
@@ -849,6 +892,16 @@ status_t intel_gt_start(const intel_gt_host_t *host, intel_gt_t **out)
     klog_debug("igpu: GPU: memory types were 0x%x 0x%x", rd(gt, PRIVATE_PAT_LOW), rd(gt, PRIVATE_PAT_HIGH));
     wr(gt, PRIVATE_PAT_LOW, 0x000A0907);
     wr(gt, PRIVATE_PAT_HIGH, 0x3B2B1B0B);
+
+    /*
+     * How the render engine's accesses are cached, by the entry a surface names (as the old JellyOS set it): entry
+     * 2 (and 4) through the cache the CPU shares, all others straight to memory, which is what a display reads.
+     * Not in the GPU's own L3 cache for the entries used: a window's pixels the CPU changed could be old there.
+     */
+    for (uint32_t i = 0; i < 62; i++)
+        wr(gt, RENDER_MOCS(i), i == 2 || i == 4 ? MOCS_WRITE_BACK : MOCS_UNCACHED);
+    for (uint32_t i = 0; i < 3; i++)
+        wr(gt, L3_MOCS(i), (rd(gt, L3_MOCS(i)) & 0xFFFF0000u) | L3_UNCACHED);
 
     /* The engines' interrupts: "a user interrupt command was executed" and "a status event was written". */
     uint32_t wanted = 0;

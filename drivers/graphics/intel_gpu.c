@@ -82,6 +82,8 @@
 #include "drivers/graphics/edid.h"
 #include "drivers/graphics/hdmi.h"
 #include "drivers/graphics/intel_gt.h"
+#include "drivers/graphics/intel_kernels.h"
+#include "drivers/graphics/intel_render.h"
 
 #include "core/boot.h"
 #include "core/cmdline.h"
@@ -280,6 +282,7 @@ typedef struct {
     intel_gt_t       *gt;                      /* the engines that execute commands (intel_gt.c), NULL if not up */
     uint32_t          gt_next;                 /* the next free entry of their part of the graphics address space */
     uint64_t          gt_surfaces[2];          /* the framebuffers in the address space the engines draw in */
+    intel_render_t   *render;                  /* copying and blending on the render engine, NULL if it does not */
     bool              msi;                     /* the interrupt handler is installed */
     uint32_t          cdclk_khz;
     uint16_t          device_id;
@@ -2170,6 +2173,68 @@ static bool blitter_draws(igpu_t *g)
 }
 
 /*
+ * Copying and blending on the render engine (intel_render.c): started, and tried on the framebuffers, for the
+ * log: a copy of the whole screen from the first to the second, and blending 1024 x 1024 pixels of ordinary memory
+ * over that, a part of which is compared with the CPU's result. The second framebuffer is emptied afterwards.
+ */
+static void render_start(igpu_t *g)
+{
+    display_t *d = display_get(0);
+    enum { SIDE = 1024, PAGES = SIDE * SIDE * 4 / PAGE_SIZE, CHECK = 256, ROUNDS = 10 };
+    uint64_t phys, memory = 0, start, copy_us, blend_us;
+
+    if (!intel_gt_engine_works(g->gt, INTEL_ENGINE_RENDER) || STATUS_IS_ERROR(intel_render_start(g->gt, &g->render)))
+        return;
+    if (d->info.width < SIDE || d->info.height < SIDE || STATUS_IS_ERROR(pmm_alloc_pages(PAGES, &phys)))
+        return;
+    uint32_t *source = phys_to_virt(phys), *screen0 = phys_to_virt(g->framebuffers[0]);
+    uint32_t *screen1 = phys_to_virt(g->framebuffers[1]), stride = d->info.pitch / 4;
+    for (uint32_t i = 0; i < SIDE * SIDE; i++)
+        source[i] = (i * 2654435761u) ^ (i >> 7) * 40503u;
+    flush_lines(source, PAGES * PAGE_SIZE);
+    memory = intel_gt_map(g->gt, phys, PAGES, false);
+    intel_surface_t fb0 = { g->gt_surfaces[0], d->info.width, d->info.height, d->info.pitch, true };
+    intel_surface_t fb1 = { g->gt_surfaces[1], d->info.width, d->info.height, d->info.pitch, true };
+    intel_surface_t mem = { memory, SIDE, SIDE, SIDE * 4, false };
+    const intel_compose_t copy = { false, 256, &fb1, &fb0, 0, 0, 0, 0, d->info.width, d->info.height };
+    const intel_compose_t blend = { true, 256, &fb1, &mem, 0, 0, 0, 0, SIDE, SIDE };
+    bool ok = memory != 0;
+
+    start = clock_monotonic_ns();
+    for (uint32_t i = 0; i < ROUNDS && ok; i++)
+        ok = !STATUS_IS_ERROR(intel_render_compose(g->render, &copy, 1));
+    copy_us = (clock_monotonic_ns() - start) / 1000 / ROUNDS;
+    start = clock_monotonic_ns();
+    for (uint32_t i = 0; i < ROUNDS && ok; i++)
+        ok = !STATUS_IS_ERROR(intel_render_compose(g->render, &copy, 1)) &&
+             !STATUS_IS_ERROR(intel_render_compose(g->render, &blend, 1));
+    blend_us = (clock_monotonic_ns() - start) / 1000 / ROUNDS - copy_us;
+
+    /* What is in the second framebuffer now: the first one with the source blended over it. */
+    uint32_t wrong = 0;
+    for (uint32_t y = 0; y < CHECK && ok; y++) {
+        flush_lines(screen1 + (uint64_t)y * stride, CHECK * 4);
+        for (uint32_t x = 0; x < CHECK; x++)
+            wrong += screen1[(uint64_t)y * stride + x] != intel_blend_pixel(source[y * SIDE + x], screen0[(uint64_t)y * stride + x], 256);
+    }
+    memset(screen1, 0, (size_t)d->info.pitch * d->info.height);
+    flush_lines(screen1, (size_t)d->info.pitch * d->info.height);
+    if (memory)
+        intel_gt_unmap(g->gt, memory, PAGES);
+    pmm_free_pages(phys, PAGES);
+    if (!ok || wrong) {
+        klog_warn("igpu: render engine: on the framebuffers it %s: not used",
+                  ok ? "blends wrongly" : "does not get through");
+        g->render = NULL;
+        return;
+    }
+    uint64_t screen_mb = (uint64_t)d->info.width * d->info.height * 4 / 1000000;
+    klog_info("igpu: render engine's speed at %u MHz: a copy of the whole screen %lu us (%lu MB/s), blending 1024 x "
+              "1024 pixels %lu us (%lu MB/s)", intel_gt_clock_mhz(g->gt), copy_us,
+              screen_mb * 1000000 / (copy_us ? copy_us : 1), blend_us, (uint64_t)4 * SIDE * SIDE / (blend_us ? blend_us : 1));
+}
+
+/*
  * The GPU's engines (intel_gt.c): woken and tried out, the framebuffers entered into the address space they
  * draw in, and the blitter tried on them. Nothing draws with them yet. "igpugt=off" leaves the engines alone.
  */
@@ -2198,6 +2263,7 @@ static void engines_start(igpu_t *g)
         return;
     }
     blitter_draws(g);
+    render_start(g);
 }
 
 /* "igpu=native" or "igpu=WIDTHxHEIGHT[@HZ]": the mode to switch to, NULL if there is none. */
