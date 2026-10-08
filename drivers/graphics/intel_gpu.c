@@ -16,8 +16,9 @@
  *     graphics address space (GGTT) and switches:
  *       * if the firmware already runs the monitor at that timing and only
  *         scales a smaller picture up, the scaler is turned off
- *       * DisplayPort: new timings on the link the firmware trained, if the
- *         link and the display clock are fast enough
+ *       * DisplayPort: new timings on the link that is up; if the mode needs
+ *         a faster link than the firmware trained and the monitor takes one,
+ *         the port's PLL is set to that rate and the link trained again
  *       * HDMI: pipe and port off, the port's PLL reprogrammed, on again
  *     If the pipe does not come up, the firmware's mode is restored.
  *
@@ -37,7 +38,7 @@
  *   - DisplayPort: it reads the monitor's link status over the AUX channel.
  *     No answer means the monitor is gone. When it is back, or reports that
  *     it lost the link (it was switched off and on), the link is trained
- *     again at the rate and lane count the firmware had chosen
+ *     again at the rate it had (link training is shared code, dp_aux.c)
  *   - HDMI: the hot plug pin of the port (live state in the PCH)
  *   - a monitor that comes back is asked for its EDID again; if it is
  *     another one, the display gets a new list of modes, and if the mode
@@ -168,9 +169,6 @@
 #define DDI_BUF_LEVEL_MASK    (0xFu << 24) /* which entry of the port's signal level table */
 
 /* DisplayPort configuration data (DPCD) */
-#define DPCD_TRAINING_PATTERN 0x102
-#define DPCD_TRAINING_LANE0   0x103
-#define DPCD_DOWNSPREAD_CTRL  0x107
 #define DPCD_SET_POWER        0x600
 
 #define GMBUS_SW_CLR_INT      (1u << 31)
@@ -221,9 +219,12 @@ typedef struct {
     int               port, dpll;
     bool              dp, hdmi, scaler;
     uint32_t          source_w, source_h;      /* what the plane shows now */
-    uint32_t          link_khz, lanes;         /* DisplayPort link as trained by the firmware */
+    uint32_t          link_khz, lanes;         /* DisplayPort link as it is trained now (at first: by the firmware) */
+    uint32_t          sink_khz;                /* the fastest link the monitor takes and the port can make, 0 if not known */
+    bool              sink_enhanced;           /* the monitor wants enhanced framing */
+    uint32_t          train_tp, train_buf;     /* during link training: the port's registers without pattern and level */
     uint32_t          pixel_khz;               /* current pixel clock */
-    uint32_t          limit_khz;               /* fastest mode possible without retraining or a new display clock */
+    uint32_t          limit_khz;               /* fastest mode possible, with a faster link where the monitor takes one */
     uint32_t          pipeconf, plane_ctl, clk_sel, buf_ctl, tp_ctl;
     hw_mode_t         boot;
 
@@ -706,6 +707,16 @@ static void compute_m_n(uint64_t m, uint64_t n, uint32_t *result_m, uint32_t *re
     *result_n = (uint32_t)big_n;
 }
 
+/* DisplayPort: how a pixel clock of khz relates to the link as it is now (the numbers M and N of data and clock). */
+static void link_numbers(igpu_t *g, uint32_t khz, hw_mode_t *m)
+{
+    uint32_t data_m;
+
+    compute_m_n(24ull * khz, (uint64_t)g->link_khz * g->lanes * 8, &data_m, &m->data_n);
+    m->data_m = (63u << 25) | data_m; /* transfer units of 64 symbols */
+    compute_m_n(khz, g->link_khz, &m->link_m, &m->link_n);
+}
+
 /* The register values of timing t with a plane of the same size from `surface` (`stride` bytes per line). */
 static void mode_fill(igpu_t *g, const timing_t *t, uint32_t surface, uint32_t stride, hw_mode_t *m)
 {
@@ -722,12 +733,8 @@ static void mode_fill(igpu_t *g, const timing_t *t, uint32_t surface, uint32_t s
     m->plane_stride = stride / 64;
     m->plane_size = (t->va - 1) << 16 | (t->ha - 1);
     m->plane_surf = surface;
-    if (g->dp) {
-        uint32_t data_m;
-        compute_m_n(24ull * t->khz, (uint64_t)g->link_khz * g->lanes * 8, &data_m, &m->data_n);
-        m->data_m = (63u << 25) | data_m; /* transfer units of 64 symbols */
-        compute_m_n(t->khz, g->link_khz, &m->link_m, &m->link_n);
-    }
+    if (g->dp)
+        link_numbers(g, t->khz, m);
 }
 
 /*
@@ -1082,26 +1089,58 @@ static void cursor_restore(igpu_t *g)
  * Pipe off, timing t with the plane on framebuffer 0, pipe on. If the screen does not come up, `fallback`
  * is put back (the firmware's own mode while taking over, afterwards the mode before).
  */
+static uint32_t link_capacity(const igpu_t *g, uint32_t link_khz);
+static bool link_change(igpu_t *g, uint32_t khz);
+
+/* The slowest link, not slower than the one that is up, that carries a pixel clock of khz; 0 if the monitor takes none. */
+static uint32_t link_for(const igpu_t *g, uint32_t khz)
+{
+    static const uint32_t rates[] = { 162000, 270000, 540000 };
+
+    if (khz <= link_capacity(g, g->link_khz))
+        return g->link_khz;
+    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
+        if (rates[i] > g->link_khz && rates[i] <= g->sink_khz && khz <= link_capacity(g, rates[i]))
+            return rates[i];
+    }
+    return 0;
+}
+
 static bool switch_timing(igpu_t *g, const timing_t *t, const hw_mode_t *fallback, bool fallback_is_boot)
 {
+    uint32_t cfgcr1 = 0, cfgcr2 = 0, old_link = g->link_khz, link = old_link;
     hw_mode_t mode;
 
-    if (t->khz > g->limit_khz && !same_timing(t, &g->current)) {
-        klog_warn("igpu: %ux%u needs a pixel clock of %u kHz, possible are %u kHz", t->ha, t->va, t->khz, g->limit_khz);
-        return false;
+    if (!same_timing(t, &g->current)) {
+        if (g->dp)
+            link = link_for(g, t->khz);
+        if (!link || t->khz > g->cdclk_khz || (!g->dp && t->khz > g->limit_khz)) {
+            klog_warn("igpu: %ux%u needs a pixel clock of %u kHz, possible are %u kHz", t->ha, t->va, t->khz, g->limit_khz);
+            return false;
+        }
     }
-    mode_fill(g, t, g->surfaces[0], stride_of(t), &mode);
-    if (g->hdmi && !hdmi_pll_compute(t->khz, &mode.cfgcr1, &mode.cfgcr2)) {
+    if (g->hdmi && !hdmi_pll_compute(t->khz, &cfgcr1, &cfgcr2)) {
         klog_warn("igpu: no PLL setting for %u kHz", t->khz);
         return false;
     }
     klog_info("igpu: switching the %s to %ux%u, pixel clock %u kHz", g->dp ? "DisplayPort timing" : "HDMI port", t->ha,
               t->va, t->khz);
     pipe_off(g);
-    bool ok = pipe_on(g, &mode, false) && frames_running(g);
+    /* A link that does not carry the mode is brought up faster first; the mode's numbers depend on its rate. */
+    bool ok = link == old_link || link_change(g, link);
+    if (ok) {
+        mode_fill(g, t, g->surfaces[0], stride_of(t), &mode);
+        if (g->hdmi) {
+            mode.cfgcr1 = cfgcr1;
+            mode.cfgcr2 = cfgcr2;
+        }
+        ok = pipe_on(g, &mode, false) && frames_running(g);
+    }
     if (!ok) {
         klog_warn("igpu: %ux%u does not come up%s", t->ha, t->va, g->lit || fallback_is_boot ? ": back to the mode before" : "");
         pipe_off(g);
+        if (g->link_khz != old_link)
+            link_change(g, old_link); /* the mode before has the old rate in its numbers */
         if (g->lit || fallback_is_boot)
             pipe_on(g, fallback, fallback_is_boot);
     } else {
@@ -1148,184 +1187,166 @@ static void publish_modes(igpu_t *g)
     display_set_modes(0, list, g->mode_count, current);
 }
 
-/* --- DisplayPort link training ---------------------------------------------------------- */
+/* --- The DisplayPort link ------------------------------------------------------------------ */
 
-/* The signal level the lanes are driven with: voltage swing 0-3 and pre-emphasis 0-3 (together at most 3). */
-static void link_level(igpu_t *g, uint32_t buf, uint8_t swing, uint8_t emphasis, uint32_t lanes)
+/*
+ * The source's side of link training (dp_aux.h): the training pattern the port sends, and the signal level of
+ * its lanes. The talking to the monitor is the shared code's.
+ */
+static void source_pattern(void *context, int pattern)
+{
+    igpu_t *g = context;
+    int port = g->port;
+
+    if (pattern == 1) {
+        /* The port: off, then on with training pattern 1 at the lowest level. */
+        uint32_t tp = rd(g, DP_TP_CTL(port));
+        if (tp & ENABLE) {
+            wr(g, DDI_BUF_CTL(port), rd(g, DDI_BUF_CTL(port)) & ~ENABLE);
+            wr(g, DP_TP_CTL(port), tp & ~(ENABLE | DP_TP_TRAIN_MASK));
+            (void)rd(g, DP_TP_CTL(port));
+            wait_bits(g, DDI_BUF_CTL(port), DDI_BUF_IDLE, DDI_BUF_IDLE, 10);
+        }
+        g->train_tp = (g->tp_ctl & ~(DP_TP_TRAIN_MASK | DP_TP_ENHANCED_FRAME | DP_TP_SCRAMBLE_OFF)) | ENABLE |
+                      (g->sink_enhanced ? DP_TP_ENHANCED_FRAME : 0);
+        wr(g, DP_TP_CTL(port), g->train_tp | DP_TP_TRAIN_PAT1 | DP_TP_SCRAMBLE_OFF);
+        (void)rd(g, DP_TP_CTL(port));
+        wr(g, DDI_BUF_CTL(port), g->train_buf | ENABLE);
+        (void)rd(g, DDI_BUF_CTL(port));
+        sleep_ms(1);
+    } else if (pattern) {
+        wr(g, DP_TP_CTL(port), g->train_tp | (pattern == 3 ? DP_TP_TRAIN_PAT3 : DP_TP_TRAIN_PAT2) | DP_TP_SCRAMBLE_OFF);
+    } else {
+        /* Idle patterns until the port reports them sent, then normal operation. */
+        wr(g, DP_TP_CTL(port), g->train_tp | DP_TP_TRAIN_IDLE);
+        if (port != 0)
+            wait_bits(g, DP_TP_STATUS(port), DP_TP_IDLE_DONE, DP_TP_IDLE_DONE, 5);
+        wr(g, DP_TP_CTL(port), g->train_tp | DP_TP_TRAIN_NORMAL);
+        g->tp_ctl = g->train_tp | DP_TP_TRAIN_NORMAL;
+        g->buf_ctl = rd(g, DDI_BUF_CTL(port));
+    }
+}
+
+/* Voltage swing 0-2 and pre-emphasis 0-3 (together at most 3) as an entry of the port's table of signal levels. */
+static void source_levels(void *context, uint8_t swing, uint8_t emphasis)
 {
     static const uint8_t table[3][4] = { { 0, 1, 2, 3 }, { 4, 5, 6, 6 }, { 7, 8, 8, 8 } };
-    uint8_t lane = (uint8_t)(swing | (swing >= 2 ? 0x04 : 0) | emphasis << 3 | (emphasis == 3 ? 0x20 : 0));
-    uint8_t set[4] = { lane, lane, lane, lane };
+    igpu_t *g = context;
 
-    wr(g, DDI_BUF_CTL(g->port), buf | ENABLE | (uint32_t)table[swing][emphasis] << 24);
+    wr(g, DDI_BUF_CTL(g->port), g->train_buf | ENABLE | (uint32_t)table[swing > 2 ? 2 : swing][emphasis & 3] << 24);
     (void)rd(g, DDI_BUF_CTL(g->port));
-    dpcd_write(g, g->port, DPCD_TRAINING_LANE0, set, (int)lanes);
 }
 
-/* What the monitor asks for after looking at the signal: the highest request of all lanes (one setting for all). */
-static void link_requests(const uint8_t *status, uint32_t lanes, uint8_t *swing, uint8_t *emphasis)
+/* What the monitor on the port says about itself: its fastest link (as far as the port can make it), its framing. */
+static void sink_read(igpu_t *g)
 {
-    uint8_t s = 0, e = 0;
+    uint8_t caps[16];
 
-    for (uint32_t i = 0; i < lanes; i++) {
-        uint8_t request = (uint8_t)(status[4 + i / 2] >> (4 * (i % 2)));
-        if ((request & 3) > s)
-            s = request & 3;
-        if (((request >> 2) & 3) > e)
-            e = (request >> 2) & 3;
-    }
-    if (s > 2)
-        s = 2; /* the highest level the port has */
-    if (s > 3 - e)
-        s = (uint8_t)(3 - e);
-    *swing = s;
-    *emphasis = e;
-}
-
-/* Do all lanes report these bits (1: clock recovered, 2: equalized, 4: symbols locked)? */
-static bool link_lanes(const uint8_t *status, uint32_t lanes, uint8_t bits)
-{
-    for (uint32_t i = 0; i < lanes; i++) {
-        if (((status[i / 2] >> (4 * (i % 2))) & bits) != bits)
-            return false;
-    }
-    return true;
-}
-
-static bool link_good(const uint8_t *status, uint32_t lanes)
-{
-    return link_lanes(status, lanes, 7) && (status[2] & 1); /* and the lanes are aligned with each other */
+    g->sink_khz = 0;
+    if (!g->dp || dpcd_read(g, g->port, DPCD_REVISION, caps, 16) != 16)
+        return;
+    g->sink_khz = caps[1] >= 0x14 ? 540000 : caps[1] >= 0x0A ? 270000 : 162000;
+    g->sink_enhanced = caps[2] & 0x80;
 }
 
 /*
- * Train the link on the port (the pipe is off): the monitor recovers the
- * clock from training pattern 1 and then equalizes the lanes with pattern 2
- * or 3, each time telling the source to adjust the signal until it is
- * satisfied. Rate and number of lanes are the ones the firmware used: the
- * PLL stays as it is. Afterwards the port sends idle patterns, then pixels.
+ * Train the link on the port (the pipe is off) at g->link_khz, which the port's PLL already makes, with
+ * g->lanes lanes. Afterwards the port sends idle patterns, then pixels.
  */
 static bool port_link_train(igpu_t *g)
 {
-    int port = g->port;
-    uint32_t lanes = g->lanes, buf = g->buf_ctl & ~(ENABLE | DDI_BUF_LEVEL_MASK);
-    uint8_t caps[16], status[6], set[5], swing = 0, emphasis = 0, power = 1;
-    uint8_t rate = (uint8_t)(g->link_khz / 27000);
-    bool recovered = false, equalized = false;
+    aux_port_t where = { g, g->port };
+    dp_aux_t aux = { &where, aux_once };
+    dp_source_t source = { g, source_pattern, source_levels, 2 }; /* the port has three levels of voltage swing */
+    dp_training_t training;
+    uint8_t caps[16], power = 1;
 
-    /* The monitor may sleep (D3): wake it and give it a moment. */
-    for (int tries = 0; tries < 3 && !dpcd_write(g, port, DPCD_SET_POWER, &power, 1); tries++)
+    /* Enhanced framing is switched on in the port together with the first pattern: asked of the monitor before.
+     * (It may sleep: woken first, as the training itself does.) */
+    for (int tries = 0; tries < 3 && !dpcd_write(g, g->port, DPCD_SET_POWER, &power, 1); tries++)
         sleep_ms(1);
     sleep_ms(1);
-    if (dpcd_read(g, port, 0x000, caps, 16) != 16) {
-        klog_warn("igpu: link training: the monitor does not answer");
-        return false;
-    }
-    if (caps[1] < rate || (caps[2] & 0x1Fu) < lanes) {
-        klog_warn("igpu: this monitor takes at most %u lanes at %u.%02u Gbit/s; the link is set up for %u at %u.%02u "
-                  "(changing that is not supported yet)", caps[2] & 0x1F, caps[1] * 27 / 100, caps[1] * 27 % 100, lanes,
-                  rate * 27 / 100, rate * 27 % 100);
-        return false;
-    }
-    bool enhanced = caps[2] & 0x80, pattern3 = caps[2] & 0x40;
+    if (dpcd_read(g, g->port, DPCD_REVISION, caps, 16) == 16)
+        g->sink_enhanced = caps[2] & 0x80;
+    g->train_buf = g->buf_ctl & ~(ENABLE | DDI_BUF_LEVEL_MASK);
     bool spread = g->dpll >= 0 && (rd(g, DPLL_CTRL1) & (1u << (g->dpll * 6 + 4)));
-    uint32_t settle = (caps[14] & 0x7Fu) * 4; /* how long the monitor wants between adjustments, ms (0: under 1) */
-    if (settle < 1 || settle > 16)
-        settle = 1;
 
-    /* The port: off, then on with training pattern 1 at the lowest level. */
-    uint32_t tp = rd(g, DP_TP_CTL(port));
-    if (tp & ENABLE) {
-        wr(g, DDI_BUF_CTL(port), rd(g, DDI_BUF_CTL(port)) & ~ENABLE);
-        wr(g, DP_TP_CTL(port), tp & ~(ENABLE | DP_TP_TRAIN_MASK));
-        (void)rd(g, DP_TP_CTL(port));
-        wait_bits(g, DDI_BUF_CTL(port), DDI_BUF_IDLE, DDI_BUF_IDLE, 10);
-    }
-    tp = (g->tp_ctl & ~(DP_TP_TRAIN_MASK | DP_TP_ENHANCED_FRAME | DP_TP_SCRAMBLE_OFF)) | ENABLE |
-         (enhanced ? DP_TP_ENHANCED_FRAME : 0);
-    wr(g, DP_TP_CTL(port), tp | DP_TP_TRAIN_PAT1 | DP_TP_SCRAMBLE_OFF);
-    (void)rd(g, DP_TP_CTL(port));
-    wr(g, DDI_BUF_CTL(port), buf | ENABLE);
-    (void)rd(g, DDI_BUF_CTL(port));
-    sleep_ms(1);
-
-    /* The monitor: rate, lanes, framing, clock spreading, 8b/10b coding. */
-    set[0] = rate;
-    set[1] = (uint8_t)(lanes | (enhanced ? 0x80 : 0));
-    dpcd_write(g, port, DPCD_LINK_BW_SET, set, 2);
-    set[0] = spread ? 0x10 : 0;
-    set[1] = 0x01;
-    dpcd_write(g, port, DPCD_DOWNSPREAD_CTRL, set, 2);
-
-    /* Clock recovery: pattern 1, scrambling off. */
-    set[0] = 0x21;
-    set[1] = set[2] = set[3] = set[4] = 0;
-    dpcd_write(g, port, DPCD_TRAINING_PATTERN, set, 1 + (int)lanes);
-    for (int tries = 0, same = 0; tries < 20; tries++) {
-        uint8_t wanted_swing, wanted_emphasis;
-        sleep_ms(1);
-        if (dpcd_read(g, port, DPCD_LANE_STATUS, status, 6) != 6)
-            break;
-        if (link_lanes(status, lanes, 1)) {
-            recovered = true;
-            break;
-        }
-        link_requests(status, lanes, &wanted_swing, &wanted_emphasis);
-        same = wanted_swing == swing ? same + 1 : 0;
-        if (same >= 5)
-            break; /* the same level five times: it will not get better */
-        swing = wanted_swing;
-        emphasis = wanted_emphasis;
-        link_level(g, buf, swing, emphasis, lanes);
-    }
-
-    /* Channel equalization: pattern 3 if the monitor knows it, otherwise 2. */
-    if (recovered) {
-        wr(g, DP_TP_CTL(port), tp | (pattern3 ? DP_TP_TRAIN_PAT3 : DP_TP_TRAIN_PAT2) | DP_TP_SCRAMBLE_OFF);
-        uint8_t lane = (uint8_t)(swing | (swing >= 2 ? 0x04 : 0) | emphasis << 3 | (emphasis == 3 ? 0x20 : 0));
-        set[0] = (uint8_t)((pattern3 ? 3 : 2) | 0x20);
-        set[1] = set[2] = set[3] = set[4] = lane;
-        dpcd_write(g, port, DPCD_TRAINING_PATTERN, set, 1 + (int)lanes);
-        for (int tries = 0; tries < 6; tries++) {
-            sleep_ms(settle);
-            if (dpcd_read(g, port, DPCD_LANE_STATUS, status, 6) != 6 || !link_lanes(status, lanes, 1))
-                break; /* the clock was lost again */
-            if (link_good(status, lanes)) {
-                equalized = true;
-                break;
-            }
-            link_requests(status, lanes, &swing, &emphasis);
-            link_level(g, buf, swing, emphasis, lanes);
-        }
-    }
-
-    /* Idle patterns until the port reports them sent, training off in the monitor, then normal operation. */
-    wr(g, DP_TP_CTL(port), tp | DP_TP_TRAIN_IDLE);
-    if (port != 0)
-        wait_bits(g, DP_TP_STATUS(port), DP_TP_IDLE_DONE, DP_TP_IDLE_DONE, 5);
-    set[0] = 0;
-    dpcd_write(g, port, DPCD_TRAINING_PATTERN, set, 1);
-    wr(g, DP_TP_CTL(port), tp | DP_TP_TRAIN_NORMAL);
-    g->tp_ctl = tp | DP_TP_TRAIN_NORMAL;
-    g->buf_ctl = rd(g, DDI_BUF_CTL(port));
-
-    if (equalized)
-        klog_info("igpu: link trained: %u lane%s at %u.%02u Gbit/s, voltage swing %u, pre-emphasis %u", lanes,
-                  lanes == 1 ? "" : "s", g->link_khz / 100000, g->link_khz / 1000 % 100, swing, emphasis);
+    bool ok = dp_link_train(&aux, &source, g->link_khz, g->lanes, spread, &training);
+    if (ok)
+        klog_info("igpu: link trained: %u lane%s at %u.%02u Gbit/s, voltage swing %u, pre-emphasis %u", g->lanes,
+                  g->lanes == 1 ? "" : "s", g->link_khz / 100000, g->link_khz / 1000 % 100, training.swing,
+                  training.emphasis);
     else
-        klog_warn("igpu: link training failed at %s (lane status %02x %02x, alignment %02x)",
-                  recovered ? "channel equalization" : "clock recovery", status[0], status[1], status[2]);
-    return equalized;
+        klog_warn("igpu: no link at %u.%02u Gbit/s: %s (lane status %02x %02x, alignment %02x)", g->link_khz / 100000,
+                  g->link_khz / 1000 % 100, training.problem, training.status[0], training.status[1], training.status[2]);
+    return ok;
 }
 
-/* The monitor lost the link (it was unplugged or switched off): train again and show the same picture. */
-static bool link_restore(igpu_t *g)
+static bool pll_link_rate(igpu_t *g, uint32_t code);
+
+/*
+ * The link at another rate (162000, 270000 or 540000 kHz): the port and its clock off, the PLL at the new rate,
+ * the link trained. The pipe is off, and its numbers for the link (M and N) are the caller's to renew.
+ */
+static bool link_change(igpu_t *g, uint32_t khz)
 {
-    pipe_off(g);
-    bool ok = port_link_train(g);
-    if (g->lit)
+    int port = g->port;
+    uint32_t old = g->link_khz;
+
+    klog_info("igpu: the link from %u.%02u to %u.%02u Gbit/s", old / 100000, old / 1000 % 100, khz / 100000, khz / 1000 % 100);
+    wr(g, TRANS_CLK_SEL(g->pipe), 0);
+    wr(g, DDI_BUF_CTL(port), rd(g, DDI_BUF_CTL(port)) & ~ENABLE);
+    wr(g, DP_TP_CTL(port), rd(g, DP_TP_CTL(port)) & ~(ENABLE | DP_TP_TRAIN_MASK));
+    (void)rd(g, DP_TP_CTL(port));
+    wait_bits(g, DDI_BUF_CTL(port), DDI_BUF_IDLE, DDI_BUF_IDLE, 10);
+    if (g->dpll < 1)
+        g->dpll = 1; /* PLL 0 also makes the display clock and stays as it is: the port gets the next one */
+    g->link_khz = khz;
+    bool ok = pll_link_rate(g, khz == 540000 ? 0 : khz == 270000 ? 1 : 2);
+    if (!ok)
+        klog_warn("igpu: PLL %d does not lock at the link rate (status 0x%x)", g->dpll, rd(g, DPLL_STATUS));
+    else
+        ok = port_link_train(g);
+    wr(g, TRANS_CLK_SEL(g->pipe), g->clk_sel);
+    return ok;
+}
+
+/* The mode on the screen again after the link changed under it: its numbers for the link are renewed. */
+static void picture_back(igpu_t *g)
+{
+    if (g->lit) {
+        if (g->dp && g->current.khz)
+            link_numbers(g, g->current.khz, &g->active);
         pipe_on(g, &g->active, false);
+    }
     g->pending_surface = 0;
     cursor_restore(g);
+}
+
+/* Run the link at khz from now on (a slower rate than the one that is up, say), keeping the picture if it fits. */
+static bool link_use(igpu_t *g, uint32_t khz)
+{
+    uint32_t old = g->link_khz;
+
+    pipe_off(g);
+    bool ok = link_change(g, khz);
+    if (!ok && old != khz)
+        link_change(g, old);
+    picture_back(g);
+    return ok;
+}
+
+/*
+ * The monitor lost the link (it was unplugged or switched off): train again and show the same picture. Another
+ * monitor may not take the rate the link had: then at the fastest one it does take.
+ */
+static bool link_restore(igpu_t *g)
+{
+    if (g->sink_khz && g->sink_khz < g->link_khz)
+        return link_use(g, g->sink_khz);
+    pipe_off(g);
+    bool ok = port_link_train(g);
+    picture_back(g);
     return ok;
 }
 
@@ -1333,13 +1354,19 @@ static bool link_restore(igpu_t *g)
 
 static const uint32_t live_bits[] = { 1u << 24, 1u << 21, 1u << 22, 1u << 23, 1u << 25 }; /* SDEISR, ports A to E */
 
+/* The pixel clock a link of this rate carries: 24 bits per pixel over 8b/10b lanes; one pixel per pipe clock. */
+static uint32_t link_capacity(const igpu_t *g, uint32_t link_khz)
+{
+    uint32_t khz = (uint32_t)((uint64_t)link_khz * 8 * g->lanes / 24);
+
+    return link_khz < khz ? link_khz : khz;
+}
+
+/* The fastest pixel clock a mode may have: on DisplayPort with the fastest link the monitor takes, if that is known. */
 static void limits_update(igpu_t *g)
 {
     if (g->dp) {
-        /* 24 bits per pixel over 8b/10b lanes; one pixel per pipe clock; the display clock bounds the pipe */
-        g->limit_khz = (uint32_t)((uint64_t)g->link_khz * 8 * g->lanes / 24);
-        if (g->link_khz < g->limit_khz)
-            g->limit_khz = g->link_khz;
+        g->limit_khz = link_capacity(g, g->sink_khz ? g->sink_khz : g->link_khz);
     } else {
         g->limit_khz = HDMI_MAX_KHZ;
     }
@@ -1365,6 +1392,7 @@ static bool pll_link_rate(igpu_t *g, uint32_t code)
 {
     wr(g, DDI_BUF_CTL(g->port), 0);
     wr(g, DP_TP_CTL(g->port), 0);
+    (void)rd(g, DP_TP_CTL(g->port));
     pll_assign(g, 1 | code << 1);
     /* The frequency registers are for HDMI; left over from an HDMI monitor they would overrule the link rate. */
     wr(g, DPLL_CFGCR1(g->dpll), 0);
@@ -1472,6 +1500,8 @@ static bool output_move(igpu_t *g, int port, uint8_t *edid)
     if (dp) {
         bool trained = false;
         g->lanes = (caps[2] & 0x1F) >= 4 ? 4 : (caps[2] & 0x1F) >= 2 ? 2 : 1;
+        g->sink_khz = caps[1] >= 0x14 ? 540000 : caps[1] >= 0x0A ? 270000 : 162000;
+        g->sink_enhanced = caps[2] & 0x80;
         g->tp_ctl = 0;
         g->buf_ctl = (g->lanes - 1) << 1;
         /* The fastest rate the monitor takes; a slower one if the cable does not carry it. */
@@ -1489,6 +1519,7 @@ static bool output_move(igpu_t *g, int port, uint8_t *edid)
             klog_warn("igpu: port %c: no DisplayPort link at any rate", 'A' + port);
             return false;
         }
+        g->sink_khz = g->link_khz; /* faster ones did not train (the cable?): not offered */
         g->ddi_base = ENABLE | (uint32_t)port << 28 | 2u << 24 | (g->lanes - 1) << 1;
     } else {
         pll_assign(g, 1 | 1u << 5); /* HDMI mode; pipe_on() sets the frequency and switches it on */
@@ -1566,7 +1597,7 @@ static void hotplug_thread(void *argument)
         display_lock(d);
         if (g->dp) {
             present = dpcd_read(g, g->port, DPCD_LANE_STATUS, status, 6) == 6;
-            link_ok = present && link_good(status, g->lanes);
+            link_ok = present && dp_link_good(status, g->lanes);
         } else {
             present = rd(g, SDEISR) & g->live_bit;
         }
@@ -1621,6 +1652,18 @@ static void hotplug_thread(void *argument)
             int blocks = g->dp ? edid_read_aux(g, g->port, edid) : edid_read_ddc(g, g->port, edid);
             if (blocks || ++edid_tries >= 5) { /* a monitor that just woke up may need a moment for its EDID */
                 edid_tries = 0;
+                if (g->dp) {
+                    /* It may be another monitor, with another fastest link: the modes follow from that. */
+                    uint32_t fastest = g->sink_khz;
+                    sink_read(g);
+                    limits_update(g);
+                    if (g->sink_khz != fastest && blocks) {
+                        memcpy(g->edid, edid, sizeof(edid));
+                        g->edid_blocks = blocks;
+                        modes_rebuild(g, false);
+                        new_monitor = true;
+                    }
+                }
                 if (blocks && (blocks != g->edid_blocks || memcmp(edid, g->edid, (size_t)blocks * 128) != 0)) {
                     memcpy(g->edid, edid, sizeof(edid));
                     g->edid_blocks = blocks;
@@ -1863,6 +1906,11 @@ static status_t igpu_probe(device_t *device)
         if (dpcd_read(g, g->port, 0x000, caps, 16) == 16)
             klog_info("igpu: the monitor accepts up to %u lanes at %u.%02u Gbit/s (DisplayPort %u.%u)", caps[2] & 0x1F,
                       caps[1] * 27 / 100, caps[1] * 27 % 100, caps[0] >> 4, caps[0] & 0xF);
+        sink_read(g);
+        limits_update(g);
+        if (g->sink_khz > g->link_khz)
+            klog_info("igpu: modes up to %u kHz pixel clock with the link trained again at %u.%02u Gbit/s", g->limit_khz,
+                      g->sink_khz / 100000, g->sink_khz / 1000 % 100);
     }
     g->edid_blocks = g->dp ? edid_read_aux(g, g->port, g->edid) : edid_read_ddc(g, g->port, g->edid);
     if (!g->edid_blocks) {
@@ -1880,6 +1928,28 @@ static status_t igpu_probe(device_t *device)
         return STATUS_SUCCESS;
     /* Also if the screen already shows this mode: the driver's own framebuffers are what the extras build on. */
     takeover(g, wanted);
+
+    /*
+     * "igpulink=162000" (or 270000): the link slower than the firmware trained it, if the mode on the screen fits.
+     * For trying out what otherwise needs a firmware that trains a slow link: a mode chosen later that needs
+     * more gets the link brought up faster.
+     */
+    char link[16];
+    if (g->lit && g->dp && cmdline_value("igpulink", link, sizeof(link))) {
+        uint32_t khz = 0;
+        for (const char *c = link; *c >= '0' && *c <= '9'; c++)
+            khz = khz * 10 + (uint32_t)(*c - '0');
+        if ((khz != 162000 && khz != 270000) || khz >= g->link_khz || g->current.khz > link_capacity(g, khz)) {
+            klog_warn("igpu: igpulink=%s: not a slower link that carries the mode on the screen (%u kHz pixel clock)", link,
+                      g->current.khz);
+        } else {
+            display_t *d = display_get(0);
+            display_lock(d);
+            bool ok = link_use(g, khz);
+            display_unlock(d);
+            klog_info("igpu: igpulink=%s: the link is %s", link, ok ? "slower now" : "as it was: the slower one did not train");
+        }
+    }
     return STATUS_SUCCESS;
 }
 

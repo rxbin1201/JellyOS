@@ -329,7 +329,7 @@ size, enters it into the global graphics translation table and switches:
 | Situation | What happens |
 | --- | --- |
 | The firmware already drives the monitor at that timing and scales a smaller picture up | The pipe scaler is turned off and the plane gets the full size; the pipe keeps running |
-| DisplayPort, another timing | Pipe off, new timings and M/N values, pipe on; the link stays as the firmware trained it. Only modes that this link and the display clock can carry |
+| DisplayPort, another timing | Pipe off, new timings and M/N values, pipe on. A mode that needs a faster link than the one that is up gets one first (below), if the monitor takes it; the display clock bounds every mode |
 | HDMI, another timing | Pipe, port and PLL off, PLL reprogrammed for the pixel clock (up to 300 MHz), on again |
 
 If the pipe does not come up, the firmware's mode is restored. On success
@@ -395,13 +395,29 @@ gets its list of modes, and if the mode on the screen is not in it, the
 driver switches to the new monitor's best one. The display server and the
 console follow as with any mode switch.
 
-**Link training** (`dp_link_train()`): the port sends training pattern 1
-until the monitor has recovered the clock, then pattern 2 or 3 until every
-lane is equalized and the lanes are aligned; after each look at the signal
-the monitor asks for another voltage swing and pre-emphasis (DPCD
-0x206/0x207), which go into the port's buffer control and back to the
-monitor. Rate and number of lanes are the ones the firmware had chosen: the
-PLL is not touched.
+**Link training** is the shared code of [`dp_aux.c`](../../drivers/graphics/dp_aux.c)
+(`dp_link_train()`, also used by the AMD driver): the monitor recovers the
+clock from training pattern 1, then every lane is equalized and the lanes
+are aligned with pattern 2 or 3; after each look at the signal the monitor
+asks for another voltage swing and pre-emphasis. The driver brings the
+port's side as two functions: which pattern the port sends (`DP_TP_CTL`),
+and the lanes' level as an entry of the port's table (`DDI_BUF_CTL`).
+
+**A faster link.** The firmware trains the link as fast as its own mode
+needs. The list of modes goes by the fastest link the monitor takes (DPCD
+0x001, at most 5.4 Gbit/s per lane); a mode beyond what the link carries
+as it is makes the driver switch the port and its clock off, set the
+port's PLL to the next rate that is enough, train the link there and
+compute the mode's M and N for it. PLL 0 also makes the display clock and
+is never reprogrammed: a port the firmware ran from it moves to PLL 1. If
+training fails, the old rate and the old mode come back. A monitor plugged
+in later that takes less than the link has gets the link at its own best
+rate.
+
+`igpulink=162000` (or `270000`) on the kernel command line makes the link
+slower than the firmware trained it, right after the driver took the
+screen, if the mode on the screen fits. It is for trying the above on a
+machine whose firmware always trains the fastest link.
 
 Not yet: changing the display clock, several screens at once, the embedded
 panel of a notebook, lane reversal and other board wiring that only the
