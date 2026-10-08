@@ -1586,7 +1586,7 @@ static void hdmi_stream(amdgpu_t *g, uint32_t e, const display_timing_t *t)
     wr(g, HDMI_GC(e), rd(g, HDMI_GC(e)) & ~1u);
 
     /* The AVI info frame into the memory of generic packet 0, then sent in line 2 of every frame. */
-    hdmi_avi_infoframe(t, fast, frame);
+    hdmi_avi_infoframe(t, fast, true, frame);
     wr(g, AFMT_CNTL(e), rd(g, AFMT_CNTL(e)) | 1u);
     wait_bits(g, AFMT_PACKETS(e), 1u << 16, 0, 2);
     wr(g, AFMT_PACKETS(e), rd(g, AFMT_PACKETS(e)) | 1u << 17);

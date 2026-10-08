@@ -120,7 +120,7 @@ int main(void)
     display_timing_t t = { .khz = 148500, .ha = 1920, .hso = 88, .hsw = 44, .ht = 2200,
                            .va = 1080, .vso = 4, .vsw = 5, .vt = 1125, .hpos = true, .vpos = true };
     CHECK(edid_cta_code(&t) == 16);
-    hdmi_avi_infoframe(&t, false, frame);
+    hdmi_avi_infoframe(&t, false, true, frame);
     CHECK(frame[0] == 0x82 && frame[1] == 2 && frame[2] == 13);
     sum = 0;
     for (int i = 0; i < HDMI_INFOFRAME_SIZE; i++)
@@ -141,7 +141,7 @@ int main(void)
     display_timing_t wide = { .khz = 319890, .ha = 3440, .hso = 48, .hsw = 32, .ht = 3600,
                               .va = 1440, .vso = 3, .vsw = 10, .vt = 1481, .hpos = true };
     CHECK(edid_cta_code(&wide) == 0);
-    hdmi_avi_infoframe(&wide, true, frame);
+    hdmi_avi_infoframe(&wide, true, true, frame);
     CHECK(frame[7] == 0 && ((frame[5] >> 4) & 3) == 0);
     sum = 0;
     for (int i = 0; i < HDMI_INFOFRAME_SIZE; i++)
@@ -151,13 +151,20 @@ int main(void)
     display_timing_t uhd = { .khz = 594000, .ha = 3840, .hso = 176, .hsw = 88, .ht = 4400,
                              .va = 2160, .vso = 8, .vsw = 10, .vt = 2250, .hpos = true, .vpos = true };
     CHECK(edid_cta_code(&uhd) == 97);
-    hdmi_avi_infoframe(&uhd, true, frame);
+    hdmi_avi_infoframe(&uhd, true, true, frame);
     CHECK(frame[7] == 97);
-    hdmi_avi_infoframe(&uhd, false, frame);
+    hdmi_avi_infoframe(&uhd, false, true, frame);
     CHECK(frame[7] == 0);
+    /* Limited range is said, too. */
+    hdmi_avi_infoframe(&uhd, true, false, frame);
+    CHECK(((frame[6] >> 2) & 3) == 1);
+    sum = 0;
+    for (int i = 0; i < HDMI_INFOFRAME_SIZE; i++)
+        sum = (uint8_t)(sum + frame[i]);
+    CHECK(sum == 0);
     /* 1024x768 is 4:3. */
     display_timing_t xga = { .khz = 65000, .ha = 1024, .hso = 24, .hsw = 136, .ht = 1344, .va = 768, .vso = 3, .vsw = 6, .vt = 806 };
-    hdmi_avi_infoframe(&xga, false, frame);
+    hdmi_avi_infoframe(&xga, false, true, frame);
     CHECK(frame[7] == 0 && ((frame[5] >> 4) & 3) == 1);
 
     /* --- SCDC ------------------------------------------------------------------------------ */

@@ -60,7 +60,7 @@ uint32_t hdmi_pixel_limit(const hdmi_sink_t *sink, uint32_t source_khz)
     return limit < source_khz ? limit : source_khz;
 }
 
-void hdmi_avi_infoframe(const display_timing_t *t, bool hdmi2, uint8_t frame[HDMI_INFOFRAME_SIZE])
+void hdmi_avi_infoframe(const display_timing_t *t, bool hdmi2, bool full_range, uint8_t frame[HDMI_INFOFRAME_SIZE])
 {
     uint8_t *d = frame + 4, code = edid_cta_code(t), sum = 0;
 
@@ -73,8 +73,8 @@ void hdmi_avi_infoframe(const display_timing_t *t, bool hdmi2, uint8_t frame[HDM
     d[0] = 0x10 | 0x02;
     /* Picture shape, if it is one the frame can name; the active format is the picture. */
     d[1] = (uint8_t)((t->ha * 9 == t->va * 16 ? 2u : t->ha * 3 == t->va * 4 ? 1u : 0u) << 4 | 8);
-    /* Made by a computer (IT content), full range: every value from 0 to 255 is a colour. */
-    d[2] = 0x80 | 2u << 2;
+    /* Made by a computer (IT content), and the range of its values. */
+    d[2] = (uint8_t)(0x80 | (full_range ? 2u : 1u) << 2);
     /* Which of the standard's timings this is, if any. The codes above 64 came with HDMI 2.0. */
     d[3] = code <= 64 || hdmi2 ? code : 0;
     for (int i = 0; i < HDMI_INFOFRAME_SIZE; i++)

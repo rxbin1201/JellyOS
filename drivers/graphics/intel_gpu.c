@@ -19,7 +19,9 @@
  *       * DisplayPort: new timings on the link that is up; if the mode needs
  *         a faster link than the firmware trained and the monitor takes one,
  *         the port's PLL is set to that rate and the link trained again
- *       * HDMI: pipe and port off, the port's PLL reprogrammed, on again
+ *       * HDMI: pipe and port off, the port's PLL reprogrammed, on again; a
+ *         monitor that is an HDMI one gets HDMI with the AVI info frame
+ *         (hdmi.c), others DVI
  *     If the pipe does not come up, the firmware's mode is restored.
  *
  * Without the option nothing is changed: the driver only reports (dmesg igpu).
@@ -47,7 +49,7 @@
  *     ports are looked at. A monitor there gets the picture: the old port is
  *     switched off and the new one brought up from nothing (power well, PLL,
  *     signal levels, for DisplayPort a link at the best rate the monitor
- *     takes; HDMI monitors are driven as DVI, without info frames)
+ *     takes)
  *
  * Ported from the display part of the previous JellyOS implementation
  * (minikernel, drivers/gpu/igd*.c), which was developed on a Core i5-8400T
@@ -65,6 +67,7 @@
 #include "drivers/graphics/display.h"
 #include "drivers/graphics/dp_aux.h"
 #include "drivers/graphics/edid.h"
+#include "drivers/graphics/hdmi.h"
 
 #include "core/boot.h"
 #include "core/cmdline.h"
@@ -96,6 +99,10 @@
 #define MSA_SYNC_CLOCK        (1u << 0)
 #define MSA_8_BPC             (1u << 5)
 #define TRANS_DDI_FUNC_CTL(t) (0x60400 + PIPE_OFF(t)) /* bit 31 on, 30:28 port, 26:24 mode, 17/16 sync polarity */
+#define VIDEO_DIP_CTL(t)      (0x60200 + PIPE_OFF(t)) /* HDMI: which packets the transcoder sends between the pixels */
+#define VIDEO_DIP_AVI(t, i)   (0x60220 + PIPE_OFF(t) + 4u * (uint32_t)(i)) /* the AVI info frame: 32 bytes */
+#define VIDEO_DIP_AVI_ENABLE  (1u << 12)
+#define VIDEO_DIP_ALL         (1u << 20 | 1u << 16 | 1u << 12 | 1u << 8 | 1u << 4 | 1u << 0)
 #define PS_CTRL(p, i)         (0x68180 + 0x800u * (uint32_t)(p) + 0x100u * (uint32_t)(i)) /* pipe scaler */
 #define PS_WIN_POS(p, i)      (0x68170 + 0x800u * (uint32_t)(p) + 0x100u * (uint32_t)(i))
 #define PS_WIN_SZ(p, i)       (0x68174 + 0x800u * (uint32_t)(p) + 0x100u * (uint32_t)(i))
@@ -238,6 +245,8 @@ typedef struct {
     bool              pins_work;               /* the hot plug pins show monitors: other ports can be watched */
     bool              lit;                     /* `active` is on the screen (not while a port is being brought up) */
     uint32_t          ddi_base;                /* TRANS_DDI_FUNC_CTL of the port in use, without sync polarity */
+    hdmi_sink_t       sink;                    /* what the monitor on an HDMI port says about its input */
+    bool              packets;                 /* the port is driven as HDMI (with info frames), not as DVI */
     uint32_t          cdclk_khz;
     uint16_t          device_id;
 
@@ -808,6 +817,52 @@ static void write_timings_and_plane(igpu_t *g, const hw_mode_t *m, bool boot_mod
     wr(g, PLANE_SURF(p), m->plane_surf);
 }
 
+/*
+ * What the monitor on the HDMI port says about its input (hdmi.h), and with it how the port is driven: as HDMI
+ * with info frames if the monitor is an HDMI one ("igpuhdmi=off" keeps it at DVI), else as DVI. The pixel
+ * clock ends at 300 MHz either way: the faster, scrambled signal of HDMI 2.0 is beyond this generation's ports.
+ */
+static void hdmi_sink_update(igpu_t *g)
+{
+    char option[8];
+
+    hdmi_sink_read(g->edid, g->edid_blocks, &g->sink);
+    bool off = cmdline_value("igpuhdmi", option, sizeof(option)) && strcmp(option, "off") == 0;
+    g->packets = g->sink.hdmi && !off;
+    g->ddi_base = (g->ddi_base & ~(7u << 24)) | (g->packets ? 0u : 1u << 24);
+    klog_info("igpu: the monitor is %s: the port is driven as %s", g->sink.hdmi ? "an HDMI one" : "not an HDMI one (DVI)",
+              g->packets ? "HDMI, with info frames" : off && g->sink.hdmi ? "DVI (igpuhdmi=off)" : "DVI");
+}
+
+/*
+ * HDMI: the AVI info frame of mode m into the transcoder's packet memory (after i915's hsw_write_infoframe()):
+ * type, version and length, a byte the hardware puts its own check into, then the frame's checksum and bytes.
+ * The transcoder's DDI function is off. A mode driven as DVI has no packets.
+ */
+static void hdmi_packets(igpu_t *g, const hw_mode_t *m)
+{
+    int p = g->pipe;
+    uint32_t control = rd(g, VIDEO_DIP_CTL(p)) & ~VIDEO_DIP_ALL;
+    uint8_t frame[HDMI_INFOFRAME_SIZE], data[32] = { 0 };
+    display_timing_t t = { .khz = hdmi_pll_khz(m->cfgcr1, m->cfgcr2),
+                           .ha = (m->htotal & 0xFFFF) + 1, .ht = (m->htotal >> 16) + 1,
+                           .va = (m->vtotal & 0xFFFF) + 1, .vt = (m->vtotal >> 16) + 1 };
+
+    wr(g, VIDEO_DIP_CTL(p), control);
+    (void)rd(g, VIDEO_DIP_CTL(p));
+    if (DDI_MODE(m->ddi_func) != 0)
+        return;
+    hdmi_avi_infoframe(&t, false, true, frame);
+    memcpy(data, frame, 3);
+    memcpy(data + 4, frame + 3, HDMI_INFOFRAME_SIZE - 3);
+    for (uint32_t i = 0; i < 8; i++)
+        wr(g, VIDEO_DIP_AVI(p, i), data[4 * i] | (uint32_t)data[4 * i + 1] << 8 | (uint32_t)data[4 * i + 2] << 16 |
+                                       (uint32_t)data[4 * i + 3] << 24);
+    wr(g, VIDEO_DIP_CTL(p), control | VIDEO_DIP_AVI_ENABLE);
+    (void)rd(g, VIDEO_DIP_CTL(p));
+    klog_debug("igpu: HDMI info frame: %ux%u, video code %u", t.ha, t.va, frame[7]);
+}
+
 /* Planes, pipe and transcoder off. DisplayPort: the link stays up and sends idle patterns. */
 static void pipe_off(igpu_t *g)
 {
@@ -857,6 +912,8 @@ static bool pipe_on(igpu_t *g, const hw_mode_t *m, bool boot_mode)
     }
     if (g->dp && !boot_mode)
         wr(g, TRANS_CLK_SEL(p), g->clk_sel);
+    if (g->hdmi)
+        hdmi_packets(g, m);
     write_timings_and_plane(g, m, boot_mode);
     wr(g, PIPECONF(p), g->pipeconf | ENABLE);
     if (!wait_bits(g, PIPECONF(p), PIPE_RUNNING, PIPE_RUNNING, 100)) {
@@ -1114,7 +1171,8 @@ static bool switch_timing(igpu_t *g, const timing_t *t, const hw_mode_t *fallbac
     if (!same_timing(t, &g->current)) {
         if (g->dp)
             link = link_for(g, t->khz);
-        if (!link || t->khz > g->cdclk_khz || (!g->dp && t->khz > g->limit_khz)) {
+        /* (An HDMI port has no link whose rate could be too slow: only DisplayPort can fail for want of one.) */
+        if ((g->dp && !link) || t->khz > g->cdclk_khz || (!g->dp && t->khz > g->limit_khz)) {
             klog_warn("igpu: %ux%u needs a pixel clock of %u kHz, possible are %u kHz", t->ha, t->va, t->khz, g->limit_khz);
             return false;
         }
@@ -1524,11 +1582,13 @@ static bool output_move(igpu_t *g, int port, uint8_t *edid)
     } else {
         pll_assign(g, 1 | 1u << 5); /* HDMI mode; pipe_on() sets the frequency and switches it on */
         g->buf_ctl = 0;
-        g->ddi_base = ENABLE | (uint32_t)port << 28 | 1u << 24; /* DVI signalling: no info frames needed */
+        g->ddi_base = ENABLE | (uint32_t)port << 28 | 1u << 24; /* DVI, until the monitor turns out to be an HDMI one */
     }
     limits_update(g);
     memcpy(g->edid, edid, 256);
     g->edid_blocks = blocks;
+    if (g->hdmi)
+        hdmi_sink_update(g);
     modes_rebuild(g, false);
     if (!g->mode_count)
         klog_warn("igpu: port %c: the monitor names no mode this connection can show", 'A' + port);
@@ -1667,6 +1727,8 @@ static void hotplug_thread(void *argument)
                 if (blocks && (blocks != g->edid_blocks || memcmp(edid, g->edid, (size_t)blocks * 128) != 0)) {
                     memcpy(g->edid, edid, sizeof(edid));
                     g->edid_blocks = blocks;
+                    if (g->hdmi)
+                        hdmi_sink_update(g);
                     modes_rebuild(g, false);
                     new_monitor = true;
                 }
@@ -1917,6 +1979,8 @@ static status_t igpu_probe(device_t *device)
         klog_warn("igpu: the monitor's data (EDID) cannot be read");
         return STATUS_SUCCESS;
     }
+    if (g->hdmi)
+        hdmi_sink_update(g);
     modes_rebuild(g, true);
 
     if (!cmdline_value("igpu", option, sizeof(option))) {

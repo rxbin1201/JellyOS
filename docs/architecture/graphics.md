@@ -357,7 +357,7 @@ size, enters it into the global graphics translation table and switches:
 | --- | --- |
 | The firmware already drives the monitor at that timing and scales a smaller picture up | The pipe scaler is turned off and the plane gets the full size; the pipe keeps running |
 | DisplayPort, another timing | Pipe off, new timings and M/N values, pipe on. A mode that needs a faster link than the one that is up gets one first (below), if the monitor takes it; the display clock bounds every mode |
-| HDMI, another timing | Pipe, port and PLL off, PLL reprogrammed for the pixel clock (up to 300 MHz), on again |
+| HDMI, another timing | Pipe, port and PLL off, PLL reprogrammed for the pixel clock (up to 300 MHz), on again. A monitor whose EDID calls it an HDMI one is driven as HDMI, with the AVI info frame of the mode in the transcoder's packet memory ([`hdmi.c`](../../drivers/graphics/hdmi.c), as in the AMD driver); others as DVI. `igpuhdmi=off` keeps every monitor at DVI. The scrambled signal of HDMI 2.0 is beyond the ports of this generation |
 
 If the pipe does not come up, the firmware's mode is restored. On success
 the driver calls `display_set_framebuffer()`: display 0 gets the new memory
@@ -414,8 +414,7 @@ nothing: its power well, the table of signal levels, a PLL (for HDMI at the
 pixel clock, for DisplayPort at the best link rate the monitor takes, with
 slower ones tried if training fails), for DisplayPort a trained link. Then
 the monitor's best mode is set. So the cable can be moved from DisplayPort
-to HDMI and back while the system runs. HDMI monitors on a port brought up
-this way are driven with DVI signalling (no info frames).
+to HDMI and back while the system runs.
 
 In both cases the EDID is read again. If it is another monitor, the display
 gets its list of modes, and if the mode on the screen is not in it, the

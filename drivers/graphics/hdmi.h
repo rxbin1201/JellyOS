@@ -51,10 +51,11 @@ void     hdmi_sink_read(const uint8_t *edid, int blocks, hdmi_sink_t *sink);
 uint32_t hdmi_pixel_limit(const hdmi_sink_t *sink, uint32_t source_khz);
 
 /*
- * The AVI info frame for timing t as full range RGB: header (type, version, length), checksum, 13 data bytes.
- * `hdmi2`: the signal is an HDMI 2.0 one (video codes above 64 may be named).
+ * The AVI info frame for timing t as RGB: header (type, version, length), checksum, 13 data bytes.
+ * `hdmi2`: the signal is an HDMI 2.0 one (video codes above 64 may be named). `full_range`: every value from 0
+ * to 255 is a colour, as a computer's picture has it (else 16 to 235, as video has it).
  */
-void     hdmi_avi_infoframe(const display_timing_t *t, bool hdmi2, uint8_t frame[HDMI_INFOFRAME_SIZE]);
+void     hdmi_avi_infoframe(const display_timing_t *t, bool hdmi2, bool full_range, uint8_t frame[HDMI_INFOFRAME_SIZE]);
 
 /* I2C on the monitor's DDC lines, as the driver's hardware does it. */
 typedef struct {
