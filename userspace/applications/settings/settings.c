@@ -230,6 +230,20 @@ static void test_sound(widget_t *button, void *user)
         jelly_handle_close(process);
 }
 
+#define SOUND_DEVICES 8
+
+static uint32_t sound_outputs[SOUND_DEVICES]; /* the devices of the list: their numbers */
+
+static void output_chosen(widget_t *list, void *user)
+{
+    int index = gui_list_selected(list);
+    (void)user;
+    if (index < 0 || index >= SOUND_DEVICES)
+        return;
+    status_t status = audio_set_output(sound_outputs[index]);
+    say("sound output %u%s", sound_outputs[index], STATUS_IS_ERROR(status) ? " refused" : "");
+}
+
 static void show_sound(void)
 {
     audio_info_t info;
@@ -242,6 +256,25 @@ static void show_sound(void)
     }
     snprintf(line, sizeof(line), "%s, %u Hz", info.name, info.rate);
     gui_add(content, dim(line));
+    /* Where the sound goes out, if there is a choice: the sound card, a monitor's loudspeakers, ... */
+    audio_device_entry_t device;
+    widget_t *outputs = gui_list(NULL, NULL);
+    int count = 0;
+    for (uint32_t i = 0; count < SOUND_DEVICES && !STATUS_IS_ERROR(audio_get_device(i, &device)); i++) {
+        if (!(device.directions & AUDIO_PLAYBACK))
+            continue;
+        sound_outputs[count] = i;
+        gui_list_add(outputs, device.name);
+        if (device.output)
+            gui_list_select(outputs, count);
+        count++;
+    }
+    if (count > 1) {
+        gui_add(content, gui_label("Output"));
+        gui_list_set_rows(outputs, count < 4 ? count : 4);
+        gui_add(content, outputs);
+        gui_list_on_select(outputs, output_chosen, NULL);
+    }
     volume_label = gui_label("");
     gui_add(content, volume_label);
     show_volume();

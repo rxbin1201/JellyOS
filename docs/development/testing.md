@@ -389,6 +389,16 @@ with the Goertzel algorithm:
 Durations are checked with tolerance: under emulation the mixer may run
 late and lose a few windows.
 
+A second HDA card that can only play (as the sound of a monitor) writes to
+`build/audio-test2.wav`. With it the steps for the output device run:
+`volume` lists both devices, `volume output 1` sends a tone to the second
+card, a tone that is playing is moved there half way through, a device that
+does not exist is refused, and a recording is made while the sound goes out
+on the card that cannot record. The script then checks both files: the tone
+for the second card is in its file and not in the first's, the moved tone
+begins in the first and continues in the second, and nothing meant for the
+first card is in the second's file.
+
 Requirements on the host: `sgdisk` (gdisk) and `mtools`.
 
 To confirm that a test can actually fail, break the code it covers once. For

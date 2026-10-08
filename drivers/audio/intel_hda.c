@@ -84,12 +84,17 @@
 #define VERB_SET_STREAM      0x706
 #define VERB_SET_PIN_CONTROL 0x707
 #define VERB_SET_EAPD        0x70C
+#define VERB_GET_PIN_SENSE   0xF09 /* bit 31: something is plugged in; digital pins, bit 30: its description is valid */
+#define VERB_GET_ELD_SIZE    0xF2E /* with payload 8: bytes of the monitor's description (ELD) the pin holds */
+#define VERB_GET_ELD_BYTE    0xF2F /* payload: which byte; bit 31 of the answer: valid */
 #define VERB4_SET_FORMAT     0x2 /* 4-bit verbs carry 16 bits */
 #define VERB4_SET_AMP        0x3
 
 #define PARAM_NODE_COUNT      0x04
 #define PARAM_FUNCTION_TYPE   0x05
 #define PARAM_WIDGET_CAPS     0x09
+#define PARAM_PCM             0x0A /* sample rates (bits 11:0) and sizes (20:16) a converter takes */
+#define PARAM_STREAM_FORMATS  0x0B /* bit 0 PCM, bit 2 AC-3 */
 #define PARAM_PIN_CAPS        0x0C
 #define PARAM_IN_AMP_CAPS     0x0D
 #define PARAM_CONNECTION_LIST 0x0E
@@ -334,6 +339,50 @@ static bool read_codec(hda_t *hda, hda_codec_t *codec)
             read_connections(hda, codec, w);
     }
     return codec->widget_count > 0;
+}
+
+/*
+ * What a codec is made of, in the log: for codecs the driver finds no way through, which today are the digital
+ * ones (the sound of an HDMI or DisplayPort monitor). Their pins can also say whether a monitor is there and
+ * hold its description of what sound it takes (ELD), if the graphics side has passed it on.
+ */
+static void report_codec(hda_t *hda, hda_codec_t *codec)
+{
+    static const char *const types[16] = { "output", "input", "mixer", "selector", "pin", "power", "volume knob", "beep",
+                                           "?", "?", "?", "?", "?", "?", "?", "vendor" };
+
+    klog_debug("hda: %s: codec %u (vendor %08x, revision %08x), function group %u:", hda->device->name, codec->address,
+               parameter(hda, codec, 0, 0), parameter(hda, codec, 0, 2), codec->function_group);
+    for (uint32_t i = 0; i < codec->widget_count; i++) {
+        const hda_widget_t *w = &codec->widgets[i];
+        char from[3 * MAX_CONNECTIONS + 4] = "";
+        size_t used = 0;
+
+        for (uint32_t k = 0; k < w->connection_count; k++)
+            used += (size_t)format(from + used, sizeof(from) - used, "%s%u", k ? "," : "", w->connections[k]);
+        klog_debug("hda:   widget %u: %s%s, caps 0x%x%s%s", w->nid, types[WCAP_TYPE(w->caps)],
+                   (w->caps & WCAP_DIGITAL) ? " (digital)" : "", w->caps, used ? ", from " : "", from);
+        if (WCAP_TYPE(w->caps) == WIDGET_OUTPUT || WCAP_TYPE(w->caps) == WIDGET_INPUT)
+            klog_debug("hda:     rates and sizes 0x%x, formats 0x%x, channels %u", parameter(hda, codec, w->nid, PARAM_PCM),
+                       parameter(hda, codec, w->nid, PARAM_STREAM_FORMATS),
+                       ((((w->caps >> 13) & 7) << 1) | (w->caps & 1)) + 1);
+        if (WCAP_TYPE(w->caps) != WIDGET_PIN)
+            continue;
+        uint32_t sense = verb(hda, codec, w->nid, VERB_GET_PIN_SENSE, 0);
+        uint32_t size = (w->caps & WCAP_DIGITAL) ? verb(hda, codec, w->nid, VERB_GET_ELD_SIZE, 0x08) & 0xFF : 0;
+        klog_debug("hda:     pin caps 0x%x%s%s, default 0x%x, sense 0x%x (%s%s), description of %u bytes", w->pin_caps,
+                   (w->pin_caps & (1u << 7)) ? " HDMI" : "", (w->pin_caps & (1u << 24)) ? " DisplayPort" : "", w->config,
+                   sense, (sense & (1u << 31)) ? "something plugged in" : "nothing plugged in",
+                   (sense & (1u << 30)) ? ", description valid" : "", size);
+        if (size) {
+            uint8_t eld[16];
+            for (uint32_t k = 0; k < sizeof(eld); k++)
+                eld[k] = (uint8_t)verb(hda, codec, w->nid, VERB_GET_ELD_BYTE, k);
+            klog_debug("hda:     it starts %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                       eld[0], eld[1], eld[2], eld[3], eld[4], eld[5], eld[6], eld[7], eld[8], eld[9], eld[10], eld[11],
+                       eld[12], eld[13], eld[14], eld[15]);
+        }
+    }
 }
 
 /*
@@ -689,6 +738,8 @@ static status_t hda_probe(device_t *device)
                       codec->widget_count, (found & JELLY_AUDIO_PLAYBACK) ? ", output" : "",
                       (found & JELLY_AUDIO_CAPTURE) ? ", input" : "");
             flags |= found;
+            if (!found)
+                report_codec(hda, codec);
         }
         if (!flags)
             status = STATUS_NOT_FOUND; /* a controller without a usable codec */

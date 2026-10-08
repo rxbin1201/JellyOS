@@ -3,10 +3,15 @@
  *
  *     audio driver -> audio device -> audio server -> mixer -> applications
  *
- * The server owns the sound card (audio device 0) and offers the service
- * "audio". Every client stream is a shared ring (audio/client/protocol.h)
- * in the client's own format. The device handle wakes the server whenever
- * the card wants more data or has recorded some:
+ * The server owns the sound devices and offers the service "audio". Every
+ * client stream is a shared ring (audio/client/protocol.h) in the client's
+ * own format. A machine can have several sound devices (the sound card's
+ * jacks, the loudspeakers of a monitor on HDMI or DisplayPort): the sound
+ * goes out on one of them, the output, and recordings come from one, the
+ * input, which may be the same or another. The output can be changed
+ * while sound plays (AUDIO_SET_OUTPUT); the streams move along. A device
+ * handle wakes the server whenever its card wants more data or has
+ * recorded some:
  *
  *   playback: take what each active stream has, convert it to the card's
  *             rate (mixer.c), scale it by the stream volume, sum the
@@ -16,7 +21,9 @@
  * The card only runs while it is needed: output stops shortly after the
  * last stream went silent, recording when the last capture stream closes.
  *
- * /etc/audio.conf may set the start volume: "volume=80", "muted=no".
+ * /etc/audio.conf may set the start volume ("volume=80", "muted=no") and
+ * the output device by its number ("output=1"); without that the output is
+ * the first device that can play, the input the first that can record.
  */
 
 #include "audio/client/protocol.h"
@@ -41,7 +48,7 @@ typedef struct {
     uint32_t        direction;   /* 0: no stream yet */
     audio_ring_t   *ring;
     size_t          mapping;
-    uint32_t        capacity, channels; /* our copy: the client can write the ring's header */
+    uint32_t        capacity, channels, rate; /* our copy: the client can write the ring's header */
     mix_resampler_t resampler;
     uint32_t        gain;
     bool            active;      /* playback: being mixed */
@@ -50,8 +57,16 @@ typedef struct {
     uint64_t        drain_target; /* device frame counter at which the stream's last frame is out */
 } client_t;
 
-static jelly_handle_t service_channel, device;
-static jelly_audio_info_t card;
+/* A sound device in use. Output and input may be the same device: then they share its one handle. */
+typedef struct {
+    bool               open;
+    jelly_handle_t     handle;
+    jelly_audio_info_t card;
+} endpoint_t;
+
+static jelly_handle_t service_channel;
+static endpoint_t out, in;
+static uint32_t wanted_output = UINT32_MAX; /* from /etc/audio.conf */
 static client_t clients[MAX_CLIENTS];
 static uint32_t master_percent = 100;
 static bool master_muted;
@@ -89,10 +104,10 @@ static void reply(client_t *client, audio_message_t *m, status_t status)
     jelly_channel_send(client->channel, m, sizeof(*m));
 }
 
-static uint64_t device_value(uint32_t command)
+static uint64_t output_value(uint32_t command)
 {
     uint64_t value = 0;
-    jelly_audio_control(device, command, 0, &value);
+    jelly_audio_control(out.handle, command, 0, &value);
     return value;
 }
 
@@ -155,12 +170,12 @@ static void mix(size_t frames)
     }
     mix_output(mix_sum, mix_out, frames * 2, master_muted ? 0 : mix_gain(master_percent));
     size_t written;
-    jelly_audio_write(device, mix_out, frames, &written);
+    jelly_audio_write(out.handle, mix_out, frames, &written);
 }
 
 static void fill_device(void)
 {
-    uint64_t queued = device_value(JELLY_AUDIO_PLAYBACK_QUEUED), target = (uint64_t)card.period * FILL_PERIODS;
+    uint64_t queued = output_value(JELLY_AUDIO_PLAYBACK_QUEUED), target = (uint64_t)out.card.period * FILL_PERIODS;
     if (queued < target)
         mix(target - queued);
 }
@@ -175,7 +190,7 @@ static void start_stream(client_t *client)
     stop_deadline = 0;
     if (!playing) {
         fill_device(); /* the card starts with sound, not with a gap */
-        status_t status = jelly_audio_control(device, JELLY_AUDIO_PLAYBACK_ENABLE, 1, NULL);
+        status_t status = jelly_audio_control(out.handle, JELLY_AUDIO_PLAYBACK_ENABLE, 1, NULL);
         if (STATUS_IS_ERROR(status))
             log_message("cannot start the output: %s", status_name(status));
         playing = !STATUS_IS_ERROR(status);
@@ -195,12 +210,12 @@ static void check_drains(void)
         if (load(&c->ring->write) != c->ring->read && playing)
             continue; /* still being mixed */
         if (!have_info) {
-            jelly_audio_info(card.index, &now);
+            jelly_audio_info(out.card.index, &now);
             have_info = true;
         }
         if (!c->drain_armed) {
             /* What is queued in the device and in the card's own buffer still has to play. */
-            c->drain_target = now.played_frames + device_value(JELLY_AUDIO_PLAYBACK_QUEUED) + 2 * card.period;
+            c->drain_target = now.played_frames + output_value(JELLY_AUDIO_PLAYBACK_QUEUED) + 2 * out.card.period;
             c->drain_armed = true;
         }
         if (!playing || now.played_frames >= c->drain_target) {
@@ -225,7 +240,7 @@ static void pump_playback(void)
     } else if (!stop_deadline) {
         stop_deadline = jelly_clock_ns() + STOP_DELAY_NS; /* let the tail play out */
     } else if (jelly_clock_ns() >= stop_deadline) {
-        jelly_audio_control(device, JELLY_AUDIO_PLAYBACK_ENABLE, 0, NULL);
+        jelly_audio_control(out.handle, JELLY_AUDIO_PLAYBACK_ENABLE, 0, NULL);
         playing = false;
         stop_deadline = 0;
     }
@@ -276,7 +291,7 @@ static void pump_capture(void)
     static int16_t recorded[480 * 2];
     size_t got;
 
-    while (jelly_audio_read(device, recorded, sizeof(recorded) / (2 * sizeof(int16_t)), &got) == STATUS_SUCCESS && got) {
+    while (jelly_audio_read(in.handle, recorded, sizeof(recorded) / (2 * sizeof(int16_t)), &got) == STATUS_SUCCESS && got) {
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (clients[i].used && clients[i].direction == AUDIO_CAPTURE)
                 give_to(&clients[i], recorded, got);
@@ -289,12 +304,93 @@ static void update_capture(void)
     bool needed = false;
     for (int i = 0; i < MAX_CLIENTS; i++)
         needed = needed || (clients[i].used && clients[i].direction == AUDIO_CAPTURE);
-    if (needed == capturing)
+    if (needed == capturing || !in.open)
         return;
-    status_t status = jelly_audio_control(device, JELLY_AUDIO_CAPTURE_ENABLE, needed, NULL);
+    status_t status = jelly_audio_control(in.handle, JELLY_AUDIO_CAPTURE_ENABLE, needed, NULL);
     if (STATUS_IS_ERROR(status))
         log_message("cannot %s recording: %s", needed ? "start" : "stop", status_name(status));
     capturing = needed && !STATUS_IS_ERROR(status);
+}
+
+/* --- Devices --------------------------------------------------------------------- */
+
+/* Can the mixer play on this device? (Stereo, and periods the mixing buffers hold.) */
+static bool playable(const jelly_audio_info_t *card)
+{
+    return (card->flags & JELLY_AUDIO_PLAYBACK) && card->channels == 2 && card->period &&
+           card->period * FILL_PERIODS <= MIX_FRAMES_MAX;
+}
+
+/*
+ * The sound goes out on device `index` from now on. Streams that are playing go on there: their converters
+ * are set to the new card's rate, and what was queued in the old card is lost (a fraction of a second).
+ */
+static status_t set_output(uint32_t index)
+{
+    jelly_audio_info_t card;
+    jelly_handle_t handle;
+    bool restart = false;
+
+    if (STATUS_IS_ERROR(jelly_audio_info(index, &card)))
+        return STATUS_NOT_FOUND;
+    if (!playable(&card))
+        return STATUS_NOT_SUPPORTED;
+    if (out.open && out.card.index == index)
+        return STATUS_SUCCESS;
+    if (in.open && in.card.index == index) {
+        handle = in.handle; /* a device has one handle */
+    } else {
+        status_t status = jelly_audio_open(index, &handle);
+        if (STATUS_IS_ERROR(status))
+            return status;
+    }
+    if (out.open) {
+        if (playing)
+            jelly_audio_control(out.handle, JELLY_AUDIO_PLAYBACK_ENABLE, 0, NULL);
+        if (!(in.open && in.handle == out.handle))
+            jelly_handle_close(out.handle);
+    }
+    playing = false;
+    stop_deadline = 0;
+    out = (endpoint_t){ true, handle, card };
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        client_t *c = &clients[i];
+        if (!c->used || c->direction != AUDIO_PLAYBACK)
+            continue;
+        mix_resampler_init(&c->resampler, c->rate, c->channels, out.card.rate);
+        c->drain_armed = false; /* the new card counts its frames from elsewhere */
+        restart = restart || c->active || c->draining;
+    }
+    if (restart) {
+        fill_device();
+        playing = !STATUS_IS_ERROR(jelly_audio_control(out.handle, JELLY_AUDIO_PLAYBACK_ENABLE, 1, NULL));
+    }
+    log_message("output: %s", out.card.name);
+    return STATUS_SUCCESS;
+}
+
+/* At the start: the output from the configuration or the first device that plays; the first that records as input. */
+static void choose_devices(void)
+{
+    jelly_audio_info_t card;
+
+    if (wanted_output != UINT32_MAX && STATUS_IS_ERROR(set_output(wanted_output)))
+        log_message("output=%u in /etc/audio.conf is not a device that can play", wanted_output);
+    for (uint32_t i = 0; !out.open && jelly_audio_info(i, &card) == STATUS_SUCCESS; i++) {
+        if (playable(&card))
+            set_output(i);
+    }
+    for (uint32_t i = 0; !in.open && jelly_audio_info(i, &card) == STATUS_SUCCESS; i++) {
+        if (!(card.flags & JELLY_AUDIO_CAPTURE))
+            continue;
+        if (out.open && out.card.index == i) {
+            in = out;
+        } else if (!STATUS_IS_ERROR(jelly_audio_open(i, &in.handle))) {
+            in.card = card;
+            in.open = true;
+        }
+    }
 }
 
 /* --- Clients --------------------------------------------------------------------- */
@@ -311,12 +407,12 @@ static void open_stream(client_t *client, audio_message_t *m)
     else if ((direction != AUDIO_PLAYBACK && direction != AUDIO_CAPTURE) || rate < AUDIO_RATE_MIN ||
              rate > AUDIO_RATE_MAX || channels < 1 || channels > AUDIO_CHANNELS_MAX)
         status = STATUS_INVALID_ARGUMENT;
-    else if (!(card.flags & (direction == AUDIO_PLAYBACK ? JELLY_AUDIO_PLAYBACK : JELLY_AUDIO_CAPTURE)))
+    else if (direction == AUDIO_PLAYBACK ? !out.open : !in.open)
         status = STATUS_NOT_SUPPORTED;
     /* Playback converts to the card's rate, capture from it. */
     if (!STATUS_IS_ERROR(status) &&
-        !(direction == AUDIO_PLAYBACK ? mix_resampler_init(&client->resampler, rate, channels, card.rate)
-                                      : mix_resampler_init(&client->resampler, card.rate, 2, rate)))
+        !(direction == AUDIO_PLAYBACK ? mix_resampler_init(&client->resampler, rate, channels, out.card.rate)
+                                      : mix_resampler_init(&client->resampler, in.card.rate, 2, rate)))
         status = STATUS_INVALID_ARGUMENT;
 
     /* About a quarter of a second, as a power of two (the counters wrap around cleanly). */
@@ -344,6 +440,7 @@ static void open_stream(client_t *client, audio_message_t *m)
     client->mapping = size;
     client->capacity = capacity;
     client->channels = channels;
+    client->rate = rate;
     client->direction = direction;
     client->gain = MIX_GAIN_UNITY;
     client->active = client->draining = client->drain_armed = false;
@@ -423,16 +520,35 @@ static void serve_client(client_t *client)
             reply(client, &m, STATUS_SUCCESS);
             break;
         case AUDIO_GET_INFO: {
-            jelly_audio_info_t now = card;
-            jelly_audio_info(card.index, &now);
-            m.a = card.rate;
-            m.b = card.channels;
+            const jelly_audio_info_t *card = out.open ? &out.card : &in.card;
+            jelly_audio_info_t now = *card;
+            jelly_audio_info(card->index, &now);
+            m.a = card->rate;
+            m.b = card->channels;
             m.c = stream_count();
             m.d = (uint32_t)now.underruns;
+            memcpy(m.name, card->name, sizeof(m.name));
+            reply(client, &m, STATUS_SUCCESS);
+            break;
+        }
+        case AUDIO_GET_DEVICE: {
+            jelly_audio_info_t card;
+            uint32_t index = m.a;
+            if (STATUS_IS_ERROR(jelly_audio_info(index, &card))) {
+                reply(client, &m, STATUS_NOT_FOUND);
+                break;
+            }
+            m.a = ((card.flags & JELLY_AUDIO_PLAYBACK) ? AUDIO_PLAYBACK : 0) |
+                  ((card.flags & JELLY_AUDIO_CAPTURE) ? AUDIO_CAPTURE : 0);
+            m.b = out.open && out.card.index == index;
+            m.c = in.open && in.card.index == index;
             memcpy(m.name, card.name, sizeof(m.name));
             reply(client, &m, STATUS_SUCCESS);
             break;
         }
+        case AUDIO_SET_OUTPUT:
+            reply(client, &m, set_output(m.a));
+            break;
         default:
             reply(client, &m, STATUS_NOT_SUPPORTED);
         }
@@ -479,6 +595,8 @@ static void load_config(void)
             master_percent = value < 0 ? 0 : value > 100 ? 100 : (uint32_t)value;
         } else if (!strncmp(line, "muted=", 6)) {
             master_muted = !strncmp(line + 6, "yes", 3);
+        } else if (!strncmp(line, "output=", 7) && line[7] >= '0' && line[7] <= '9') {
+            wanted_output = (uint32_t)atoi(line + 7);
         }
     }
     fclose(file);
@@ -486,20 +604,19 @@ static void load_config(void)
 
 int main(void)
 {
-    jelly_handle_t registry_end, handles[2 + MAX_CLIENTS];
-    client_t *owners[2 + MAX_CLIENTS];
+    jelly_handle_t registry_end, handles[3 + MAX_CLIENTS];
+    client_t *owners[3 + MAX_CLIENTS];
 
-    if (STATUS_IS_ERROR(jelly_audio_info(0, &card))) {
+    jelly_audio_info_t first;
+
+    if (STATUS_IS_ERROR(jelly_audio_info(0, &first))) {
         log_message("no audio device");
         return 0; /* nothing to serve: not a failure worth a restart */
     }
-    status_t status = jelly_audio_open(0, &device);
-    if (STATUS_IS_ERROR(status)) {
-        log_message("cannot open %s: %s", card.name, status_name(status));
-        return 1;
-    }
-    if (card.channels != 2 || card.period == 0 || card.period * FILL_PERIODS > MIX_FRAMES_MAX) {
-        log_message("%s: unsupported format (%u channels, period %u)", card.name, card.channels, card.period);
+    load_config();
+    choose_devices();
+    if (!out.open && !in.open) {
+        log_message("no audio device can be used (%s: %u channels, period %u)", first.name, first.channels, first.period);
         return 1;
     }
     if (STATUS_IS_ERROR(jelly_channel_create(&service_channel, &registry_end)) ||
@@ -507,14 +624,19 @@ int main(void)
         log_message("cannot register the service '%s'", AUDIO_SERVICE_NAME);
         return 1;
     }
-    load_config();
-    log_message("%s, %u Hz, volume %u%%%s", card.name, card.rate, master_percent, master_muted ? " (muted)" : "");
+    const jelly_audio_info_t *card = out.open ? &out.card : &in.card;
+    log_message("%s, %u Hz, volume %u%%%s", card->name, card->rate, master_percent, master_muted ? " (muted)" : "");
+    if (in.open && out.open && in.card.index != out.card.index)
+        log_message("input: %s", in.card.name);
 
     for (;;) {
         uint32_t count = 0, index;
         handles[count++] = service_channel;
-        if (playing || capturing)
-            handles[count++] = device; /* signaled when it wants data or has some */
+        /* A device is signaled when it wants data or has some. */
+        if (playing)
+            handles[count++] = out.handle;
+        if (capturing && !(playing && in.handle == out.handle))
+            handles[count++] = in.handle;
         uint32_t first_client = count;
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (clients[i].used) {

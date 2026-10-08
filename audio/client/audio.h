@@ -52,4 +52,17 @@ status_t audio_get_master(uint32_t *percent, bool *muted);
 status_t audio_set_master(uint32_t percent, bool muted);
 status_t audio_get_info(audio_info_t *info);
 
+/* One of the machine's sound devices: the sound card's jacks, a monitor's loudspeakers, ... */
+typedef struct {
+    uint32_t directions; /* AUDIO_PLAYBACK | AUDIO_CAPTURE */
+    bool     output;     /* the sound goes out here */
+    bool     input;      /* recordings come from here */
+    char     name[32];
+} audio_device_entry_t;
+
+/* Device `index` (from 0); NOT_FOUND past the last. */
+status_t audio_get_device(uint32_t index, audio_device_entry_t *entry);
+/* Let the sound go out on device `index` from now on, also the streams that are playing. */
+status_t audio_set_output(uint32_t index);
+
 #endif

@@ -249,3 +249,23 @@ status_t audio_get_info(audio_info_t *info)
     }
     return status;
 }
+
+status_t audio_get_device(uint32_t index, audio_device_entry_t *entry)
+{
+    audio_message_t m = { .type = AUDIO_GET_DEVICE, .a = index };
+    status_t status = server_request(&m);
+    if (!STATUS_IS_ERROR(status)) {
+        entry->directions = m.a;
+        entry->output = m.b;
+        entry->input = m.c;
+        memcpy(entry->name, m.name, sizeof(entry->name));
+        entry->name[sizeof(entry->name) - 1] = '\0';
+    }
+    return status;
+}
+
+status_t audio_set_output(uint32_t index)
+{
+    audio_message_t m = { .type = AUDIO_SET_OUTPUT, .a = index };
+    return server_request(&m);
+}

@@ -194,8 +194,12 @@ audio_hw = -audiodev $(1),id=snd0 -device intel-hda -device hda-duplex,audiodev=
 AUDIO ?= none
 # Integration test: the output goes into a WAV file that the test analyzes; the input is silence in real time.
 AUDIO_TEST_WAV := $(BUILD)/audio-test.wav
+# A second sound card with an output only, as the sound of a monitor is: for choosing where the sound goes.
+AUDIO_TEST_WAV2 := $(BUILD)/audio-test2.wav
 audio_test_hw = -audiodev wav,id=snd0,path=$(AUDIO_TEST_WAV) -audiodev none,id=snd1 \
-                -device intel-hda -device hda-output,audiodev=snd0 -device hda-micro,audiodev=snd1
+                -device intel-hda -device hda-output,audiodev=snd0 -device hda-micro,audiodev=snd1 \
+                -audiodev wav,id=snd2,path=$(AUDIO_TEST_WAV2) \
+                -device intel-hda,id=monitorsound -device hda-output,bus=monitorsound.0,audiodev=snd2
 # VirtIO GPU in place of the standard VGA card (with a VGA side for the firmware): make run GPU=virtio
 virtio_gpu = -vga none -device virtio-vga
 # $(call virtio_disk,<image>,<id>)
@@ -516,9 +520,9 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	    > $(SHELL_TEST_ESP)/boot/boot.cfg
 	@printf 'initrd=/boot/initrd/current.img\ncmdline="loglevel=info disks=rw crashtest=device"\n' >> $(SHELL_TEST_ESP)/boot/boot.cfg
 	@cp $(OVMF_VARS) $(SHELL_TEST_VARS)
-	@rm -f $(BUILD)/qmp.sock $(AUDIO_TEST_WAV)
+	@rm -f $(BUILD)/qmp.sock $(AUDIO_TEST_WAV) $(AUDIO_TEST_WAV2)
 	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) --qmp $(BUILD)/qmp.sock \
-	    --wav $(AUDIO_TEST_WAV) -- \
+	    --wav $(AUDIO_TEST_WAV) --wav2 $(AUDIO_TEST_WAV2) -- \
 	    $(QEMU) $(QEMU_BASE) $(call qemu_disks,$(SHELL_TEST_ESP),$(SHELL_TEST_VARS)) -display none \
 	    $(call virtio_disk,$(TEST_DISK),testdisk) $(call virtio_nic,net0) $(usb_input_hub) $(audio_test_hw) \
 	    $(hw_disks) $(call virtio_disk,$(EXFAT_DISK),exfatdisk) $(e1000_nic) \

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integration test for milestones M6 to M10: the shell, the network, graphical applications, sound.
 
-usage: shell_test.py [--timeout SECONDS] [--qmp SOCKET] [--wav FILE] [--gpu] -- QEMU COMMAND LINE...
+usage: shell_test.py [--timeout SECONDS] [--qmp SOCKET] [--wav FILE] [--wav2 FILE] [--gpu] -- QEMU COMMAND LINE...
 
 The machine boots normally (initramfs, init, service manager, shell). The
 script waits for each shell prompt on the serial console, types a command,
@@ -20,7 +20,9 @@ console and checks screenshots.
 With an intel-hda sound card on the command line the audio steps run. With
 --wav (the file QEMU's "wav" audio backend writes) the script analyzes
 what JellyOS played after QEMU has exited: which tones, how loud, and that
-two programs were mixed.
+two programs were mixed. With --wav2 (the file of a second sound card's
+backend) the steps for choosing the output device run, too: what is sent to
+the second card must be in its file and not in the first's.
 
 With --gpu (and --qmp; QEMU started with -vga none -device virtio-vga) only
 the steps for the VirtIO GPU driver run: that the host shows the guest's
@@ -157,8 +159,24 @@ def audio_steps():
     ]
 
 
+def output_steps():
+    """Two sound cards: which one the sound goes out on. What arrived where is checked by check_sound()."""
+    return [
+        ("volume", ["0  HD Audio", "(plays, records)  <- output  <- input", "1  HD Audio", "(plays)"]),
+        ("volume output 1; tone -f 1500 -d 800; volume output 0",
+         ["volume: output 1: HD Audio", "tone: 1500 Hz for 800 ms", "volume: output 0: HD Audio"]),
+        # A stream that is playing moves along.
+        ("tone -f 2000 -d 3000 & sleep 1; volume output 1; sleep 3; volume; volume output 0",
+         ["tone: 2000 Hz for 3000 ms", "volume: output 1", "1  HD Audio", "(plays)  <- output", "volume: output 0"]),
+        ("volume output 7; echo code $?", ["cannot be the output", "code 1"]),
+        # Recording still comes from the first card while the sound goes out on the second.
+        ("volume output 1; record -d 1 -r 16000 -c 1 /tmp/rec2.wav; volume output 0",
+         ["record: /tmp/rec2.wav: 16000 frames at 16000 Hz"]),
+    ]
+
+
 WINDOW_SECONDS = 0.05
-TONES = (440, 660, 880, 1000, 2500, 3500, 5000)
+TONES = (440, 660, 880, 1000, 1500, 2000, 2500, 3500, 5000)
 
 
 def read_wav(path):
@@ -207,8 +225,8 @@ def analyze(samples, rate):
     return windows
 
 
-def check_sound(path):
-    """What JellyOS played, as recorded by QEMU. Returns the number of failures."""
+def check_sound(path, second_path=None):
+    """What JellyOS played, as recorded by QEMU (on one or two sound cards). Returns the number of failures."""
     failures = 0
 
     def check(name, condition, detail=""):
@@ -250,6 +268,28 @@ def check_sound(path):
     check("volume 50 plays at a quarter of the amplitude", full > 0 and 0.2 <= half / full <= 0.3,
           f"(RMS {half:.0f} of {full:.0f})")
     check("a muted tone is silent", seconds(5000, share=0.2) == 0, f"({seconds(5000, share=0.2):.2f} s of 5000 Hz)")
+    if not second_path:
+        return failures
+
+    # --- The second sound card: what was sent there, and only that.
+    try:
+        samples2, rate2 = read_wav(second_path)
+    except (OSError, ValueError) as error:
+        check("QEMU recorded the second card's output", False, f"({error})")
+        return failures
+    first = windows
+    windows = analyze(samples2, rate2)  # seconds() looks at the second card from here on
+    check("a tone sent to the second card is played there", seconds(1500) >= 0.5, f"({seconds(1500):.2f} s of 1500 Hz)")
+    there = seconds(2000)
+    check("a playing stream moves to the second card", there >= 0.7, f"({there:.2f} s of 2000 Hz)")
+    check("nothing meant for the first card is on the second",
+          seconds(440, share=0.2) == 0 and seconds(3500, share=0.2) == 0,
+          f"({seconds(440, share=0.2):.2f} s of 440 Hz, {seconds(3500, share=0.2):.2f} s of 3500 Hz)")
+    windows = first
+    check("the tone for the second card is not on the first", seconds(1500, share=0.2) == 0,
+          f"({seconds(1500, share=0.2):.2f} s of 1500 Hz)")
+    here = seconds(2000)
+    check("the moved stream began on the first card", 0.3 <= here <= 2.0, f"({here:.2f} s of 2000 Hz)")
     return failures
 
 
@@ -766,9 +806,9 @@ def gpu_steps(console, qmp, timeout):
 def main():
     args = sys.argv[1:]
     timeout = 90.0
-    qmp_path = wav_path = None
+    qmp_path = wav_path = wav2_path = None
     gpu = False
-    while args[:1] in (["--timeout"], ["--qmp"], ["--wav"], ["--gpu"]):
+    while args[:1] in (["--timeout"], ["--qmp"], ["--wav"], ["--wav2"], ["--gpu"]):
         if args[0] == "--gpu":
             gpu = True
             args = args[1:]
@@ -777,6 +817,8 @@ def main():
             timeout = float(args[1])
         elif args[0] == "--wav":
             wav_path = args[1]
+        elif args[0] == "--wav2":
+            wav2_path = args[1]
         else:
             qmp_path = args[1]
         args = args[2:]
@@ -796,6 +838,8 @@ def main():
             steps += intel_nic_steps(ports[0])
     if not gpu and "intel-hda" in " ".join(args):
         steps += audio_steps()
+        if wav2_path:
+            steps += output_steps()
     if not gpu and "nvme" in " ".join(args):
         steps += disk_steps()
     if not gpu:
@@ -866,7 +910,7 @@ def main():
         print("shell test: FAIL  QEMU did not exit after poweroff")
         console.process.kill()
     if wav_path:
-        failures += check_sound(wav_path)
+        failures += check_sound(wav_path, wav2_path)
     log.close()
     print(f"shell test: {'PASSED' if failures == 0 else f'{failures} FAILED'} (log: {log_path})")
     return 0 if failures == 0 else 1

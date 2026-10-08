@@ -40,7 +40,12 @@
 #define AUDIO_DRAIN      4 /* the reply comes when everything written has been played */
 #define AUDIO_GET_MASTER 5 /* reply: a = percent, b = muted */
 #define AUDIO_SET_MASTER 6 /* a = percent, b = muted; reply as AUDIO_GET_MASTER */
-#define AUDIO_GET_INFO   7 /* reply: a = device rate, b = device channels, c = streams, d = underruns, name */
+#define AUDIO_GET_INFO   7 /* reply: a = device rate, b = device channels, c = streams, d = underruns, name
+                              (of the output device) */
+#define AUDIO_GET_DEVICE 8 /* a = number of a sound device; reply: a = what it can do (AUDIO_PLAYBACK | AUDIO_CAPTURE),
+                              b = 1 if the sound goes out there, c = 1 if recordings come from there, name;
+                              NOT_FOUND past the last */
+#define AUDIO_SET_OUTPUT 9 /* a = number of the device the sound is to go out on; streams that play move along */
 
 typedef struct {
     uint32_t type;
