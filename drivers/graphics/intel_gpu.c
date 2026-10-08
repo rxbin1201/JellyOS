@@ -66,9 +66,10 @@
  * QEMU has no such device: this driver can only be tested on real hardware.
  *
  * The other half of the GPU, the engines that execute commands, is
- * intel_gt.c: started from here once the screen is ours, with the registers
- * and room in the graphics address space lent to it. Nothing draws with it
- * yet.
+ * intel_gt.c: started from here once the screen is ours, with the registers,
+ * room in the graphics address space and the interrupt lent to it. Nothing
+ * draws with it yet: it is tried out at every start, and its speed is in
+ * the log.
  *
  * Not yet: changing the display clock (CDCLK), several screens at once,
  * the embedded panel of a notebook (port A), any kind of acceleration.
@@ -129,6 +130,7 @@
 #define CUR_BUF_CFG(p)        (0x7017C + PIPE_OFF(p))
 #define PLANE_SURFLIVE(p)     (0x701AC + PIPE_OFF(p)) /* the surface actually on the screen */
 #define MASTER_IRQ            0x44200                 /* bit 31: interrupts on; bits 16-18: pipe A-C has something */
+#define MASTER_IRQ_ENGINES    0x3u                    /* bits 0, 1: the render engine, the blitter (intel_gt.c) */
 #define DE_PIPE_IMR(p)        (0x44404 + 0x10u * (uint32_t)(p))
 #define DE_PIPE_IIR(p)        (0x44408 + 0x10u * (uint32_t)(p))
 #define DE_PIPE_IER(p)        (0x4440C + 0x10u * (uint32_t)(p))
@@ -277,6 +279,8 @@ typedef struct {
     bool              off;                     /* the screen is switched off: the port sends nothing */
     intel_gt_t       *gt;                      /* the engines that execute commands (intel_gt.c), NULL if not up */
     uint32_t          gt_next;                 /* the next free entry of their part of the graphics address space */
+    uint64_t          gt_surfaces[2];          /* the framebuffers in the address space the engines draw in */
+    bool              msi;                     /* the interrupt handler is installed */
     uint32_t          cdclk_khz;
     uint16_t          device_id;
 
@@ -1099,6 +1103,8 @@ static void igpu_interrupt(void *context)
 
     /* As i915 does it: master bit off, read and acknowledge the cause, master bit on. */
     wr(g, MASTER_IRQ, 0);
+    if ((master & MASTER_IRQ_ENGINES) && g->gt)
+        intel_gt_interrupt(g->gt);
     if (master & (1u << (16 + g->pipe))) {
         uint32_t cause = rd(g, DE_PIPE_IIR(g->pipe));
         if (cause & PIPE_VBLANK) {
@@ -1931,6 +1937,8 @@ static void hotplug_thread(void *argument)
 
 /* --- Taking the screen over -------------------------------------------------------------- */
 
+static void engines_start(igpu_t *g);
+
 /* Switch to timing t with the driver's own framebuffers. True on success; on failure the firmware's mode is back. */
 static bool takeover(igpu_t *g, const timing_t *t)
 {
@@ -2008,6 +2016,7 @@ static bool takeover(igpu_t *g, const timing_t *t)
 
     /* What else the hardware can do for the display server; each part on its own. */
     if (vblank_setup(g)) {
+        g->msi = true;
         igpu_ops.wait_vblank = igpu_wait_vblank;
         g->surfaces[1] = graphics_memory_alloc(g, g->capacity, base + pages, &g->framebuffers[1]);
         if (g->surfaces[1])
@@ -2017,6 +2026,7 @@ static bool takeover(igpu_t *g, const timing_t *t)
         igpu_ops.cursor_image = igpu_cursor_image;
         igpu_ops.cursor_move = igpu_cursor_move;
     }
+    engines_start(g);
     igpu_ops.set_mode = igpu_set_mode;
     igpu_ops.panic = igpu_panic;
     igpu_ops.power = igpu_power;
@@ -2051,13 +2061,121 @@ static uint32_t gt_memory(void *context, uint32_t pages, uint64_t *phys)
     return address;
 }
 
+static void flush_lines(const void *start, size_t bytes)
+{
+    for (size_t offset = 0; offset < bytes; offset += 64)
+        __asm__ volatile("clflush (%0)" : : "r"((const uint8_t *)start + offset) : "memory");
+    __asm__ volatile("mfence" : : : "memory");
+}
+
 /*
- * The GPU's engines (intel_gt.c): woken and tried out. What they could do is not used yet; that they run is in
- * the log. "igpugt=off" leaves them alone.
+ * Does the blitter draw what it is told? In the second framebuffer, which nothing shows yet, taken as a surface
+ * 256 pixels wide: a pattern written by the CPU, a rectangle filled and a piece of the pattern copied by the
+ * blitter, and every pixel of the three areas compared with what should be there, the untouched ones around
+ * them included. Then, for the log, how fast it is.
+ */
+static bool blitter_draws(igpu_t *g)
+{
+    enum { WIDTH = 256, ROWS = 192, PITCH = WIDTH * 4 };
+    const uint32_t color = 0x00C0FFEE;
+    uint32_t *pixels = phys_to_virt(g->framebuffers[1]);
+    uint64_t surface = g->gt_surfaces[1];
+    intel_blit_t list[2] = {
+        { .copy = false, .to = surface, .to_pitch = PITCH, .x = 16, .y = 72, .width = 32, .height = 16, .color = color },
+        { .copy = true, .to = surface, .to_pitch = PITCH, .x = 64, .y = 128, .width = 128, .height = 32,
+          .from = surface, .from_pitch = PITCH, .from_x = 8, .from_y = 4 },
+    };
+    uint32_t wrong = 0, first_at = 0, first_is = 0, first_want = 0;
+
+    /* Rows 0-63: the pattern; the rest empty. */
+    for (uint32_t y = 0; y < ROWS; y++) {
+        for (uint32_t x = 0; x < WIDTH; x++)
+            pixels[y * WIDTH + x] = y < 64 ? 0xFF000000 | x << 8 | y : 0;
+    }
+    flush_lines(pixels, ROWS * PITCH);
+    if (STATUS_IS_ERROR(intel_gt_blit(g->gt, list, 2)))
+        return false;
+    flush_lines(pixels, ROWS * PITCH); /* (what the blitter wrote is in memory, not in the CPU's caches) */
+    for (uint32_t y = 0; y < ROWS; y++) {
+        for (uint32_t x = 0; x < WIDTH; x++) {
+            uint32_t want = y < 64 ? 0xFF000000 | x << 8 | y : 0;
+            if (x >= 16 && x < 48 && y >= 72 && y < 88)
+                want = color;
+            if (x >= 64 && x < 192 && y >= 128 && y < 160)
+                want = 0xFF000000 | (x - 64 + 8) << 8 | (y - 128 + 4);
+            if (pixels[y * WIDTH + x] != want && !wrong++) {
+                first_at = y << 16 | x;
+                first_is = pixels[y * WIDTH + x];
+                first_want = want;
+            }
+        }
+    }
+    memset(pixels, 0, ROWS * PITCH);
+    flush_lines(pixels, ROWS * PITCH);
+    if (wrong) {
+        klog_warn("igpu: the blitter draws wrongly: %u pixels, the first at %u,%u is 0x%x, not 0x%x: not used", wrong,
+                  first_at & 0xFFFF, first_at >> 16, first_is, first_want);
+        return false;
+    }
+
+    /*
+     * How fast it is, for the log, on the second framebuffer (which is emptied again afterwards). Three things
+     * that differ in what memory is read: nothing (a fill), a framebuffer, and ordinary memory. A framebuffer is
+     * entered into the engines' address space as "not cached", because the display engine reads it past the
+     * caches; ordinary memory is cached.
+     */
+    display_t *d = display_get(0);
+    uint32_t width = d->info.width, height = d->info.height, pitch = d->info.pitch;
+    uint64_t screen_bytes = (uint64_t)width * height * 4, start, fill_ms, screen_ms, memory_ms = 0, memory_bytes = 0;
+    intel_blit_t fills[4], copies[16];
+    bool ok = true;
+
+    for (uint32_t i = 0; i < 4; i++)
+        fills[i] = (intel_blit_t){ .to = surface, .to_pitch = pitch, .width = width, .height = height, .color = i };
+    start = clock_monotonic_ns();
+    ok = !STATUS_IS_ERROR(intel_gt_blit(g->gt, fills, 4));
+    fill_ms = (clock_monotonic_ns() - start) / 1000000;
+
+    intel_blit_t screen = { .copy = true, .to = surface, .to_pitch = pitch, .width = width, .height = height,
+                            .from = g->gt_surfaces[0], .from_pitch = pitch };
+    start = clock_monotonic_ns();
+    ok = ok && !STATUS_IS_ERROR(intel_gt_blit(g->gt, &screen, 1));
+    screen_ms = (clock_monotonic_ns() - start) / 1000000;
+
+    /* 4 MiB of ordinary memory as a picture of 1024x1024, copied sixteen times. */
+    uint64_t memory_phys;
+    if (ok && width >= 1024 + 64 && height >= 1024 + 128 && !STATUS_IS_ERROR(pmm_alloc_pages(1024, &memory_phys))) {
+        uint64_t memory = intel_gt_map(g->gt, memory_phys, 1024, false);
+        memset(phys_to_virt(memory_phys), 0x55, 1024 * PAGE_SIZE);
+        for (uint32_t i = 0; i < 16; i++)
+            copies[i] = (intel_blit_t){ .copy = true, .to = surface, .to_pitch = pitch, .x = (i % 2) * 64, .y = (i % 3) * 64,
+                                        .width = 1024, .height = 1024, .from = memory, .from_pitch = 4096 };
+        if (memory) {
+            start = clock_monotonic_ns();
+            ok = !STATUS_IS_ERROR(intel_gt_blit(g->gt, copies, 16));
+            memory_ms = (clock_monotonic_ns() - start) / 1000000;
+            memory_bytes = 16ull * 1024 * 1024 * 4;
+            intel_gt_unmap(g->gt, memory, 1024);
+        }
+        pmm_free_pages(memory_phys, 1024);
+    }
+    memset(pixels, 0, (size_t)pitch * height);
+    flush_lines(pixels, (size_t)pitch * height);
+    klog_info("igpu: the blitter fills and copies rectangles correctly%s", ok ? "" : " (but a larger one failed)");
+    klog_info("igpu: the blitter's speed at %u MHz: filling %lu MB/s, from a framebuffer %lu MB/s (the whole screen in "
+              "%lu ms), from ordinary memory %lu MB/s", intel_gt_clock_mhz(g->gt),
+              4 * screen_bytes / 1000 / (fill_ms ? fill_ms : 1), screen_bytes / 1000 / (screen_ms ? screen_ms : 1), screen_ms,
+              memory_bytes / 1000 / (memory_ms ? memory_ms : 1));
+    return ok;
+}
+
+/*
+ * The GPU's engines (intel_gt.c): woken and tried out, the framebuffers entered into the address space they
+ * draw in, and the blitter tried on them. Nothing draws with them yet. "igpugt=off" leaves the engines alone.
  */
 static void engines_start(igpu_t *g)
 {
-    intel_gt_host_t host = { .regs = g->regs, .context = g, .alloc = gt_memory };
+    intel_gt_host_t host = { .regs = g->regs, .context = g, .alloc = gt_memory, .interrupts = g->msi };
     char option[8];
 
     if (cmdline_value("igpugt", option, sizeof(option)) && strcmp(option, "off") == 0) {
@@ -2067,9 +2185,19 @@ static void engines_start(igpu_t *g)
     g->gt_next = g->ggtt_entries / 2;
     if (STATUS_IS_ERROR(intel_gt_start(&host, &g->gt)))
         return;
-    klog_info("igpu: the GPU executes commands: render engine %s, blitter %s (not used for drawing yet)",
+    klog_info("igpu: the GPU executes commands: render engine %s, blitter %s",
               intel_gt_engine_works(g->gt, INTEL_ENGINE_RENDER) ? "yes" : "no",
               intel_gt_engine_works(g->gt, INTEL_ENGINE_BLITTER) ? "yes" : "no");
+    if (!intel_gt_engine_works(g->gt, INTEL_ENGINE_BLITTER) || !g->surfaces[1])
+        return; /* (the blitter is tried on the second framebuffer) */
+    uint32_t pages = (uint32_t)(g->capacity / PAGE_SIZE);
+    g->gt_surfaces[0] = intel_gt_map(g->gt, g->framebuffers[0], pages, true);
+    g->gt_surfaces[1] = intel_gt_map(g->gt, g->framebuffers[1], pages, true);
+    if (!g->gt_surfaces[0] || !g->gt_surfaces[1]) {
+        klog_warn("igpu: no room for the framebuffers in the engines' address space: the blitter is not tried");
+        return;
+    }
+    blitter_draws(g);
 }
 
 /* "igpu=native" or "igpu=WIDTHxHEIGHT[@HZ]": the mode to switch to, NULL if there is none. */
@@ -2190,8 +2318,7 @@ static status_t igpu_probe(device_t *device)
     if (!wanted)
         return STATUS_SUCCESS;
     /* Also if the screen already shows this mode: the driver's own framebuffers are what the extras build on. */
-    if (takeover(g, wanted))
-        engines_start(g);
+    takeover(g, wanted);
 
     /*
      * "igpulink=162000" (or 270000): the link slower than the firmware trained it, if the mode on the screen fits.

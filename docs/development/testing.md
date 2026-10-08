@@ -294,8 +294,8 @@ side of the card, so they show what the driver presented:
 
 Not covered by any automated test, because QEMU has no such device: the
 Intel and AMD drivers' mode switching, DisplayPort link training, hot
-plug and switching the screen off and on, the engines of the Intel GPU
-(they try themselves out at every start: `dmesg igpu`), and the sound of a monitor on AMD and Intel graphics (by hand: `volume output
+plug and switching the screen off and on, the engines of the Intel GPU and its blitter
+(they try themselves out at every start, the blitter pixel by pixel: `dmesg igpu`), and the sound of a monitor on AMD and Intel graphics (by hand: `volume output
 N` for "Monitor sound", then `tone -f 440 -d 3000`). Of the VirtIO GPU driver, a change of the host's window is not
 covered (the tests run without one).
 
