@@ -45,6 +45,8 @@ driver; everything is drawn in software.
   write-combining with `SYS_SHM_MAP`. A display has one owner at a time.
   While it is owned, the console stops drawing. When the owner closes the
   handle and unmaps, or exits, the console takes over and repaints.
+- A **kernel panic** takes the screen back without asking: see "Panic"
+  below.
 
 ### Display driver interface
 
@@ -60,6 +62,7 @@ typedef struct display_ops {
     status_t (*wait_vblank)(display_t *, uint64_t timeout_ns);
     status_t (*flip)(display_t *, uint32_t buffer);                /* show framebuffer 0 or 1 */
     status_t (*set_mode)(display_t *, uint32_t mode, uint32_t *pitch); /* entry of the driver's list */
+    void     (*panic)(display_t *);                                 /* framebuffer 0 on the monitor, now */
 } display_ops_t;
 
 status_t display_set_framebuffer(index, phys, size, width, height, pitch);   /* the driver's own memory */
@@ -93,6 +96,40 @@ where it is, and a display server keeps its mapping. `display_set_mode()`
 
 The same event is signaled when the driver gives a new list of modes
 (another monitor) or reports the monitor gone or back.
+
+**Panic.** A kernel panic must be readable on the screen also while a
+desktop is on it; a frozen picture says nothing. The panic path
+(`kernel/core/panic.c`) knows the display layer only as two functions
+registered with `panic_set_screen()`:
+
+1. *Before the text*, `display_panic_prepare()`: the console checks that its
+   text grid fits the screen as it is now. If the mode changed while the
+   display server had the screen, the grid is laid out again in the memory
+   it has (a panic allocates nothing) and filled from the log. Nothing is
+   drawn yet.
+2. The panic is written. Every line goes to the serial port at once and,
+   like all console output, into the console's grid.
+3. *After the text*, `display_panic_show()`: the console draws its grid
+   into framebuffer 0, and the driver's `panic` operation makes that
+   framebuffer what the monitor shows, without the pointer.
+
+The screen comes last on purpose: nothing on the way to it can cost the
+report on the serial port, and a fault in there is a nested panic, which
+the panic path answers by leaving the screen alone.
+
+`panic` is the one operation that runs with interrupts off, for the last
+time and perhaps in the middle of another one. It takes no locks (whoever
+holds one will never run again) and does not sleep:
+
+| Driver | `panic` |
+| --- | --- |
+| `intel-gpu`, `amd-gpu` | Two register writes: the plane back to the first framebuffer, the cursor plane off |
+| `virtio-gpu` | One more frame from the first framebuffer. The thread that presents frames is gone and so are interrupts: a command that was still with the device is waited for by polling, then the frame is sent the same way |
+| `bochs-gpu`, plain framebuffer | None needed: the screen shows the one framebuffer as it is |
+
+`echo panic > /dev/crash` (with `crashtest=device` on the kernel command
+line, which is what makes the file exist; every user may write to it then; [`drivers/console/crash.c`](../../drivers/console/crash.c))
+makes the kernel panic on request, to see this on a running system.
 
 **A driver for another GPU family is one file**: find the device, set a
 mode, call `display_set_framebuffer()`, fill in the operations its hardware
@@ -556,8 +593,6 @@ preferred one) or "monitor disconnected". The mode on the screen stays.
 
 Limits:
 
-- A kernel panic stops interrupts and with them the frame thread: its text
-  reaches the serial port, not the VirtIO screen.
 - No 3D (virgl), one scanout, and no card without the VGA side
   (`virtio-gpu-pci`): there the firmware gives no boot framebuffer to take
   over.

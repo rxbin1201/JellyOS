@@ -10,6 +10,7 @@
 #include "core/boot.h"
 #include "core/cmdline.h"
 #include "core/log.h"
+#include "core/panic.h"
 #include "core/string.h"
 #include "ipc/ipc.h"
 #include "memory/layout.h"
@@ -82,6 +83,7 @@ void display_init_boot_framebuffer(void)
     d->current_mode = DISPLAY_NO_MODE;
     mutex_init(&d->lock);
     count++;
+    panic_set_screen(display_panic_prepare, display_panic_show);
     klog_info("display: %ux%u framebuffer at 0x%lx (GOP, pitch %u)", fb->width, fb->height, fb->phys_base, fb->pitch);
 
     /* fbconsole=0 keeps the console on the serial port only. */
@@ -374,6 +376,25 @@ status_t display_watch(uint32_t index, object_t **event)
     }
     mutex_unlock(&d->lock);
     return status;
+}
+
+/* --- Panic ---------------------------------------------------------------------------- */
+
+void display_panic_prepare(void)
+{
+    fb_console_panic_prepare();
+}
+
+void display_panic_show(void)
+{
+    display_t *d = display_get(0);
+
+    if (!d)
+        return;
+    /* The console's text into framebuffer 0, then the driver's part: that framebuffer onto the monitor. */
+    fb_console_panic_show();
+    if (d->ops && d->ops->panic)
+        d->ops->panic(d);
 }
 
 /* --- Ownership ------------------------------------------------------------------------ */

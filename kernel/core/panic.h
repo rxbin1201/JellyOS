@@ -15,6 +15,13 @@ void panic(const char *fmt, ...);
 __attribute__((noreturn))
 void panic_with_frame(const struct arch_interrupt_frame *frame, const char *reason);
 
+/*
+ * Whoever has the screen (the display layer) says how a panic gets onto it: `prepare` runs before the panic's
+ * text is written, `show` after all of it has gone to the serial port. Both run with interrupts off on a
+ * kernel that is about to halt: no locks, no sleeping, no memory allocation.
+ */
+void panic_set_screen(void (*prepare)(void), void (*show)(void));
+
 #define ASSERT(cond)                                                                 \
     do {                                                                             \
         if (!(cond))                                                                 \

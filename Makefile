@@ -505,7 +505,7 @@ test: unit all $(TEST_MODULES) $(INITRAMFS)
 	@cp $(INITRAMFS) $(SHELL_TEST_ESP)/boot/initrd/current.img
 	@printf '[boot]\ntimeout=0\nmenu=hidden\nresolution=keep\nfallback_kernel=\n[entry Shell]\nkernel=/boot/kernels/kernel-current.elf\n' \
 	    > $(SHELL_TEST_ESP)/boot/boot.cfg
-	@printf 'initrd=/boot/initrd/current.img\ncmdline="loglevel=info disks=rw"\n' >> $(SHELL_TEST_ESP)/boot/boot.cfg
+	@printf 'initrd=/boot/initrd/current.img\ncmdline="loglevel=info disks=rw crashtest=device"\n' >> $(SHELL_TEST_ESP)/boot/boot.cfg
 	@cp $(OVMF_VARS) $(SHELL_TEST_VARS)
 	@rm -f $(BUILD)/qmp.sock $(AUDIO_TEST_WAV)
 	@python3 tests/integration/shell_test.py --timeout $(TEST_TIMEOUT) --qmp $(BUILD)/qmp.sock \

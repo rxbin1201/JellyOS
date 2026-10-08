@@ -349,8 +349,15 @@ static struct {
     uint32_t             pitch[3];
     uint32_t             shown;
     int                  calls;
+    int                  panics;
     bool                 fails;
 } fake_modes;
+
+static void fake_panic(display_t *display)
+{
+    (void)display;
+    fake_modes.panics++;
+}
 
 static status_t fake_set_mode(display_t *display, uint32_t mode, uint32_t *pitch)
 {
@@ -371,7 +378,7 @@ static bool event_is_signaled(object_t *event)
 
 KTEST(display_modes_can_be_switched)
 {
-    static const display_ops_t ops = { .set_mode = fake_set_mode };
+    static const display_ops_t ops = { .set_mode = fake_set_mode, .panic = fake_panic };
     display_t *d = display_get(0);
     jelly_display_mode_t modes[4];
     object_t *event, *memory;
@@ -436,6 +443,26 @@ KTEST(display_modes_can_be_switched)
     KASSERT(display_set_mode(0, 2) == STATUS_SUCCESS);
     KEXPECT(d->info.width == 320 && d->info.height == 240 && d->info.size == size && d->console_stale);
     KEXPECT(event_is_signaled(event));
+
+    /*
+     * A panic now: the display server has the screen, and the console's text grid is still the one of the mode
+     * before. The console lays itself out for the screen as it is and draws, and the driver is told to show it.
+     * (The functions are those the panic path calls; here the kernel goes on afterwards.)
+     */
+    const uint32_t marker = 0x00123456;
+    uint32_t stride = d->info.pitch / 4, corner = 239 * stride + 319, below = 240 * stride;
+    uint32_t below_before = d->pixels[below];
+    d->pixels[0] = marker;
+    d->pixels[corner] = marker;
+    fake_modes.panics = 0;
+    display_panic_prepare();
+    KEXPECT(d->pixels[corner] == marker && fake_modes.panics == 0); /* nothing on the screen yet */
+    klog_raw("ktest: a line as a panic writes it\n");
+    display_panic_show();
+    KEXPECT(fake_modes.panics == 1);
+    KEXPECT(d->pixels[0] != marker && d->pixels[corner] != marker); /* the console drew over the whole 320x240 */
+    KEXPECT(d->pixels[below] == below_before);                      /* and not as for the 640x480 before */
+    fb_console_set_active(false); /* the display server's again */
     object_release(memory);
     KEXPECT(!d->console_stale && !d->acquired);
 

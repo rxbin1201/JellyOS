@@ -25,6 +25,10 @@
  * JELLY_DISPLAY_* flags of the display, and the display server falls back
  * to software for the rest (system calls 76-82).
  *
+ * A kernel panic takes the screen back from a display server: the console
+ * draws into framebuffer 0, and the driver's `panic` operation makes that
+ * what the monitor shows.
+ *
  * Modes change while the display is in use, also while a display server
  * owns it. The framebuffer memory therefore never moves: a driver that can
  * switch modes allocates framebuffers large enough for every mode once, and
@@ -66,6 +70,13 @@ typedef struct {
      * come up, the driver puts the previous one back and returns an error.
      */
     status_t (*set_mode)(struct display *display, uint32_t mode, uint32_t *pitch);
+    /*
+     * The kernel has panicked and its last words are in framebuffer 0: put that on the screen, without the
+     * pointer, now. Unlike everything above this runs with interrupts off and for the last time, perhaps in the
+     * middle of another operation: no locks (whoever holds one will never run again), no sleeping, only
+     * polling. A driver whose screen always shows framebuffer 0 as it is needs none.
+     */
+    void     (*panic)(struct display *display);
 } display_ops_t;
 
 typedef struct display {
@@ -132,6 +143,13 @@ status_t   display_set_mode(uint32_t index, uint32_t mode);
 /* The display's event (a new reference): signaled after every change; the watcher resets it. */
 status_t   display_watch(uint32_t index, object_t **event);
 
+/*
+ * A kernel panic gets onto display 0 whoever owns it (registered with panic_set_screen()): prepare before its
+ * text is written, show afterwards. Interrupts off.
+ */
+void       display_panic_prepare(void);
+void       display_panic_show(void);
+
 /* Give the framebuffer to a display server: a memory object to map (shared memory handle). */
 status_t   display_acquire(uint32_t index, object_t **memory);
 
@@ -152,5 +170,8 @@ void       fb_console_init(display_t *display);
 void       fb_console_resize(display_t *display);
 /* The display was acquired (false) or released (true): stop or resume drawing. */
 void       fb_console_set_active(bool active);
+/* A panic: the text grid fits the screen as it is now (nothing is drawn); then the grid is drawn, whoever owns the screen. */
+void       fb_console_panic_prepare(void);
+void       fb_console_panic_show(void);
 
 #endif

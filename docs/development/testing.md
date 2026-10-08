@@ -213,6 +213,12 @@ again and the pointer hidden when the display server goes away. In QEMU the
 display server has no vertical blank or second framebuffer, so every GUI
 step of the integration test covers the software path of `display_commit()`.
 
+The test for modes (next) also calls what a panic calls for the screen
+(`display_panic_prepare()`, `display_panic_show()`) while a display server
+owns the display and after the mode changed under it: the console draws
+over the whole new screen and not beyond it, and the driver's `panic`
+operation is called once.
+
 `display_modes_can_be_switched` does the same for modes: a list from a
 driver made for the test, switching (geometry, refresh rate, the mode
 marked as current), the event for watchers, a mode that does not come up, a
@@ -245,6 +251,11 @@ side of the card, so they show what the driver presented:
   each the host's picture has the new size and the taskbar is at its
   bottom edge
 - no command to the card failed
+- a kernel panic while the desktop is on the screen
+  (`echo panic > /dev/crash`, typed into the terminal window as the user,
+  in a mode other than the one the system started in): the screenshot afterwards has only the two colours of the
+  kernel console, with a report of several lines. The panic ends this run;
+  the script stops QEMU
 
 Not covered by any automated test, because QEMU has no such device: the
 Intel and AMD drivers' mode switching, DisplayPort link training and hot
@@ -382,6 +393,7 @@ initialization, to check exception handling and panic output:
 | `stack-overflow` | Panic: double fault, kernel stack overflow (guard page hit) |
 | `breakpoint` | Logged, execution continues |
 | `panic` / `assert` | Panic with message / failed assertion |
+| `device` | No fault at the start. Instead `/dev/crash` exists: `echo panic > /dev/crash` (or `assert`) panics a running system. Every user may write to it: the option is the permission |
 
 ## AtomBIOS interpreter
 

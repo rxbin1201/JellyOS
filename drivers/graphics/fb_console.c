@@ -9,6 +9,10 @@
  *
  * While a display server owns display 0 the console only updates the
  * shadow grid; when the display is released, the screen is repainted.
+ *
+ * A kernel panic does not wait for that: its text goes into the shadow grid
+ * like everything else, and then the grid is drawn, whoever owns the screen
+ * (fb_console_panic_prepare() and fb_console_panic_show()).
  */
 
 #include "drivers/graphics/display.h"
@@ -21,6 +25,7 @@
 
 static display_t *display;
 static uint8_t *cells;        /* rows * columns Latin-1 characters */
+static uint32_t capacity;     /* characters `cells` has room for */
 static uint32_t columns, rows;
 static uint32_t cursor_x, cursor_y;
 static bool active;
@@ -182,6 +187,7 @@ void fb_console_resize(display_t *d)
     uint64_t flags = arch_interrupts_save();
     old = cells;
     cells = new_cells;
+    capacity = new_columns * new_rows;
     columns = new_columns;
     rows = new_rows;
     cursor_x = cursor_y = 0;
@@ -192,11 +198,55 @@ void fb_console_resize(display_t *d)
     klog_replay(console_write); /* fill the new screen with what was logged so far */
 }
 
+/*
+ * A panic is about to be written. If the mode changed while a display server had the screen, the grid is
+ * still laid out for the old size: it is laid out again for the screen as it is, in the memory that is there
+ * (a panic allocates nothing; a grid that would need more gets fewer rows), and filled from the log. Nothing
+ * is drawn.
+ */
+void fb_console_panic_prepare(void)
+{
+    if (!display || !cells)
+        return;
+    uint32_t new_columns = display->info.width / FONT_WIDTH, new_rows = display->info.height / FONT_HEIGHT;
+
+    if (new_columns == columns && new_rows == rows)
+        return;
+    if (new_columns && new_rows > capacity / new_columns)
+        new_rows = capacity / new_columns;
+    if (!new_columns || !new_rows)
+        return; /* (the grid stays as it is; fb_console_panic_show() does not draw one that does not fit) */
+    uint64_t flags = arch_interrupts_save();
+    bool was_active = active;
+    active = false;
+    columns = new_columns;
+    rows = new_rows;
+    cursor_x = cursor_y = 0;
+    escape_state = PLAIN;
+    utf8_remaining = 0;
+    memset(cells, ' ', columns * rows);
+    klog_replay(console_write);
+    active = was_active;
+    arch_interrupts_restore(flags);
+}
+
+/* The panic's text is in the grid: onto the screen with it. */
+void fb_console_panic_show(void)
+{
+    if (!display || !cells || columns > display->info.width / FONT_WIDTH || rows > display->info.height / FONT_HEIGHT)
+        return;
+    uint64_t flags = arch_interrupts_save();
+    active = true;
+    redraw();
+    arch_interrupts_restore(flags);
+}
+
 void fb_console_init(display_t *d)
 {
     columns = d->info.width / FONT_WIDTH;
     rows = d->info.height / FONT_HEIGHT;
     cells = kmalloc(columns * rows);
+    capacity = columns * rows;
     if (!cells || !columns || !rows)
         return;
     memset(cells, ' ', columns * rows);

@@ -682,6 +682,19 @@ static void amdgpu_cursor_move(display_t *display, int32_t x, int32_t y, bool vi
         wr(g, DPP_CURSOR_CONTROL(g->hubp), visible ? mixer | 1u : mixer & ~1u);
 }
 
+static display_ops_t amdgpu_ops;
+
+/* A panic: the first framebuffer, where the console draws, without the pointer. Register writes only. */
+static void amdgpu_panic(display_t *display)
+{
+    amdgpu_t *g = amdgpu_of(display);
+
+    if (amdgpu_ops.flip)
+        surface_show(g, g->framebuffers[0]);
+    if (amdgpu_ops.cursor_move)
+        amdgpu_cursor_move(display, 0, 0, false);
+}
+
 /* --- The video BIOS and its programs ----------------------------------------------------- */
 
 static void log_connectors(amdgpu_t *g);
@@ -1983,6 +1996,7 @@ static status_t amdgpu_probe(device_t *device)
         klog_info("amdgpu: the mode cannot be switched here (%s)",
                   g->displayport ? "the link or the pixel clock is not known"
                                  : "HDMI: the pixel clock on the screen or the video BIOS's table for it is not known");
+    amdgpu_ops.panic = amdgpu_panic;
     status = display_set_driver(0, &amdgpu_ops, g, amdgpu_ops.flip ? g->aperture + g->framebuffers[1] : 0);
     if (!STATUS_IS_ERROR(status))
         publish_modes(g, d, switchable, true);

@@ -103,8 +103,8 @@ static void run_crash_test(void)
 {
     char kind[32];
 
-    if (!cmdline_value("crashtest", kind, sizeof(kind)))
-        return;
+    if (!cmdline_value("crashtest", kind, sizeof(kind)) || strcmp(kind, "device") == 0)
+        return; /* ("device": no fault now, but /dev/crash for one later, drivers/console/crash.c) */
 
     klog_warn("crashtest: triggering '%s'", kind);
     if (strcmp(kind, "panic") == 0)

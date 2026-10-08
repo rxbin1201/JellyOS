@@ -24,7 +24,9 @@ two programs were mixed.
 
 With --gpu (and --qmp; QEMU started with -vga none -device virtio-vga) only
 the steps for the VirtIO GPU driver run: that the host shows the guest's
-frames, the card's own pointer, and modes.
+frames, the card's own pointer, and modes. They end with a kernel panic
+(echo panic > /dev/crash; the kernel needs crashtest=device) that must be on
+the screen in place of the desktop; QEMU is stopped by the script then.
 Exit status 0 means every check passed.
 """
 
@@ -360,7 +362,7 @@ class Qmp:
 
     # Physical keys for characters with the German layout displayd uses (keymap=de).
     KEYS = {" ": ("spc", False), "/": ("7", True), ".": ("dot", False), "-": ("slash", False),
-            "\n": ("ret", False), "y": ("z", False), "z": ("y", False)}
+            "\n": ("ret", False), "y": ("z", False), "z": ("y", False), ">": ("less", True)}
 
     def __init__(self, path):
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -457,6 +459,7 @@ def cascade(n):
 
 DEMO_X, DEMO_Y = cascade(1)          # guidemo's content area
 TITLE_FOCUSED, TITLE_UNFOCUSED = 0x7C3AED, 0x3B3B4F
+CONSOLE_TEXT, CONSOLE_BACKGROUND = 0xD8DEE9, 0x141A26  # the kernel's framebuffer console
 DARK_BACKGROUND = 0x1B1A26
 LAUNCHER = (50, 780)                 # the JellyOS button in the taskbar
 MENU = {"Files": 534, "GUI demo": 562, "Gamepad": 590, "Settings": 618, "Terminal": 646, "Log out": 683}
@@ -732,6 +735,31 @@ def gpu_steps(console, qmp, timeout):
     console.send("")
     console.read_until(PROMPT, timeout)
     driver_log("no command of the driver failed")
+
+    # --- A kernel panic while the desktop has the screen: the console takes it back for the last words.
+    #     (The display server flips between two framebuffers and uses the card's pointer; the kernel's
+    #     thread that presents frames no longer runs.)
+    #     The mode is not the one the console's text grid was laid out for, either.
+    console.send("display 1024x768")
+    screen_is("the mode for the panic", 1024, 768)
+    console.send("")
+    console.read_until(PROMPT, timeout)
+    shot = qmp.screenshot()
+    check("before the panic the desktop is on the screen", shot.color(512, 758) == DARK_BACKGROUND,
+          f"({shot.color(512, 758):06x})")
+    qmp.click(400, 64)  # the terminal's window: the user's shell, as at a real machine
+    qmp.type("echo panic > /dev/crash\n")
+    if expect("the kernel panics when the user asks for it", "*** system halted ***"):
+        time.sleep(1.0)
+        shot = qmp.screenshot()
+        colors = {shot.color(x, y) for x in range(3, qmp.width, 7) for y in range(3, qmp.height, 5)}
+        check("the panic is on the screen in place of the desktop",
+              (qmp.width, qmp.height) == (1024, 768) and colors == {CONSOLE_TEXT, CONSOLE_BACKGROUND},
+              f"({qmp.width}x{qmp.height}, colours: {sorted(f'{c:06x}' for c in colors)[:8]})")
+        # The report is the last thing written: text in the rows above the cursor, wherever that is.
+        rows = [y for y in range(0, qmp.height - 16, 16)
+                if any(shot.color(x, y + j) == CONSOLE_TEXT for j in range(16) for x in range(0, 400))]
+        check("with a report of several lines", len(rows) >= 8, f"({len(rows)} rows with text)")
     return failures
 
 
@@ -770,7 +798,8 @@ def main():
         steps += audio_steps()
     if not gpu and "nvme" in " ".join(args):
         steps += disk_steps()
-    steps.append(FINAL_STEP)
+    if not gpu:
+        steps.append(FINAL_STEP)  # (the GPU steps end with a kernel panic)
     console = Console(args[1:], log)
     failures = 0
 
@@ -780,7 +809,10 @@ def main():
         print("shell test: shell prompt reached")
         if qmp_path:
             qmp = Qmp(qmp_path)
-            steps.insert(len(steps) - 1, "gpu" if gpu else "gui")
+            if gpu:
+                steps.append("gpu")
+            else:
+                steps.insert(len(steps) - 1, "gui")
         for step in steps:
             if step == "gui":
                 failures += gui_steps(console, qmp, timeout)
@@ -825,8 +857,10 @@ def main():
         print(f"shell test: FAIL  timeout or QEMU exited early; last output:\n{error}")
 
     try:
+        if gpu:
+            console.process.kill()  # the kernel has halted
         console.process.wait(timeout=30)
-        print("shell test: QEMU exited after poweroff")
+        print("shell test: QEMU stopped after the panic" if gpu else "shell test: QEMU exited after poweroff")
     except subprocess.TimeoutExpired:
         failures += 1
         print("shell test: FAIL  QEMU did not exit after poweroff")

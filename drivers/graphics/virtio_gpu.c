@@ -22,6 +22,8 @@
  *                   cursor queue): no drawing in the framebuffer
  *   set_mode        a resource of the new size with the same backing; the
  *                   framebuffers do not move
+ *   panic           one last frame, sent without the thread and without
+ *                   interrupts: the device is polled for its answers
  *
  * As virtio-vga the card is also a VGA card: the firmware shows its picture
  * through that side, and the boot framebuffer is the VGA memory. With the
@@ -92,6 +94,7 @@
 #define REFRESH_MHZ             60000
 #define FRAME_NS                (1000000000ull * 1000 / REFRESH_MHZ)
 #define COMMAND_TIMEOUT_NS      2000000000ull
+#define PANIC_SPINS             20000000u /* how long a panic waits for an answer of the device */
 #define LARGEST_WIDTH           1920 /* the framebuffers hold this, or the firmware's or host's size if larger */
 #define LARGEST_HEIGHT          1080
 
@@ -166,6 +169,7 @@ typedef struct {
     mutex_t         lock;       /* one command at a time on the control queue, and everything below */
     wait_queue_t    completion; /* the control queue's interrupt */
     bool            failed;     /* a command got no answer: the queue is not used any more */
+    bool            in_flight;  /* a command is with the device */
 
     /* The screen */
     dma_buffer_t    memory;       /* the framebuffers, one after the other */
@@ -220,6 +224,7 @@ static status_t command(vgpu_t *g, uint32_t request_bytes, uint32_t response_byt
     response->type = 0;
     g->control.desc[0] = (virtq_desc_t){ g->commands.phys, request_bytes, VIRTQ_DESC_F_NEXT, 1 };
     g->control.desc[1] = (virtq_desc_t){ g->commands.phys + RESPONSE_AT, response_bytes, VIRTQ_DESC_F_WRITE, 0 };
+    g->in_flight = true;
     virtio_queue_submit(&g->control, 0);
 
     uint64_t deadline = wait_deadline(COMMAND_TIMEOUT_NS);
@@ -235,6 +240,7 @@ static status_t command(vgpu_t *g, uint32_t request_bytes, uint32_t response_byt
         return STATUS_TIMEOUT;
     }
     virtio_queue_pop_used(&g->control);
+    g->in_flight = false;
     if (response->type < RESPONSE_OK || response->type >= RESPONSE_ERROR) {
         klog_warn("virtio-gpu: command 0x%x failed (answer 0x%x)", sent->type, response->type);
         return STATUS_DEVICE_ERROR;
@@ -567,7 +573,74 @@ static void vgpu_cursor_move(display_t *display, int32_t x, int32_t y, bool visi
     mutex_unlock(&g->lock);
 }
 
-static display_ops_t vgpu_ops = { .wait_vblank = vgpu_wait_vblank, .set_mode = vgpu_set_mode };
+/* --- Panic --------------------------------------------------------------------------- */
+
+/* The device's answer without sleeping and without its interrupt. False if none comes. */
+static bool panic_answer(vgpu_t *g)
+{
+    for (uint32_t spins = 0; spins < PANIC_SPINS; spins++) {
+        if (virtio_queue_has_used(&g->control)) {
+            virtio_queue_pop_used(&g->control);
+            g->in_flight = false;
+            return true;
+        }
+        __asm__ volatile("pause");
+    }
+    g->failed = true;
+    return false;
+}
+
+static bool panic_command(vgpu_t *g, uint32_t request_bytes)
+{
+    g->control.desc[0] = (virtq_desc_t){ g->commands.phys, request_bytes, VIRTQ_DESC_F_NEXT, 1 };
+    g->control.desc[1] = (virtq_desc_t){ g->commands.phys + RESPONSE_AT, sizeof(gpu_header_t), VIRTQ_DESC_F_WRITE, 0 };
+    g->in_flight = true;
+    virtio_queue_submit(&g->control, 0);
+    return panic_answer(g);
+}
+
+/*
+ * The kernel's last words are in the first framebuffer: one more frame from there, and the pointer away. The
+ * thread that presents frames does not run any more, nor does anything else: a command that was on its way is
+ * waited for first, then the frame is sent with the device polled for its answers. The lock is not taken.
+ */
+static void vgpu_panic(display_t *display)
+{
+    vgpu_t *g = display->driver_data;
+    uint32_t id, length;
+
+    if (g->failed || !g->screen || (g->in_flight && !panic_answer(g)))
+        return;
+    g->front = 0;
+    gpu_transfer_t *copy = request(g, CMD_TRANSFER_TO_HOST_2D, sizeof(*copy));
+    copy->rect = (gpu_rect_t){ 0, 0, g->width, g->height };
+    copy->resource = g->screen;
+    if (!panic_command(g, sizeof(*copy)))
+        return;
+    gpu_flush_t *flush = request(g, CMD_RESOURCE_FLUSH, sizeof(*flush));
+    flush->rect = (gpu_rect_t){ 0, 0, g->width, g->height };
+    flush->resource = g->screen;
+    if (!panic_command(g, sizeof(*flush)))
+        return;
+
+    /* The pointer, if a place on its queue is free (nothing is waited for there). */
+    while (virtio_queue_next_used(&g->cursor, &id, &length)) {
+        if (id < CURSOR_SLOTS)
+            g->cursor_free |= 1u << id;
+    }
+    if (g->pointer_shown && g->cursor_free) {
+        uint16_t slot = (uint16_t)__builtin_ctz(g->cursor_free);
+        gpu_cursor_t *cursor = (gpu_cursor_t *)((uint8_t *)g->commands.virt + CURSOR_AT + slot * CURSOR_SLOT_BYTES);
+        memset(cursor, 0, sizeof(*cursor));
+        cursor->header.type = CMD_UPDATE_CURSOR; /* (resource 0: no pointer) */
+        g->cursor_free &= ~(1u << slot);
+        g->cursor.desc[slot] = (virtq_desc_t){ g->commands.phys + CURSOR_AT + slot * CURSOR_SLOT_BYTES, sizeof(*cursor), 0, 0 };
+        virtio_queue_submit(&g->cursor, slot);
+        g->pointer_shown = false;
+    }
+}
+
+static display_ops_t vgpu_ops = { .wait_vblank = vgpu_wait_vblank, .set_mode = vgpu_set_mode, .panic = vgpu_panic };
 
 /* --- Start --------------------------------------------------------------------------- */
 

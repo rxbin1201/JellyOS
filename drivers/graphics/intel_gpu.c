@@ -1003,6 +1003,17 @@ static void igpu_cursor_move(display_t *display, int32_t x, int32_t y, bool visi
     wr(g, CUR_BASE(g->pipe), g->cursor_surface); /* position and visibility apply at the next frame */
 }
 
+static display_ops_t igpu_ops;
+
+/* A panic: the first framebuffer, where the console draws, without the pointer. Register writes only. */
+static void igpu_panic(display_t *display)
+{
+    if (igpu_ops.flip)
+        igpu_flip(display, 0);
+    if (igpu_ops.cursor_move)
+        igpu_cursor_move(display, 0, 0, false);
+}
+
 /* The cursor plane: its image in graphics memory, its share of the display buffer and a watermark. */
 static bool cursor_setup(igpu_t *g, uint32_t first_entry)
 {
@@ -1738,6 +1749,7 @@ static bool takeover(igpu_t *g, const timing_t *t)
         igpu_ops.cursor_move = igpu_cursor_move;
     }
     igpu_ops.set_mode = igpu_set_mode;
+    igpu_ops.panic = igpu_panic;
     display_set_driver(0, &igpu_ops, g, g->surfaces[1] ? g->framebuffers[1] : 0);
     publish_modes(g);
 
